@@ -15,7 +15,7 @@ Codex·Claude Code에게 "활동지 만들어 줘"라고 말하면 **HTML 파일
 
 Codex(또는 Claude Code)에게 이렇게 말하세요.
 
-> https://github.com/BeomjinSouth/pbj-html-sheet 이 저장소를 codex 전역 스킬로 설치해 줘.
+> https://github.com/BeomjinSouth/exampractice2html 이 저장소를 codex 전역 스킬로 설치해 줘.
 
 설치가 끝나면 Codex를 새로 열고 "중1 정비례 활동지 하나 만들어 줘"처럼 요청하면 됩니다.
 
@@ -26,13 +26,13 @@ Codex(또는 Claude Code)에게 이렇게 말하세요.
    - Claude Code: `~/.claude/skills/pbj-html-sheet` (Windows: `%USERPROFILE%\.claude\skills\pbj-html-sheet`)
 
    ```bash
-   git clone https://github.com/BeomjinSouth/pbj-html-sheet ~/.codex/skills/pbj-html-sheet
+   git clone https://github.com/BeomjinSouth/exampractice2html ~/.codex/skills/pbj-html-sheet
    ```
 
    Windows PowerShell:
 
    ```powershell
-   git clone https://github.com/BeomjinSouth/pbj-html-sheet "$env:USERPROFILE\.codex\skills\pbj-html-sheet"
+   git clone https://github.com/BeomjinSouth/exampractice2html "$env:USERPROFILE\.codex\skills\pbj-html-sheet"
    ```
 
    같은 이름의 폴더가 이미 있으면 덮어쓰지 말고 사용자에게 알린다(업데이트는 그 폴더에서 `git pull`).
@@ -63,4 +63,4 @@ Codex(또는 Claude Code)에게 이렇게 말하세요.
 ## ⭐ 도움이 되셨다면
 
 이 스킬로 활동지를 만들어 수업에 쓰셨다면 저장소에 **스타(⭐)** 하나 눌러 주세요. 계속 다듬을 힘이 됩니다!
-👉 https://github.com/BeomjinSouth/pbj-html-sheet
+👉 https://github.com/BeomjinSouth/exampractice2html

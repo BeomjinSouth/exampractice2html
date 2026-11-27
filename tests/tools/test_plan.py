@@ -1,0 +1,131 @@
+from copy import deepcopy
+import json
+from pathlib import Path
+import sys
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts'))
+from sheet_plan import load_registry, validate
+
+
+def document(*blocks):
+    return {'version': 1, 'meta': {'title': '좌표 읽기', 'kind': '평가', 'columns': 1},
+            'items': [{'id': 'q1', 'blocks': list(blocks)}]}
+
+
+class PlanTest(unittest.TestCase):
+    def errors(self, data):
+        return {i.path for i in validate(data, ROOT) if i.level == 'error'}
+
+    def test_registry_examples_are_valid(self):
+        for kind, entry in load_registry().items():
+            with self.subTest(kind=kind):
+                data = document(entry['example'])
+                if kind == 'checklist':
+                    data['meta']['kind'] = '수업'
+                self.assertEqual(self.errors(data), set())
+
+    def test_template_and_bad_fields(self):
+        template = json.loads((ROOT / 'assets/templates/구성.json').read_text(encoding='utf-8'))
+        self.assertIn('items[0].blocks[0].text', self.errors(template))
+        data = document({'type': 'header'}, {'type': 'question'}, {'type': 'text', 'text': 7})
+        data['meta']['columns'] = 2
+        data['items'].append(deepcopy(data['items'][0]))
+        self.assertTrue({'items[1].id', 'items[0].blocks[0].type',
+                         'items[0].blocks[1].text', 'items[0].blocks[2].text'} <= self.errors(data))
+
+    def test_markup_and_image_errors(self):
+        for source in ('수식 $x^{$', '두\n줄', '답: ___', 'https://example.test', '{{㉠}}', '{{㉡|값}}'):
+            with self.subTest(source=source):
+                self.assertIn('items[0].blocks[0].text', self.errors(document({'type': 'text', 'text': source})))
+        for src in ('그림/없는.png', 'https://example.test/그림.png', '../밖.png'):
+            self.assertIn('items[0].blocks[0].src', self.errors(document(
+                {'type': 'figure', 'src': src, 'width_mm': 10, 'alt': '그림'})))
+        self.assertIn('items[0].blocks[0].svg', self.errors(document(
+            {'type': 'figure', 'svg': '<svg><image href="https://example.test/그림.png"/></svg>', 'width_mm': 10})))
+
+    def test_answer_contract(self):
+        data = document({'type': 'answer', 'rows': [{'label': '풀이', 'lines': 1, 'points': 2},
+                                                     {'label': '작도', 'kind': 'draw', 'answer': '원'}]},
+                        {'type': 'choices', 'options': ['가', '나']},
+                        {'type': 'steps', 'columns': ['결과'], 'rows': 1, 'answers': [['']]},
+                        {'type': 'ask', 'tag': '질문', 'text': '값을 쓰시오.', 'lines': 31},
+                        {'type': 'table', 'header': ['값'], 'rows': [['{{㉠}}']]})
+        data['meta']['total_points'] = 3
+        self.assertTrue({'meta.total_points', 'items[0].blocks[0].rows[0].lines',
+                         'items[0].blocks[0].rows[0].answer', 'items[0].blocks[0].rows[1].height_mm',
+                         'items[0].blocks[1].answer', 'items[0].blocks[2].answers[0][0]',
+                         'items[0].blocks[3].lines', 'items[0].blocks[3].answer',
+                         'items[0].blocks[4].rows[0][0]'} <= self.errors(data))
+
+    def test_group_points_and_marks(self):
+        data = document({'type': 'situation', 'lines': ['값은 {{㉠|$2$}}입니다.']},
+                        {'type': 'question', 'text': '다른 값은 {{㉡|$3$}}입니다.'},
+                        {'type': 'answer', 'rows': [{'group': 'a', 'label': '풀이', 'mark': '㉠', 'points': 2, 'answer': '풀이'},
+                                                     {'group': 'a', 'points': 9, 'answer': '결과'}]})
+        data['meta']['total_points'] = 2
+        self.assertEqual(self.errors(data), set())
+
+    def test_grid_expression_and_point(self):
+        block = {'type': 'grid', 'mode': 'coord', 'x': [-5, 5], 'y': [-5, 5], 'unit_mm': 6,
+                 'draw': [{'fn': '-(x**2)/2+3*x'}, {'points': [[1, 2.5000000005]], 'on': 0}]}
+        self.assertEqual(self.errors(document(block)), set())
+        block['draw'][1]['points'][0][1] = 2.5001
+        self.assertIn('items[0].blocks[0].draw[1].points[0]', self.errors(document(block)))
+        for invalid in ('f(x)', 'x//2', 'x%2', 'x.y', 'y', 'True'):
+            block['draw'][0]['fn'] = invalid
+            with self.subTest(invalid=invalid):
+                self.assertIn('items[0].blocks[0].draw[0].fn', self.errors(document(block)))
+
+    def test_interaction_validation(self):
+        data = document({'type': 'split', 'left': [{'type': 'split', 'left': [{'type': 'text', 'text': '가'}],
+                                                  'right': [{'type': 'text', 'text': '나'}]}],
+                         'right': [{'type': 'text', 'text': '다'}]},
+                        {'type': 'checklist', 'items': ['확인']},
+                        {'type': 'numberline', 'range': [0, 4], 'step': 1, 'plot': {'answer': [5, 0.5], 'snap': 1}},
+                        {'type': 'grid', 'mode': 'coord', 'x': [-3, 3], 'y': [-3, 3], 'unit_mm': 4,
+                         'plot': {'mode': 'line', 'answer': 'x**2'}},
+                        {'type': 'chart', 'kind': 'bar', 'labels': ['가', '나'], 'values': [1]},
+                        {'type': 'video', 'url': 'https://youtube.com.evil.test/watch?v=abcdefghijk', 'title': '영상'},
+                        {'type': 'explore', 'fn': '__import__(x)', 'x': [-2, 2], 'y': [-2, 2], 'unit_mm': 5,
+                         'params': [{'name': 'x', 'min': 0, 'max': 2, 'step': 1, 'value': 1}]})
+        data['meta'].update(columns=2, interactive='true', reveal='틀림', theme='틀림', accent='틀림')
+        data['items'][0]['hints'] = ['가', '나', '다', '라']
+        errors = self.errors(data)
+        self.assertTrue({'items[0].blocks[0]', 'items[0].blocks[0].left[0]', 'items[0].blocks[1]',
+                         'items[0].blocks[2].plot.answer[0]', 'items[0].blocks[2].plot.answer[1]',
+                         'items[0].blocks[3].plot.answer', 'items[0].blocks[4].labels',
+                         'items[0].blocks[5].url', 'items[0].blocks[6].fn', 'items[0].blocks[6].params[0].name',
+                         'meta.interactive', 'meta.reveal', 'meta.theme', 'meta.accent', 'items[0].hints'} <= errors)
+
+    def test_line_function_snap_and_malformed_ranges(self):
+        from sheet_plan import function_tree, line_grid_points
+        for expression, snap, expected in [('2*x+1', 1, [[-3, -5], [2, 5]]),
+                                            ('x/2+0.5', 0.5, [[-3, -1], [3, 2]])]:
+            with self.subTest(expression=expression):
+                self.assertEqual(line_grid_points(function_tree(expression), [-3, 3], [-6, 6], snap), expected)
+        self.assertEqual(len(line_grid_points(function_tree('2*x'), [-3, 3], [-6, 6], 1e-9)), 2)
+        block = {'type': 'grid', 'mode': 'coord', 'x': ['가', 3], 'y': [-3, 3], 'unit_mm': 3,
+                 'plot': {'mode': 'points', 'answer': [[0, 0]]}}
+        self.assertIn('items[0].blocks[0].x', self.errors(document(block)))
+        block['x'] = [-1, 1]
+        block['plot'] = {'mode': 'line', 'answer': 'x**3'}
+        self.assertIn('items[0].blocks[0].plot.answer', self.errors(document(block)))
+
+    def test_accept_and_teacher_video(self):
+        data = document({'type': 'answer', 'rows': [{'label': '값', 'answer': '$x=2$', 'accept': ['2']}]})
+        data['teacher'] = {'solutions': [{'item': 'q1', 'answer': '2', 'steps': ['계산한다.'],
+                                           'video': {'url': 'https://youtu.be/abcdefghijk', 'start': 2}}]}
+        self.assertEqual(self.errors(data), set())
+        self.assertTrue(any('accept' in issue.hint for issue in validate(data, ROOT)))
+        data['teacher']['solutions'][0]['video']['url'] = 'https://bad.test/abcdefghijk'
+        self.assertIn('teacher.solutions[0].video.url', self.errors(data))
+
+    def test_all_warnings_nonblocking(self):
+        data = document({'type': 'question', 'text': '1. 점 A □ ' + '가' * 161},
+                        {'type': 'answer', 'rows': [{'label': '풀이', 'mark': '㉠', 'answer': '예시 답안'}]})
+        result = validate(data, ROOT)
+        self.assertEqual({i.level for i in result}, {'warning'})
+        self.assertEqual(len(result), 6)
+        self.assertTrue(all(i.hint for i in result))

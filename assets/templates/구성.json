@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "〔작성〕활동지 제목",
+    "kind": "수업",
+    "columns": 1,
+    "reveal": "시도 후",
+    "accent": "하늘",
+    "subject": "수학",
+    "grade": "1학년",
+    "term": "",
+    "unit": "〔작성〕단원 이름",
+    "header_title": null,
+    "name_fields": ["반", "번", "이름"],
+    "pair": false,
+    "total_points": null,
+    "goal": "〔작성〕학생이 마지막에 쓸 것 또는 판단할 것"
+  },
+  "items": [
+    {"id": "q1", "blocks": [
+      {"type": "question", "text": "〔작성〕발문"},
+      {"type": "answer", "rows": [{"label": "풀이", "lines": 4, "grow": true, "answer": "〔작성〕학생이 실제로 쓸 예시 답안"}]}
+    ]}
+  ],
+  "teacher": {
+    "memo": [],
+    "solutions": [{"item": "q1", "answer": "〔작성〕교사용 풀이의 핵심"}]
+  }
+}

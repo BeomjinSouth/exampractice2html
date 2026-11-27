@@ -1,0 +1,221 @@
+/* 산뜻 · A4와 풀기가 공유하는 색. 글꼴 배율, 줄 간격, 답 칸 높이는 엔진의 몫이다. */
+html[data-theme="산뜻"] {
+  --accent: #1976a1; --accent-ink: #144b65; --accent-soft: #eef7fb;
+  --ink: #202a31; --quiet: #42505a; --line: #8d9a9f;
+  --hairline: #c1cbd0; --mist: #f7f9fa; --paper: #fff;
+  --ws-rule: .2mm solid var(--line); --ws-label: var(--accent-ink);
+  --ok: #18613f; --ok-soft: #edf8f0; --retry: #8d420e; --retry-soft: #fff2e8;
+}
+html[data-theme="산뜻"][data-accent="민트"] {
+  --accent: #197d6e; --accent-ink: #175348; --accent-soft: #edf8f2;
+}
+html[data-theme="산뜻"][data-accent="주황"] {
+  --accent: #af5a21; --accent-ink: #743d18; --accent-soft: #fff5ea;
+}
+html[data-theme="산뜻"][data-accent="보라"] {
+  --accent: #7656a8; --accent-ink: #503971; --accent-soft: #f6f2fc;
+}
+html[data-theme="산뜻"] :is(.ws-page, #sheet-flow) { color: var(--ink); }
+
+/* 작은 선 아이콘. data-icon이 있으면 종류별 기본값보다 우선한다. */
+html[data-theme="산뜻"] [data-icon="pencil"],
+html[data-theme="산뜻"] .ws-callout[data-kind="예시"]:not([data-icon]) {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M4%2020l4.8-1%2011-11a2%202%200%200%200-3.8-3.8l-11%2011L4%2020Zm10-14%204%204M5%2015l4%204%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="bulb"],
+html[data-theme="산뜻"] .ws-callout[data-kind="개념"]:not([data-icon]) {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M9%2017c0-3-3.5-3.7-3.5-8a6.5%206.5%200%201%201%2013%200c0%204.3-3.5%205-3.5%208H9Zm.7%203h4.6%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="search"],
+html[data-theme="산뜻"] .ws-callout[data-kind="생각"]:not([data-icon]) {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M17%2010.5a6.5%206.5%200%201%201-13%200%206.5%206.5%200%200%201%2013%200Zm-1.8%204.8%205.2%205.2%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="check"],
+html[data-theme="산뜻"] .ws-callout[data-kind="정리"]:not([data-icon]),
+html[data-theme="산뜻"] .ws-checklist-title {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M3.5%2012.5%209.5%2018%2020%206.5%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="video"],
+html[data-theme="산뜻"] .ws-video-title {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M3%205h18v14H3z%20M10%208.5v7l5-3.5z%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="chart"] {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M3.5%203.5v17h17%20M7.5%2017v-6h3v6z%20M14.5%2017V6h3v11z%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="puzzle"] {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M4%209V4h6a2.5%202.5%200%201%201%205%200h5v6a2.5%202.5%200%201%200%200%205v5h-6a2.5%202.5%200%201%200-5%200H4v-6a2.5%202.5%200%201%200%200-5z%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="star"] {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22m12%203%202.9%205.9%206.5.9-4.7%204.6%201.1%206.5-5.8-3.1-5.8%203.1%201.1-6.5-4.7-4.6%206.5-.9z%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="warn"],
+html[data-theme="산뜻"] .ws-callout[data-kind="주의"]:not([data-icon]) {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%203%202.5%2020h19L12%203z%20M12%209v5m0%202.5v.2%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="book"] {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%206Q8%203%203%204v14q5-1%209%202%204-3%209-2V4q-5-1-9%202v14%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="calc"] {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M5%202.5h14v19H5z%20M8.5%206h7v3h-7z%20M9%2013h1m4%200h1m-6%204h1m4%200h1%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] [data-icon="flag"],
+html[data-theme="산뜻"] .ws-heading:not([data-icon]) {
+  --symbol: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M5%2021V4q4-3%208%200t7%200v10q-3%203-7%200t-8%200%22%20fill%3D%22none%22%20stroke%3D%22black%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E");
+}
+html[data-theme="산뜻"] :is(.ws-heading, .ws-callout, .ws-video-title, .ws-checklist-title)::before {
+  content: ''; display: inline-block; flex: none; width: 1.12em; height: 1.12em;
+  background-color: var(--accent); vertical-align: -.16em;
+  -webkit-mask-image: var(--symbol); mask-image: var(--symbol);
+  -webkit-mask-size: contain; mask-size: contain;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+}
+
+/* 표 둘레를 한 번만 그리고 칸 사이는 한쪽에만 선을 둔다. 병합 셀도 그대로 쓴다. */
+html[data-theme="산뜻"] .ws-item table {
+  border-collapse: separate; border-spacing: 0; border: var(--ws-rule);
+  border-radius: 1.4mm; background: var(--paper);
+}
+html[data-theme="산뜻"] .ws-item :is(td, th) { border: 0; }
+html[data-theme="산뜻"] .ws-item tr > :not(:last-child) { border-inline-end: var(--ws-rule); }
+html[data-theme="산뜻"] .ws-item :is(tr:has(+ tr), thead > tr:last-child) > :is(th, td) { border-block-end: var(--ws-rule); }
+html[data-theme="산뜻"] .ws-item :is(thead, tbody:first-of-type):not(thead + tbody) > tr:first-child > :first-child { border-start-start-radius: 1mm; }
+html[data-theme="산뜻"] .ws-item :is(thead, tbody:first-of-type):not(thead + tbody) > tr:first-child > :last-child { border-start-end-radius: 1mm; }
+html[data-theme="산뜻"] .ws-item tbody:last-child > tr:last-child > :first-child { border-end-start-radius: 1mm; }
+html[data-theme="산뜻"] .ws-item tbody:last-child > tr:last-child > :last-child { border-end-end-radius: 1mm; }
+html[data-theme="산뜻"] .ws-item :is(.ws-lab, .ws-step-n, .ws-head-k, .ws-cap, .ws-ox-n, .ws-data th, .ws-ask th, .ws-steps thead th) {
+  background: var(--accent-soft); color: var(--ink);
+}
+html[data-theme="산뜻"] :is(.ws-ask-tag, .ws-sit-title, .ws-cn, .ws-blank-mark) { color: var(--accent-ink); }
+html[data-theme="산뜻"] .ws-item .ws-sit { background: var(--mist); }
+html[data-theme="산뜻"] .ws-sit-note { color: var(--quiet); }
+
+/* 제목은 옅은 색지에 인쇄한 띠처럼. 오른쪽 세 줄 사선은 작은 제본 표식이다. */
+html[data-theme="산뜻"] .ws-item :is(.ws-head, .ws-band) { background: var(--paper); border-color: var(--line); }
+html[data-theme="산뜻"] .ws-item :is(.ws-head-title, .ws-head--수업 tr:first-child > td, .ws-band td:first-child) {
+  text-align: start; background: var(--accent-soft);
+  background-image: repeating-linear-gradient(120deg, transparent 0 1.7mm, var(--hairline) 1.7mm 1.94mm);
+  background-size: 7mm 100%; background-position: right; background-repeat: no-repeat;
+  border-inline-start: 1mm solid var(--accent); padding-inline: 2.6mm 9mm;
+}
+html[data-theme="산뜻"] .ws-item .ws-head--수업 { border: 0; border-spacing: .7mm .3mm; background: transparent; }
+html[data-theme="산뜻"] .ws-item .ws-head--수업 tr > td {
+  border: var(--ws-rule); border-radius: 1.25mm;
+}
+html[data-theme="산뜻"] .ws-item .ws-head--수업 tr:first-child > td { border-inline-start: 1mm solid var(--accent); }
+html[data-theme="산뜻"] .ws-head-1 { font-weight: 700; }
+html[data-theme="산뜻"] .ws-head--수업 :is(.ws-head-1, .ws-head-2) { font-size: 14pt; letter-spacing: -.035em; }
+html[data-theme="산뜻"] .ws-head--수업 tr + tr td { text-align: start; padding-inline: 2mm; }
+html[data-theme="산뜻"] .ws-name-slot { border-radius: 1mm; background: var(--mist); }
+
+html[data-theme="산뜻"] .ws-heading { border-block-end-color: var(--hairline); }
+html[data-theme="산뜻"] .ws-heading::before { order: 1; }
+html[data-theme="산뜻"] .ws-heading-text { order: 2; }
+html[data-theme="산뜻"] .ws-heading .ws-deco { order: 3; }
+html[data-theme="산뜻"] .ws-heading-tag {
+  border-color: var(--accent); border-radius: .9mm; padding-inline: 1.7mm;
+  color: white; background: var(--accent); font-size: .87em;
+}
+html[data-theme="산뜻"] .ws-callout {
+  position: relative; padding-inline-start: 7.7mm;
+  background: var(--accent-soft); border: .2mm solid var(--hairline);
+  border-inline-start: .65mm solid var(--accent); border-radius: 1.4mm;
+}
+html[data-theme="산뜻"] .ws-callout::before { position: absolute; inset-inline-start: 2mm; top: 2.8mm; }
+html[data-theme="산뜻"] .ws-callout-title { color: var(--accent-ink); }
+html[data-theme="산뜻"] .ws-qn {
+  display: inline-block; min-width: 1.6em; padding: 0 .12em; box-sizing: border-box;
+  margin-inline-end: .3em; border-radius: 1em; background: var(--accent); color: white;
+  text-align: center; font-weight: 700; font-size: .9em; line-height: 1.6;
+}
+html[data-theme="산뜻"] .ws-blank { border-bottom-color: var(--accent); }
+html[data-theme="산뜻"] .ws-fill > .ws-blank { border-block-end: .2mm solid var(--accent); }
+html[data-theme="산뜻"] :is(.ws-match-prompt, .ws-order-prompt, .ws-explore-prompt) { font-weight: 700; }
+html[data-theme="산뜻"] .ws-match-cols li::after { background: var(--accent); }
+html[data-theme="산뜻"] :is(.ws-match-lines line, .ws-user-line, .ws-explore .ws-plot path) { stroke: var(--accent); }
+html[data-theme="산뜻"] :is(.ws-user-point, .ws-user-bar) { fill: var(--accent); }
+html[data-theme="산뜻"] :is(.ws-order-box, .ws-check-box, .ws-flow-node) {
+  border-radius: 1mm; border-color: var(--line); background: var(--accent-soft); color: var(--accent-ink);
+}
+html[data-theme="산뜻"] .ws-flow-arrow { color: var(--accent-ink); }
+html[data-theme="산뜻"] :is(.ws-grid, .ws-chart, .ws-nl) figcaption { color: var(--quiet); }
+html[data-theme="산뜻"] .ws-explore-note { color: var(--quiet); }
+html[data-theme="산뜻"] .ws-video { background: var(--mist); border-radius: 1.4mm; }
+html[data-theme="산뜻"] :is(.ws-video-title, .ws-checklist-title)::before { margin-inline-end: .45em; }
+html[data-theme="산뜻"] .ws-video-url { color: var(--quiet); }
+html[data-theme="산뜻"] :is(.ws-picked > .ws-cn, .ws-ox-pick > .ws-picked) { outline-color: var(--accent); }
+html[data-theme="산뜻"] .ws-picked > .ws-check-box { background: var(--accent); color: white; }
+
+/* 풀기 화면: 종이 치수나 숨김/보기 규칙은 덮어쓰지 않는다. */
+html[data-theme="산뜻"][data-view="solve"] body { background: #f2f5f6; }
+html[data-theme="산뜻"] #sheet-toolbar {
+  background: var(--paper); border-color: var(--hairline); color: var(--ink);
+}
+html[data-theme="산뜻"][data-view="solve"] #sheet-toolbar { justify-content: center; }
+html[data-theme="산뜻"] #sheet-toolbar :is(button, select),
+html[data-theme="산뜻"] :is(.ws-check-bar, .ws-pen-tools, .ws-order-tools, .ws-video-frame) button {
+  background: var(--paper); border-color: var(--hairline); color: var(--ink); border-radius: 5px;
+}
+html[data-theme="산뜻"] #sheet-flow .ws-item { border-color: var(--hairline); border-radius: 7px; }
+html[data-theme="산뜻"] #sheet-flow .ws-item:has(> .ws-head:only-child) { padding: 0; border: 0; background: transparent; }
+html[data-theme="산뜻"] #sheet-flow .ws-head--수업 tr:first-child > td { padding: 11px 30px 11px 14px; }
+html[data-theme="산뜻"] #sheet-flow .ws-head--수업 :is(.ws-head-1, .ws-head-2) { font-size: 22px; }
+html[data-theme="산뜻"] #sheet-flow .ws-head--수업 tr + tr td { padding-block: 5px; }
+html[data-theme="산뜻"] #sheet-flow .ws-in {
+  background: #fcfdfe; border-color: var(--line); border-radius: 4px; color: var(--ink);
+}
+html[data-theme="산뜻"] #sheet-flow .ws-ans > .ws-in { border-color: transparent; border-radius: 2px; }
+html[data-theme="산뜻"] #sheet-flow :is(.ws-blank, .ws-name-slot) > .ws-in { background: var(--paper); border-bottom-color: var(--accent); }
+html[data-theme="산뜻"] :is(#sheet-toolbar, #sheet-flow) :is(button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+html[data-theme="산뜻"] #sheet-flow .ws-ans > .ws-in:focus-visible { outline-offset: -2px; }
+html[data-theme="산뜻"] #sheet-flow .ws-choices > li { border-color: var(--hairline); border-radius: 5px; }
+html[data-theme="산뜻"] #sheet-flow :is(.ws-choices > li.ws-picked, .ws-match-cols li.ws-picked, .ws-ox-pick > .ws-picked) {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink);
+}
+html[data-theme="산뜻"] #sheet-flow .ws-order-grip { color: var(--quiet); }
+html[data-theme="산뜻"] #sheet-flow .ws-order-list li { border-color: var(--hairline); }
+html[data-theme="산뜻"] #sheet-flow .ws-explore-ctrl {
+  padding: 8px 12px; background: var(--accent-soft); border-radius: 5px; color: var(--accent-ink);
+}
+html[data-theme="산뜻"] #sheet-flow :is(.ws-explore-ctrl input, .ws-compare-list input) { accent-color: var(--accent); }
+html[data-theme="산뜻"] #sheet-flow .ws-explore-ctrl output { font-weight: 700; }
+html[data-theme="산뜻"] .ws-check-bar { border-color: var(--hairline); }
+html[data-theme="산뜻"] :is(.ws-check-bar, .ws-pen-tools, .ws-order-tools, .ws-video-frame) button { min-height: 30px; }
+html[data-theme="산뜻"] .ws-check-bar button { padding-inline: 10px; }
+html[data-theme="산뜻"] .ws-check-bar button[data-sheet-action="check"] {
+  background: var(--accent); color: white; border-color: var(--accent); font-weight: 700;
+}
+html[data-theme="산뜻"] :is(#sheet-toolbar, .ws-check-bar, .ws-pen-tools) button[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent);
+}
+html[data-theme="산뜻"] :is(.ws-score, .ws-item-score) { font-family: var(--sheet-sans); color: var(--accent-ink); }
+html[data-theme="산뜻"] .ws-item-score { margin-inline-start: auto; }
+html[data-theme="산뜻"] .ws-score { padding: 2px 8px; border-radius: 1em; background: var(--accent-soft); }
+html[data-theme="산뜻"] #sheet-flow .ws-fig > :is(.ws-verdict, .ws-reveal) { margin-inline: auto; }
+html[data-theme="산뜻"] #sheet-flow .ws-fill :is(.ws-verdict, .ws-reveal) { margin: 3px auto 0; }
+html[data-theme="산뜻"] #sheet-flow .ws-lab { word-break: keep-all; }
+html[data-theme="산뜻"] .ws-pen-tools { border-radius: 4px; }
+html[data-theme="산뜻"] #sheet-flow .ws-verdict { width: fit-content; padding-inline: .45em; border-radius: .35em; font-weight: 700; }
+html[data-theme="산뜻"] #sheet-flow .ws-verdict.ws-ok { color: var(--ok); background: var(--ok-soft); }
+html[data-theme="산뜻"] #sheet-flow .ws-verdict.ws-no { color: var(--retry); background: var(--retry-soft); }
+html[data-theme="산뜻"] #sheet-flow .ws-reveal { width: fit-content; padding: .15em .45em; border-inline-start: 2px solid var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+html[data-theme="산뜻"] #sheet-flow :is(.ws-solution, .ws-hint) { background: var(--accent-soft); border: 0; border-inline-start: 3px solid var(--accent); border-radius: 0 4px 4px 0; padding: 8px 12px; }
+html[data-theme="산뜻"] #sheet-flow .ws-solution > :first-child { margin-block-start: 0; }
+html[data-theme="산뜻"] #sheet-flow .ws-solution > :last-child { margin-block-end: 0; }
+@media (hover: hover) {
+  html[data-theme="산뜻"] :is(#sheet-toolbar, .ws-check-bar, .ws-pen-tools, .ws-order-tools, .ws-video-frame) button:enabled:hover { border-color: var(--accent); }
+  html[data-theme="산뜻"] #sheet-flow .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex]:hover { background: var(--accent-soft); }
+}
+
+/* 좁은 화면에서는 단원보다 이름 칸을 먼저 확보한다. 종이의 열 폭에는 영향이 없다. */
+@media screen and (max-width: 540px) {
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 { display: block; }
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 tr { height: auto; }
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 :is(tbody, tr:first-child, tr:first-child > td) { display: block; }
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 tr + tr { display: flex; flex-wrap: wrap; gap: 4px; margin-block-start: 4px; }
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 tr + tr > td { flex: 1 1 auto; background: var(--paper); }
+  /* 이름 칸은 한 줄을 통째로 쓴다. 학번·이름이 한 줄에 같이 오면 입력 칸 때문에 화면 밖으로 밀린다. */
+  html[data-theme="산뜻"] #sheet-flow .ws-head--수업 td:has(.ws-name-slot) { white-space: nowrap; flex-basis: 100%; }
+  html[data-theme="산뜻"] #sheet-flow .ws-lab { padding-inline: 4px; }
+}

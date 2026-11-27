@@ -1,0 +1,141 @@
+{
+  "notice": {
+    "description": "라벨 열이 붙은 안내 상자",
+    "fields": {"label": "안내 이름", "lines": "안내 문단 배열"},
+    "required": ["label", "lines"], "limits": {"label": 10, "lines[]": 160},
+    "example": {"type": "notice", "label": "평가 안내", "lines": ["답과 풀이를 모두 쓰시오."]}
+  },
+  "nameband": {
+    "description": "둘째 장 머리의 이름 띠",
+    "fields": {"label": "활동 이름과 장 번호"},
+    "required": ["label"], "limits": {"label": 30},
+    "example": {"type": "nameband", "label": "좌표평면 · 2장"}
+  },
+  "situation": {
+    "description": "상황 글과 선택 그림",
+    "fields": {"title": "상황 제목", "lines": "상황 문단 배열", "figure": "그림 객체", "note": "오른쪽 낱말 풀이"},
+    "required": ["lines"], "limits": {"title": 24, "lines[]": 200, "note": 80},
+    "example": {"type": "situation", "title": "<상황>", "lines": ["두 점의 위치를 비교합니다."]}
+  },
+  "question": {
+    "description": "발문, 번호는 자동으로 붙음",
+    "fields": {"text": "발문 한 문단", "number": "false면 번호 생략(기본 true)"},
+    "required": ["text"], "limits": {"text": 160},
+    "example": {"type": "question", "text": "점 $A$의 좌표를 쓰시오."}
+  },
+  "answer": {
+    "description": "라벨과 답 칸으로 이루어진 답안표",
+    "fields": {"rows": "답안 행 배열", "rows[].mark": "같은 item의 빈칸 기호", "rows[].label": "채점 요소", "rows[].points": "배점", "rows[].guide": "라벨 아래 쓰기 안내", "rows[].lines": "빈 줄 수 2~30(기본 3)", "rows[].grow": "true면 남는 높이 나눠 받기", "rows[].kind": "text(기본) 또는 draw", "rows[].height_mm": "draw 행 높이(mm)", "rows[].answer": "예시 답안; draw는 그림 객체도 가능", "rows[].group": "연속 행의 라벨 병합 키", "rows[].check": "auto·number·text·off", "rows[].accept": "다른 정답 문자열 배열"},
+    "required": ["rows", "rows[].label", "rows[].answer", "rows[].height_mm (kind=draw)"],
+    "limits": {"rows[].label": 18, "rows[].guide": 40, "rows[].answer": 400},
+    "example": {"type": "answer", "rows": [{"label": "좌표", "lines": 3, "answer": "$(2,3)$"}]}
+  },
+  "steps": {
+    "description": "번호가 붙은 단계 기록 표",
+    "fields": {"columns": "열 제목 배열", "rows": "행 수 1~20", "answers": "행×열 크기의 예시 답안 배열", "lines": "각 답 칸의 빈 줄 수 2~30(기본 2)"},
+    "required": ["columns", "rows", "answers"], "limits": {"columns[]": 18, "answers[][]": 160},
+    "example": {"type": "steps", "columns": ["한 일", "결과"], "rows": 1, "answers": [["$x$ 좌표 확인", "$2$"]]}
+  },
+  "choices": {
+    "description": "번호가 붙은 선택지",
+    "fields": {"options": "선택지 2~20개", "answer": "1부터 센 정답 번호 또는 번호 배열", "cols": "한 줄 개수(기본: 최대 5개)"},
+    "required": ["options", "answer"], "limits": {"options[]": 80},
+    "example": {"type": "choices", "options": ["$1$", "$2$", "$3$"], "answer": 2, "cols": 3}
+  },
+  "table": {
+    "description": "자료표 또는 빈칸 채우기 표",
+    "fields": {"header": "열 제목 배열", "rows": "행×열의 칸 배열", "widths_mm": "열별 양수 너비(mm) 배열"},
+    "required": ["header", "rows"], "limits": {"header[]": 30, "rows[][]": 90},
+    "example": {"type": "table", "header": ["항목", "값"], "rows": [["가", "{{|$3$}}"]]}
+  },
+  "figure": {
+    "description": "가운데 정렬 그림 한 장",
+    "fields": {"src": "폴더 안 그림 파일 상대 경로", "svg": "문자열로 넣는 SVG", "width_mm": "그림 너비(mm)", "alt": "그림 대체 설명", "caption": "그림 아래 설명", "teacher_only": "true면 교사용만", "pen": "true면 그리기"},
+    "required": ["src 또는 svg 중 하나", "width_mm", "alt (src 사용 시)"], "limits": {"caption": 90, "alt": 120},
+    "example": {"type": "figure", "svg": "<svg viewBox='0 0 40 20'><rect x='2' y='2' width='36' height='16' fill='none' stroke='black'/></svg>", "width_mm": 40, "caption": "직사각형"}
+  },
+  "figures": {
+    "description": "그림과 캡션을 나란히 놓은 표",
+    "fields": {"items": "figure에서 type을 뺀 그림 객체 2개", "items[].caption": "각 그림 아래 설명"},
+    "required": ["items", "items[].caption"], "limits": {"items[].caption": 90, "items[].alt": 120},
+    "example": {"type": "figures", "items": [{"svg": "<svg viewBox='0 0 20 20'><circle cx='10' cy='10' r='8'/></svg>", "width_mm": 20, "caption": "그림 가"}, {"svg": "<svg viewBox='0 0 20 20'><rect x='2' y='2' width='16' height='16'/></svg>", "width_mm": 20, "caption": "그림 나"}]}
+  },
+  "grid": {
+    "description": "실제 크기 모눈 또는 좌표평면",
+    "fields": {"mode": "square 또는 coord", "cols": "square 가로 칸 수", "rows": "square 세로 칸 수", "x": "coord의 x축 정수 범위 [최소, 최대]", "y": "coord의 y축 정수 범위 [최소, 최대]", "unit_mm": "한 칸의 길이(mm)", "labels": "coord에서 숫자 눈금 표시(기본 true)", "draw": "함수 또는 점 목록", "draw[].fn": "x, 수와 + - * / **, 괄호로 쓴 식", "draw[].points": "[x,y] 좌표 배열", "draw[].on": "검산할 같은 draw 배열의 fn 위치(0부터)", "draw[].names": "점 이름 배열", "draw[].teacher": "true면 교사용만 표시", "plot": "점 또는 직선 정답과 snap", "pen": "true면 그리기"},
+    "required": ["mode", "unit_mm", "cols, rows (square)", "x, y (coord)", "draw[].fn 또는 draw[].points 중 하나"], "limits": {"draw[].names[]": 12},
+    "example": {"type": "grid", "mode": "coord", "x": [-5, 5], "y": [-5, 5], "unit_mm": 6, "draw": [{"fn": "2*x+1", "teacher": true}, {"points": [[1, 3]], "on": 0, "names": ["$A$"]}]}
+  },
+  "ask": {
+    "description": "제목 줄과 답 칸을 묶은 질문 상자",
+    "fields": {"tag": "질문 꼬리표", "text": "발문", "lines": "빈 줄 수 2~30", "grow": "true면 남는 높이 나눠 받기", "answer": "예시 답안"},
+    "required": ["tag", "text", "lines", "answer"], "limits": {"tag": 18, "text": 160, "answer": 400},
+    "example": {"type": "ask", "tag": "<질문 1-1>", "text": "이 점은 어느 사분면에 있나요?", "lines": 4, "grow": true, "answer": "제1사분면"}
+  },
+  "text": {
+    "description": "일반 문단",
+    "fields": {"text": "정리 문장 등 한 문단"},
+    "required": ["text"], "limits": {"text": 250},
+    "example": {"type": "text", "text": "두 점의 좌표를 비교해 봅시다."}
+  },
+  "heading": {
+    "description": "활동 제목 띠", "fields": {"tag": "활동 꼬리표", "text": "제목", "icon": "아이콘 이름", "image": "폭 30mm 이하 그림 객체"},
+    "required": ["tag", "text"], "limits": {"tag": 20, "text": 80},
+    "example": {"type": "heading", "tag": "활동 1", "text": "변화 살펴보기", "icon": "pencil"}
+  },
+  "callout": {
+    "description": "개념·생각 등을 담는 상자", "fields": {"kind": "개념·생각·주의·정리·예시", "title": "제목", "lines": "문단 배열", "image": "그림 객체"},
+    "required": ["kind", "lines"], "limits": {"title": 40, "lines[]": 200},
+    "example": {"type": "callout", "kind": "개념", "lines": ["좌표는 순서쌍으로 나타냅니다."]}
+  },
+  "split": {
+    "description": "두 영역을 좌우로 나눔", "fields": {"left": "왼쪽 블록 배열", "right": "오른쪽 블록 배열", "ratio": "1:1·2:1·1:2·3:2·2:3"},
+    "required": ["left", "right"], "limits": {},
+    "example": {"type": "split", "left": [{"type": "text", "text": "왼쪽"}], "right": [{"type": "text", "text": "오른쪽"}]}
+  },
+  "ox": {
+    "description": "참·거짓 선택 1~10개", "fields": {"items": "text와 answer(O 또는 X) 객체 배열"},
+    "required": ["items"], "limits": {"items[].text": 160},
+    "example": {"type": "ox", "items": [{"text": "원점의 좌표는 $(0,0)$이다.", "answer": "O"}]}
+  },
+  "match": {
+    "description": "두 열의 같은 순번을 짝짓기(각 2~8개)", "fields": {"prompt": "안내", "left": "왼쪽 글자 배열", "right": "대응하는 오른쪽 글자 배열"},
+    "required": ["left", "right"], "limits": {"prompt": 160, "left[]": 80, "right[]": 80},
+    "example": {"type": "match", "left": ["첫째", "둘째"], "right": ["하나", "둘"]}
+  },
+  "order": {
+    "description": "올바른 순서를 맞추기(2~8개)", "fields": {"prompt": "안내", "items": "올바른 순서의 글자 배열"},
+    "required": ["items"], "limits": {"prompt": 160, "items[]": 100},
+    "example": {"type": "order", "items": ["처음", "다음", "마지막"]}
+  },
+  "flow": {
+    "description": "상자와 화살표로 절차 표현(노드 2~8개)", "fields": {"nodes": "상자 글자 배열", "arrows": "노드 사이 글자 배열"},
+    "required": ["nodes"], "limits": {"nodes[]": 80, "arrows[]": 30},
+    "example": {"type": "flow", "nodes": ["입력", "계산", "결과"], "arrows": ["곱하기", "확인"]}
+  },
+  "numberline": {
+    "description": "수직선과 선택 가능한 점", "fields": {"range": "[최소, 최대]", "step": "눈금 간격", "labels": "눈금 숫자 표시", "points": "x, name 객체 배열", "plot": "answer 점 배열, snap 간격", "width_mm": "너비", "pen": "그리기"},
+    "required": ["range", "step"], "limits": {"points[].name": 20},
+    "example": {"type": "numberline", "range": [-3, 3], "step": 1, "plot": {"answer": [-2, 1], "snap": 1}}
+  },
+  "chart": {
+    "description": "계산한 통계 그래프", "fields": {"kind": "bar·line·histogram·polygon·scatter", "labels": "항목", "values": "값", "bins": "계급 경계", "points": "산점도 점", "x": "가로 범위", "y": "세로 범위", "x_step": "가로 눈금", "x_label": "가로 축 이름", "y_label": "세로 축 이름", "y_max": "세로 최댓값", "y_step": "세로 눈금", "width_mm": "너비", "height_mm": "높이", "teacher": "자료를 교사용에만 표시", "plot": "막대 정답과 snap"},
+    "required": ["kind"], "limits": {"labels[]": 30, "x_label": 40, "y_label": 40},
+    "example": {"type": "chart", "kind": "bar", "labels": ["가", "나"], "values": [2, 3]}
+  },
+  "explore": {
+    "description": "매개변수 슬라이더로 함수 탐구", "fields": {"prompt": "안내", "fn": "x와 매개변수 식", "params": "name·label·min·max·step·value 객체 1~3개", "x": "x 정수 범위", "y": "y 정수 범위", "unit_mm": "한 칸 크기", "table": "표의 x값 배열"},
+    "required": ["fn", "params", "x", "y", "unit_mm"], "limits": {"prompt": 160},
+    "example": {"type": "explore", "fn": "a*x", "params": [{"name": "a", "min": -2, "max": 2, "step": 1, "value": 1}], "x": [-3, 3], "y": [-3, 3], "unit_mm": 6, "table": [-1, 0, 1]}
+  },
+  "video": {
+    "description": "YouTube 영상 또는 20MB 이하 로컬 mp4", "fields": {"url": "YouTube 주소", "src": "로컬 mp4 경로", "title": "영상 제목", "start": "시작 초", "caption": "설명"},
+    "required": ["url 또는 src", "title"], "limits": {"title": 80, "caption": 160},
+    "example": {"type": "video", "url": "https://youtu.be/abcdefghijk", "title": "영상 보기"}
+  },
+  "checklist": {
+    "description": "자기 점검 목록(평가에는 사용 불가)", "fields": {"title": "제목", "items": "점검 문장 배열"},
+    "required": ["items"], "limits": {"title": 40, "items[]": 120},
+    "example": {"type": "checklist", "title": "스스로 점검", "items": ["풀이를 확인했나요?"]}
+  }
+}

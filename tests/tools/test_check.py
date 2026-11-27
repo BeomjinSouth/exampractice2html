@@ -1,0 +1,348 @@
+import base64
+import builtins
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import unittest
+from unittest.mock import patch
+from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[2]
+TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT / 'tests' / '_out' / '검사-시험'))
+sys.path.insert(0, str(ROOT / 'scripts'))
+import sheet_check
+
+
+def fixture_html():
+    source = (ROOT / 'tests/engine/fixture-assessment.html').read_text(encoding='utf-8')
+    css = (ROOT / 'assets/engine/sheet.css').read_text(encoding='utf-8')
+    script = (ROOT / 'assets/engine/sheet.js').read_text(encoding='utf-8')
+    if re.search(r'</script', script, re.I):
+        raise AssertionError('엔진을 script 요소에 그대로 내장할 수 없습니다.')
+    source, css_count = re.subn(r'<link id="sheet-css"[^>]*>', lambda _: '<style id="sheet-css">' + css + '</style>', source)
+    source, js_count = re.subn(r'<script id="sheet-js"[^>]*></script>', lambda _: '<script id="sheet-js">' + script + '</script>', source)
+    if (css_count, js_count) != (1, 1):
+        raise AssertionError('엔진 자산 위치를 찾지 못했습니다.')
+    return source
+
+
+def generate_fixture(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    teacher = folder / '도형과 좌표 (교사용).html'
+    student = folder / '도형과 좌표.html'
+    teacher.write_text(fixture_html(), encoding='utf-8')
+    with sheet_check.sheet_browser() as browser:
+        protocol = browser.cdp
+        protocol.call('Page.enable')
+        protocol.call('Runtime.enable')
+        protocol.call('Page.navigate', {'url': teacher.resolve().as_uri()})
+        protocol.wait_event('Page.loadEventFired')
+        result = protocol.evaluate("(async()=>{await window.sheet.ready;return window.sheet.exportStudent()})()", True)
+    student.write_text(result, encoding='utf-8')
+    return teacher, student
+
+
+class CheckIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.run_root = TRIALS / ('check-' + uuid4().hex[:10])
+        cls.run_root.mkdir(parents=True, exist_ok=True)
+        cls.old_temp = os.environ.get('SHEET_TEST_TMP')
+        cls.old_profile = os.environ.get('SHEET_TEST_PROFILE')
+        # 브라우저 프로필은 실행마다 새로 만들면 수십 MB씩 쌓이므로 모든 실행이 한 폴더를 다시 쓴다.
+        shared = TRIALS / '_브라우저-프로필'
+        os.environ['SHEET_TEST_TMP'] = str(shared)
+        os.environ['SHEET_TEST_PROFILE'] = str(shared / '현재')
+        cls.reference = cls.run_root / '기준'
+        teacher, student = generate_fixture(cls.reference)
+        cls.teacher_text = teacher.read_text(encoding='utf-8')
+        cls.student_text = student.read_text(encoding='utf-8')
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old_temp is None:
+            os.environ.pop('SHEET_TEST_TMP', None)
+        else:
+            os.environ['SHEET_TEST_TMP'] = cls.old_temp
+        if cls.old_profile is None:
+            os.environ.pop('SHEET_TEST_PROFILE', None)
+        else:
+            os.environ['SHEET_TEST_PROFILE'] = cls.old_profile
+
+    def make_case(self, name, teacher=None, student=None):
+        folder = self.run_root / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / '도형과 좌표 (교사용).html').write_text(teacher or self.teacher_text, encoding='utf-8')
+        (folder / '도형과 좌표.html').write_text(student or self.student_text, encoding='utf-8')
+        return folder
+
+    def inspect(self, folder, expected):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = sheet_check.cmd_check(folder)
+        self.assertEqual(result, expected, output.getvalue())
+        report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+        return {issue['code'] for issue in report['problems']}
+
+    def test_clean_fixture_and_archive_old_images(self):
+        folder = self.make_case('정상')
+        old = folder / '검사/교사-99.png'
+        old.parent.mkdir(exist_ok=True)
+        old.write_bytes(b'old page kept')
+        codes = self.inspect(folder, 0)
+        self.assertNotIn('student-private-markup', codes)
+        self.assertTrue((folder / '검사/교사-01.png').is_file())
+        self.assertTrue((folder / '검사/모아보기-흑백.png').is_file())
+        self.assertEqual((folder / '검사/_이전/교사-99.png').read_bytes(), b'old page kept')
+        self.assertFalse(old.exists())
+
+    def test_browser_failure_invalidates_old_report(self):
+        folder = self.make_case('브라우저실패')
+        previous = folder / '검사/report.json'
+        previous.parent.mkdir(exist_ok=True)
+        previous.write_text('이전 결과', encoding='utf-8')
+        with patch.dict(os.environ, {'SHEET_BROWSER': str(folder / '없는-브라우저.exe')}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sheet_check.cmd_check(folder), 2)
+        self.assertFalse(previous.exists())
+        self.assertEqual((folder / '검사/_이전/report.json').read_text(encoding='utf-8'), '이전 결과')
+
+    def test_answer_in_student_source(self):
+        answer = '두 대각선은 서로 수직으로 만나기 때문입니다.'
+        broken = self.student_text.replace('</body>', '<p>' + answer + '</p></body>')
+        codes = self.inspect(self.make_case('정답유출', student=broken), 1)
+        self.assertIn('answer-leak', codes)
+
+    def test_external_url(self):
+        broken = self.student_text.replace('</body>', '<img src="https://example.invalid/missing.png"></body>')
+        codes = self.inspect(self.make_case('외부주소', student=broken), 1)
+        self.assertIn('external-url', codes)
+
+    def test_oversized_item(self):
+        broken = self.teacher_text.replace('<div id="sheet-src">',
+            '<div id="sheet-src"><section class="ws-item" data-id="giant" style="height:310mm">큰 문항</section>')
+        codes = self.inspect(self.make_case('큰문항', teacher=broken), 1)
+        self.assertIn('too-tall', codes)
+        self.assertIn('page-overflow', codes)
+
+    def test_long_answer_in_small_box(self):
+        old = '<div class="ws-key" data-src="직각">직각</div>'
+        answer = '매우긴예시답안' * 25
+        new = '<div class="ws-key" style="white-space:nowrap">' + answer + '</div>'
+        self.assertIn(old, self.teacher_text)
+        broken = self.teacher_text.replace(old, new, 1)
+        codes = self.inspect(self.make_case('긴답안', teacher=broken), 1)
+        self.assertIn('handwriting-overflow', codes)
+
+
+class SourceAuditTest(unittest.TestCase):
+    def test_markers_only_in_markup_not_inline_engine(self):
+        parser = sheet_check._SourceAudit()
+        parser.feed('<style>.ws-key{color:red}</style><script>"data-src=";"ws-key"</script><p>정상</p>')
+        self.assertFalse(parser.markers)
+        parser.feed('<span class="ws-key-choice" data-src="x">x</span>')
+        self.assertEqual(parser.markers, {'ws-key-choice', 'data-src'})
+
+    def test_external_css_url_and_local_data_svg(self):
+        parser = sheet_check._SourceAudit()
+        parser.feed('<img src="data:image/svg+xml,%3Csvg xmlns=http://www.w3.org/2000/svg%3E"><style>x{background:url(https://example.invalid/x)}</style>')
+        self.assertEqual(parser.remotes, ['CSS url()'])
+
+    def test_answer_table_leak_private_attribute_and_video_exceptions(self):
+        problems = []
+        student = ('<figure class="ws-video" data-yt="abcdefghijk"><span class="ws-video-url">'
+                   'https://youtu.be/abcdefghijk</span></figure>'
+                   '<script id="sheet-js">const host="youtube-nocookie.com";</script>'
+                   '<script id="sheet-reveal">비밀정답</script>'
+                   '<p data-check="{}">공개문구 비밀정답</p>')
+        sheet_check._audit_source('', student, ['공개문구', '비밀정답'], problems, '공개문구')
+        codes = [issue['code'] for issue in problems]
+        self.assertIn('student-private-markup', codes)
+        self.assertIn('answer-leak', codes)
+        self.assertNotIn('external-url', codes)
+        self.assertEqual(sum(code == 'answer-leak' for code in codes), 1)
+
+    def test_reveal_and_script_are_not_searched_for_answers(self):
+        problems = []
+        sheet_check._audit_source('', '<script id="sheet-reveal">비밀정답</script>'
+                                  '<script id="sheet-js">비밀정답</script><p>공개문구</p>',
+                                  ['비밀정답', '공개문구'], problems, '공개문구')
+        self.assertFalse(problems)
+
+
+class FakeInteractiveProtocol:
+    def __init__(self, reveal='시도 후', overflow=0, leaks=0):
+        self.reveal, self.overflow, self.leaks = reveal, overflow, leaks
+        self.calls, self.expressions = [], []
+
+    def call(self, name, params=None):
+        self.calls.append((name, params))
+        if name == 'Page.getLayoutMetrics':
+            return {'cssContentSize': {'height': 1000}}
+        if name in ('Page.captureScreenshot', 'Page.printToPDF'):
+            return {'data': base64.b64encode(b'test image or pdf').decode('ascii')}
+        return {}
+
+    def evaluate(self, expression, await_promise=False):
+        self.expressions.append(expression)
+        if 'available:' in expression:
+            return {'available': True, 'reveal': self.reveal, 'salt': 'a' * 32}
+        if expression == 'sheet.slots()':
+            return [{'slot': 'q1.1', 'auto': True}]
+        if '.map(row =>' in expression:
+            return [{'slot': 'q1.1', 'right': True, 'wrong': False}]
+        if 'for (const row of' in expression:
+            return {'view': 'a4', 'print_leaks': self.leaks}
+        if "sheet.view('solve')" in expression:
+            return {'view': 'solve', 'overflow_x': self.overflow}
+        return None
+
+
+class CheckBoundaryTest(unittest.TestCase):
+    def test_screen_overflow_and_filled_print_are_recorded(self):
+        out = TRIALS / ('screen-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
+        protocol, problems = FakeInteractiveProtocol(overflow=2, leaks=1), []
+        info, files, pdf = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertEqual(info['grading'], 'passed')
+        self.assertEqual((info['auto_slots'], info['answer_slots']), (1, 1))
+        self.assertEqual([p.name for p in files], ['화면-폰.png', '화면-태블릿.png'])
+        self.assertTrue(all(p.is_file() for p in files))
+        self.assertEqual(pdf, b'test image or pdf')
+        self.assertEqual([p['code'] for p in problems].count('screen-overflow'), 2)
+        self.assertIn('print-leak', [p['code'] for p in problems])
+        self.assertTrue(any("sheet.clearAnswers()" in e for e in protocol.expressions))
+
+    def test_missing_screen_overflow_metric_is_not_a_pass(self):
+        out = TRIALS / ('screen-metric-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        protocol, problems = FakeInteractiveProtocol(overflow=None), []
+        sheet_check._interactive_check(protocol, out, None, problems)
+        self.assertEqual([p['code'] for p in problems], ['interactive-report-invalid'] * 2)
+
+    def test_no_reveal_skips_grading_but_still_prints_answers(self):
+        out = TRIALS / ('no-reveal-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
+        protocol, problems = FakeInteractiveProtocol(reveal='없음', overflow=1), []
+        info, files, pdf = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertEqual(info['grading'], 'skipped-reveal-none')
+        self.assertFalse(any('.map(row =>' in e for e in protocol.expressions))
+        self.assertTrue(any('for (const row of' in e for e in protocol.expressions))
+        self.assertEqual(len(files), 2)
+        self.assertIsNotNone(pdf)
+        self.assertFalse(problems)
+
+    def test_missing_and_invalid_answer_tables_are_errors(self):
+        out = TRIALS / ('answer-key-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        problems = []
+        self.assertIsNone(sheet_check._load_answer_table(out, problems))
+        self.assertEqual(problems[0]['code'], 'answer-table-missing')
+        self.assertIn('build', problems[0]['fix'])
+        (out / '정답표.json').write_text('{"slots": []}', encoding='utf-8')
+        problems = []
+        self.assertIsNone(sheet_check._load_answer_table(out, problems))
+        self.assertEqual(problems[0]['code'], 'answer-table-invalid')
+
+    def test_grading_mismatch_names_slots_and_checks_exact_booleans(self):
+        table = {'slots': [{'slot': 'q1.1'}, {'slot': 'q2.1'}]}
+        slots = [{'slot': 'q1.1', 'auto': True}, {'slot': 'q3.1', 'auto': True},
+                 {'slot': 'head.이름', 'auto': False}]
+        results = [{'slot': 'q1.1', 'right': True, 'wrong': True},
+                   {'slot': 'q2.1', 'right': None, 'wrong': False}]
+        problems = []
+        sheet_check._audit_answers(table, slots, results, problems)
+        mismatches = [p for p in problems if p['code'] == 'answer-slot-mismatch']
+        self.assertTrue(any('q2.1' in p['msg'] for p in mismatches))
+        self.assertTrue(any('q3.1' in p['msg'] for p in mismatches))
+        failed = [p['item'] for p in problems if p['code'] == 'answer-check-failed']
+        self.assertEqual(failed, ['q1.1', 'q2.1'])
+
+    def test_interactive_report_must_include_print_leak_count(self):
+        problems = []
+        sheet_check._audit_report({'interactive': True, 'view': 'a4'}, '학생용', problems)
+        self.assertIn('interactive-report-invalid', [p['code'] for p in problems])
+
+    def test_print_leaks_are_reported_for_both_roles(self):
+        for role in ('교사용', '학생용'):
+            with self.subTest(role=role):
+                problems = []
+                sheet_check._audit_report({'view': 'a4', 'print_leaks': 2}, role, problems)
+                self.assertEqual([p['code'] for p in problems], ['print-leak'])
+                self.assertIn(role, problems[0]['msg'])
+        problems = []
+        sheet_check._audit_report({'view': 'solve', 'print_leaks': 2}, '학생용', problems)
+        self.assertFalse(problems)
+
+    def test_thresholds_and_drawing_exemption(self):
+        report = {
+            'pages': [{'n': 1, 'teacher': False, 'slots': [{'fill': .95, 'base_fill': .65, 'overflow_mm': .5}]},
+                      {'n': 2, 'teacher': False, 'slots': [{'fill': .9, 'base_fill': .5, 'overflow_mm': .501}]}],
+            'items': [{'id': 'q1', 'page': 1}], 'issues': [], 'overflow': [],
+            'fonts': {}, 'images': {}, 'math': {},
+            'boxes': [{'item': 'q1', 'index': 0, 'kind': 'text', 'height_mm': 6.9, 'width_mm': 20, 'key_text': ''},
+                      {'item': 'q1', 'index': 1, 'kind': 'draw', 'height_mm': 10, 'width_mm': 10, 'key_text': '그림 설명' * 50}]}
+        problems = []
+        sheet_check._audit_report(report, '교사용', problems)
+        sheet_check._audit_fill(report, problems)
+        codes = [issue['code'] for issue in problems]
+        self.assertIn('page-overflow', codes)
+        self.assertIn('box-too-short', codes)
+        self.assertNotIn('handwriting-overflow', codes)
+        self.assertNotIn('page-fill', codes)
+        self.assertNotIn('base-fill', codes)
+
+    def test_single_page_with_thin_content_warns(self):
+        # 한 쪽짜리에서 늘이기 전 채움이 51%면 답칸만 반 쪽씩 늘어나므로 경고한다(실제 Codex 시험에서 나온 경우).
+        report = {'pages': [{'n': 1, 'teacher': False, 'slots': [{'fill': .985, 'base_fill': .51, 'overflow_mm': 0}]}]}
+        problems = []
+        sheet_check._audit_fill(report, problems)
+        self.assertEqual([issue['code'] for issue in problems], ['base-fill'])
+
+    def test_missing_pymupdf_archives_old_outputs_and_uses_regex(self):
+        out = TRIALS / ('fallback-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        for name in ('학생-01.png', '모아보기.png', '모아보기-흑백.png'):
+            (out / name).write_bytes(b'prior')
+        real_import = builtins.__import__
+
+        def without_pymupdf(name, *args, **kwargs):
+            if name == 'pymupdf':
+                raise ImportError('시험: pymupdf 없음')
+            return real_import(name, *args, **kwargs)
+
+        with patch('builtins.__import__', side_effect=without_pymupdf):
+            self.assertEqual(sheet_check._pdf_pages(b'/Type /Pages /Type /Page /Type /Page'), 2)
+            problems = []
+            self.assertEqual(sheet_check._render_pages(out, [], problems), [])
+            self.assertEqual(sheet_check._contact_sheets(out, [], problems), [])
+        self.assertEqual(problems[0]['code'], 'pymupdf-missing')
+        for name in ('학생-01.png', '모아보기.png', '모아보기-흑백.png'):
+            self.assertEqual((out / '_이전' / name).read_bytes(), b'prior')
+            self.assertFalse((out / name).exists())
+
+    def test_missing_pillow_archives_stale_contact_sheets(self):
+        out = TRIALS / ('no-pillow-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        for name in ('모아보기.png', '모아보기-흑백.png'):
+            (out / name).write_bytes(b'prior')
+        real_import = builtins.__import__
+
+        def without_pillow(name, *args, **kwargs):
+            if name == 'PIL':
+                raise ImportError('시험: Pillow 없음')
+            return real_import(name, *args, **kwargs)
+
+        problems = []
+        with patch('builtins.__import__', side_effect=without_pillow):
+            self.assertEqual(sheet_check._contact_sheets(out, [('학생', 1, out / '학생-01.png')], problems), [])
+        self.assertEqual(problems[0]['code'], 'pillow-missing')
+        self.assertTrue((out / '_이전/모아보기-흑백.png').is_file())
+
+
+if __name__ == '__main__':
+    unittest.main()

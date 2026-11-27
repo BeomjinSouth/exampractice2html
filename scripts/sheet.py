@@ -4,6 +4,7 @@ import importlib
 import json
 from pathlib import Path
 import sys
+from uuid import uuid4
 
 from sheet_common import KINDS, ROOT, SOURCE, json_bytes
 
@@ -32,7 +33,7 @@ def cmd_new(folder, title, kind, columns):
         print('다음: 공백이 아닌 제목을 넣고 new를 다시 실행하세요.')
         return 1
     data = json.loads((ROOT / 'assets/templates' / SOURCE).read_text(encoding='utf-8'))
-    data['meta'].update(title=title, kind=kind, columns=columns)
+    data['meta'].update(title=title, kind=kind, columns=columns, sheet_id='sheet-' + uuid4().hex[:24])
     try:
         folder.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
@@ -81,6 +82,14 @@ def main(argv=None) -> int:
     new.add_argument('--title', required=True, metavar='제목')
     new.add_argument('--kind', choices=KINDS, default='수업')
     new.add_argument('--columns', type=int, choices=(1, 2), default=1)
+    sync = subs.add_parser('sync', help='학생 기록 연동을 설정합니다.')
+    sync_commands = sync.add_subparsers(dest='sync_command', required=True, title='연동 명령')
+    config = sync_commands.add_parser('config', help='프로젝트 주소와 공개 키를 저장합니다.')
+    config.add_argument('--url', required=True, help='Supabase 프로젝트 HTTPS 주소')
+    config.add_argument('--key', required=True, help='publishable 또는 anon 키')
+    for name, help_text in [('show', '설정을 확인합니다.'), ('test', '시험 기록을 전송합니다.'),
+                            ('schema', '데이터베이스 SQL을 출력합니다.'), ('off', '연동 설정을 끕니다.')]:
+        sync_commands.add_parser(name, help=help_text)
     blocks = subs.add_parser('blocks', help='블록 등록부를 봅니다.')
     blocks.add_argument('kind', nargs='?', metavar='종류')
     art = subs.add_parser('art', help='활동지 그림을 만들거나 가져옵니다.')
@@ -104,6 +113,9 @@ def main(argv=None) -> int:
     try:
         if args.command == 'new':
             return cmd_new(args.folder, args.title, args.kind, args.columns)
+        if args.command == 'sync':
+            from sheet_sync import cmd_sync
+            return cmd_sync(args)
         if args.command == 'blocks':
             return cmd_blocks(args.kind)
         if args.command == 'art':

@@ -388,10 +388,17 @@ class Renderer:
                 key_plot = ''.join(f'<circle cx="{mm(px(x))}" cy="{mm(py(y))}" r="0.8"/>' for x, y in right)
             else:
                 (x1, y1), (x2, y2) = right
-                factor = 1000
-                key_plot = (f'<path d="M{mm(px(x1 - factor * (x2 - x1)))} {mm(py(y1 - factor * (y2 - y1)))}'
-                            f'L{mm(px(x1 + factor * (x2 - x1)))} {mm(py(y1 + factor * (y2 - y1)))}" '
-                            'fill="none" stroke="currentColor" stroke-width="0.4"/>')
+                # 두 점을 잇는 무한 직선과 좌표 범위의 교점을 계산한다.
+                lo, hi = -math.inf, math.inf
+                for start, delta, lower, upper in ((x1, x2-x1, xmin, xmax), (y1, y2-y1, ymin, ymax)):
+                    if delta:
+                        ends = sorted(((lower-start)/delta, (upper-start)/delta))
+                        lo, hi = max(lo, ends[0]), min(hi, ends[1])
+                if lo <= hi and math.isfinite(lo) and math.isfinite(hi):
+                    ax, ay = x1 + lo*(x2-x1), y1 + lo*(y2-y1)
+                    bx, by = x1 + hi*(x2-x1), y1 + hi*(y2-y1)
+                    key_plot = (f'<path d="M{mm(px(ax))} {mm(py(ay))}L{mm(px(bx))} {mm(py(by))}" '
+                                'fill="none" stroke="currentColor" stroke-width="0.4"/>')
         elif self.interactive and block.get('pen'):
             slot = self.slot('draw')
         if self.interactive and block.get('pen'):
@@ -412,7 +419,8 @@ class Renderer:
                 for x in range(xmin, xmax + 1):
                     xx = px(x)
                     axes += f'M{mm(xx)} {mm(max(0, oy - .6))}V{mm(min(height, oy + .6))}'
-                    if x and labels and unit >= 3:
+                    if (x and labels and unit >= 3 and (unit >= 6 or x % 2 == 0)
+                            and not (y_axis and x < 0 and abs(x * unit) < 5)):
                         align = 'start' if x == xmin else 'end' if x == xmax else 'middle'
                         ticks.append(label(xx, oy + 3.3 if oy + 3.5 < height else oy - 1.1, str(x),
                                            f' text-anchor="{align}"'))
@@ -423,7 +431,7 @@ class Renderer:
                 for y in range(ymin, ymax + 1):
                     yy = py(y)
                     axes += f'M{mm(max(0, ox - .6))} {mm(yy)}H{mm(min(width, ox + .6))}'
-                    if y and labels and unit >= 3:
+                    if y and labels and unit >= 3 and (unit >= 6 or y % 2 == 0):
                         right = ox < 6
                         ticks.append(label(ox + 1 if right else ox - 1.1, min(height - .2, max(2.8, yy + .9)), str(y),
                                            ' text-anchor="start"' if right else ' text-anchor="end"'))
@@ -601,7 +609,7 @@ class Renderer:
                 axis += f'<text x="{mm(sx(i+.5))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(inspect_markup(label).plain)}</text>'
         elif kind in ('histogram', 'polygon'):
             for value in block['bins']:
-                axis += f'<text x="{mm(sx(value))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(mm(value))}</text>'
+                axis += f'<text x="{mm(sx(value))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(mm(value).replace("-", "−"))}</text>'
         elif kind == 'scatter':
             x_step = block.get('x_step', (x1-x0) / 5)
             for i in range(min(200, math.floor((x1-x0) / x_step + 1e-9)) + 1):
@@ -666,12 +674,12 @@ class Renderer:
         xs = block.get('table', [])
         cells_x, cells_y = [], []
         for value in xs:
-            cells_x.append(f'<td data-x="{mm(value)}">{escape(mm(value))}</td>')
+            cells_x.append(f'<td data-x="{mm(value)}">{escape(mm(value).replace("-", "−"))}</td>')
             try:
                 result = mm(function_value(tree, value, params))
             except (ArithmeticError, ValueError, OverflowError):
                 result = '—'
-            cells_y.append(f'<td data-y-for="{mm(value)}">{escape(result)}</td>')
+            cells_y.append(f'<td data-y-for="{mm(value)}">{escape(result.replace("-", "−"))}</td>')
         table_html = ('<table class="ws-data ws-explore-table"><tbody><tr><th>x</th>' + ''.join(cells_x) +
                       '</tr><tr><th>y</th>' + ''.join(cells_y) + '</tr></tbody></table>') if xs else ''
         attrs = f' data-fn="{escape(block["fn"])}" data-params="{escape(json.dumps(block["params"], ensure_ascii=False, separators=(",", ":")))}" data-table="{escape(json.dumps(xs, separators=(",", ":")))}"'
@@ -1092,6 +1100,24 @@ def document_html(renderer, build_meta, fonts):
     solve = ROOT / 'assets/engine/solve.js'
     if solve.is_file():
         js += '\n' + solve.read_text(encoding='utf-8')
+    sync_script = ROOT / 'assets/engine/sync.js'
+    if sync_script.is_file():
+        js += '\n' + sync_script.read_text(encoding='utf-8')
+    sync_tag = ''
+    if renderer.interactive and renderer.meta.get('sync', True):
+        from sheet_sync import load_config
+        config = load_config()
+        if config:
+            sheet_id = renderer.meta.get('sheet_id')
+            if not sheet_id:
+                sheet_id = 'sheet-' + sha256(renderer.title.encode('utf-8'))[:24]
+                renderer.warnings.append('meta.sheet_id가 없어 제목 해시를 사용합니다. 제목을 바꾸면 기록이 분리됩니다.')
+            descriptor_sync = {'v': 1, **config, 'table': 'sheet_records',
+                               'sheet': sheet_id, 'title': renderer.title}
+            sync_tag = '<meta name="sheet-sync" content="' + escape(json.dumps(
+                descriptor_sync, ensure_ascii=False, separators=(',', ':')), quote=True) + '">\n'
+            if not sync_script.is_file():
+                renderer.warnings.append('학생 기록 엔진 sync.js가 없어 기록을 전송하거나 조회할 수 없습니다.')
     theme = ''
     if renderer.theme == '산뜻':
         fresh = ROOT / 'assets/engine/theme-fresh.css'
@@ -1111,7 +1137,7 @@ def document_html(renderer, build_meta, fonts):
             f'data-columns="{renderer.columns}" data-answers="on"{interactive} data-theme="{escape(renderer.theme)}" '
             f'data-accent="{escape(renderer.accent)}">\n<head>\n'
             '<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-            f'<title>{title}</title>\n<meta name="sheet-build" content="{descriptor}">\n{salt}'
+            f'<title>{title}</title>\n<meta name="sheet-build" content="{descriptor}">\n{salt}{sync_tag}'
             f'<style id="sheet-fonts">{fonts}</style>\n<style id="sheet-css">{css}</style>\n{theme}'
             '<style id="sheet-user"></style>\n</head>\n<body>\n'
             f'<div id="sheet-src">\n{items}\n</div>\n'

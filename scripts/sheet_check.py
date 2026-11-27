@@ -345,7 +345,8 @@ def _audit_answers(table, slots, results, problems):
 def _navigate(browser, path, teacher):
     protocol = browser.cdp
     protocol.events = [event for event in protocol.events if event.get("method") != "Page.loadEventFired"]
-    result = protocol.call("Page.navigate", {"url": path.resolve().as_uri()})
+    url = path.resolve().as_uri() + ("" if teacher else "?nosync")
+    result = protocol.call("Page.navigate", {"url": url})
     if result.get("errorText"):
         raise CheckError("HTML을 열지 못했습니다: " + result["errorText"])
     protocol.wait_event("Page.loadEventFired")

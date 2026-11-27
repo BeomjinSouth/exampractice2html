@@ -39,7 +39,7 @@ class BuildTest(unittest.TestCase):
 
     def cli(self, *args, status=0):
         result = subprocess.run([sys.executable, '-B', '-X', 'utf8', str(ROOT / 'scripts/sheet.py'), *map(str, args)],
-                                env={**os.environ, 'SHEET_FONT_DIR': self.temp.name, 'SHEET_TEST_SALT': '00112233445566778899aabbccddeeff'}, capture_output=True, encoding='utf-8')
+                                env={**os.environ, 'SHEET_FONT_DIR': self.temp.name, 'SHEET_SYNC_CONFIG': str(Path(self.temp.name) / 'sync.json'), 'SHEET_TEST_SALT': '00112233445566778899aabbccddeeff'}, capture_output=True, encoding='utf-8')
         self.assertEqual(result.returncode, status, (result.stdout + result.stderr)[:600])
         self.assertIn('다음:', result.stdout)
         return result.stdout
@@ -314,6 +314,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn('$4$', cells[1][1])
         self.assertIn('$6$', cells[2][1])
         self.assertEqual(split['right'][0]['rows'][0]['answer'], '$y=2x$')
+        self.assertEqual(plain(split['right'][0]['rows'][0]['accept'][1]), 'y=2×x')
         ox = next(b for b in by_id['q2']['blocks'] if b['type'] == 'ox')
         self.assertEqual([row['answer'] for row in ox['items']], ['O', 'X'])
         self.assertIn('$2$', by_id['q2']['blocks'][-1]['nodes'][1])

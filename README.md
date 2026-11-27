@@ -55,6 +55,17 @@ Codex(또는 Claude Code)에게 이렇게 말하세요.
 
 활동지 폴더에 `<제목>.html`(학생 배부용), `<제목> (교사용).html`, 두 PDF가 생깁니다. 학생에게는 `<제목>.html`만 주면 됩니다.
 
+## 학생 기록 연동 설정
+
+선택 기능입니다. 학생 기록을 사용하지 않으면 설정하지 않아도 됩니다. 먼저 Supabase에서 무료 프로젝트를 만들고 프로젝트 URL과 **publishable 키**(또는 기존 anon 키)를 확인하세요. `service_role`이나 `sb_secret_` 비밀 키는 입력하거나 배포하지 마세요.
+
+1. Supabase SQL Editor에서 `python -X utf8 "<스킬>/scripts/sheet.py" sync schema`가 출력하는 SQL 전체를 실행합니다. 같은 SQL은 `assets/supabase/schema.sql`에도 있습니다.
+2. Authentication에서 이메일·비밀번호로 교사 계정을 만들고 공개 회원가입은 끄세요. SQL Editor에서 `insert into public.sheet_teachers (email) values ('교사 이메일') on conflict do nothing;`을 실행해 같은 이메일을 등록합니다. 등록된 교사는 이 프로젝트의 모든 활동지 기록을 볼 수 있으므로 프로젝트 접근 권한을 신중히 관리하세요.
+3. `python -X utf8 "<스킬>/scripts/sheet.py" sync config --url "https://<프로젝트>.supabase.co" --key "<공개 키>"`를 실행합니다. `sync show`는 키 앞 10자만 보여 줍니다. `sync test`는 실제 시험 기록 한 행(`sheet_id=_test`)을 저장합니다.
+4. 이후 화면 풀이가 켜진 활동지를 조립하면 설정이 자동 반영됩니다. 교사용 HTML의 **학생 기록**에서 로그인해 확인합니다. `build`에서 `sync.js`가 없다고 경고하면 전송·조회 엔진이 아직 없어 동작하지 않으므로 엔진을 갖춘 뒤 다시 조립해야 합니다. 설정 전 만든 파일도 다시 조립해야 합니다. 특정 활동지만 제외하려면 `meta.sync: false`를 씁니다. `sync off`는 이 컴퓨터의 설정만 지우며 이미 배부한 HTML의 연동은 끄지 않습니다.
+
+학생 이름과 답이 교사의 Supabase에 저장되므로 학교 개인정보 규정을 확인하고 학생에게 미리 안내하세요. 공개 키로 쓰는 기록은 조작될 수 있어 신원 인증이나 점수의 유일한 근거로 삼을 수 없습니다.
+
 ## 알아 둘 점
 
 - 학생용 파일의 정답은 해시와 난독화로만 들어 있습니다. 소스 보기로 바로 보이지는 않지만 보안 장치는 아닙니다(개발자 도구를 쓰면 찾을 수 있습니다). 점수가 걸린 평가는 화면 풀이를 끈 채(평가 종류의 기본값) 쓰세요.

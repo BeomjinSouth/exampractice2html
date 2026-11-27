@@ -764,14 +764,17 @@ class Validator:
     def meta(self, meta):
         if not self.object(meta, 'meta', ('title', 'kind', 'columns', 'subject', 'grade', 'term', 'unit',
                                           'header_title', 'name_fields', 'pair', 'total_points', 'goal',
-                                          'interactive', 'reveal', 'theme', 'accent')):
+                                          'interactive', 'reveal', 'theme', 'accent', 'sync', 'sheet_id')):
             return
         kind = meta.get('kind', '수업')
         if kind not in KINDS:
             self.error('meta.kind', '활동지 유형을 알 수 없습니다.', '수업, 연습, 평가 중 하나를 쓰세요.')
         columns = meta.get('columns', 1)
         self.integer(columns, 'meta.columns', 1, 2)
-        self.bools(meta, 'meta', 'pair', 'interactive')
+        self.bools(meta, 'meta', 'pair', 'interactive', 'sync')
+        if 'sheet_id' in meta and (not isinstance(meta['sheet_id'], str) or
+                                   not re.fullmatch(r'[a-z0-9-]{1,32}', meta['sheet_id'])):
+            self.error('meta.sheet_id', '활동지 id 형식이 맞지 않습니다.', '소문자·숫자·붙임표를 1~32자로 쓰세요.')
         for key, allowed in (('reveal', ('시도 후', '바로', '교사만', '없음')),
                              ('theme', ('정본', '산뜻')), ('accent', ('하늘', '민트', '주황', '보라'))):
             if key in meta and meta[key] not in allowed:

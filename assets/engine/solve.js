@@ -192,14 +192,20 @@
   const recordByNode = new WeakMap(), panels = new WeakMap(), itemReveal = new WeakMap(), slotReveal = new WeakMap();
   const originalAttrs = new WeakMap(), exploreOriginal = new WeakMap(), mediaBound = new WeakSet();
   const records = new Map(), dash = new Set();
-  let stored = {}, initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
+  let stored = {}, storedPens = {}, initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
   let delayedPaint;
   const store = (op, ...args) => { try { return window.localStorage[op](...args); } catch { return undefined; } };
   const usable = () => !teacher || preview;
   const solveOnly = (tag, cls, text) => runtime(make(tag, `${cls} ws-solve-only`, text));
   const uiButton = (label, action, fn, options) => core.button(label, action, event => { if (usable()) fn(event); }, options);
-  function saveValues() { if (storageKey) store('setItem', storageKey, JSON.stringify(values())); }
+  function saveValues() {
+    if (!storageKey) return;
+    store('setItem', storageKey, JSON.stringify(values()));
+    const pens = Object.fromEntries([...records.values()].filter(r => r.penValue !== undefined).map(r => [r.slot, r.penValue]));
+    if (Object.keys(pens).length) store('setItem', `${storageKey}:pen`, JSON.stringify(pens));
+    else store('removeItem', `${storageKey}:pen`);
+  }
   function attr(el, name, value) {
     let saved = originalAttrs.get(el);
     if (!saved) originalAttrs.set(el, saved = new Map());
@@ -294,6 +300,10 @@
           row = { el, item, kind, result: null };
           const embedded = json(el.dataset.value, undefined);
           row.value = sanitizedValue(row, embedded ?? (Object.hasOwn(stored, old) ? stored[old] : undefined));
+          if (el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)) {
+            const ink = json(el.dataset.penValue, undefined) ?? storedPens[old];
+            row.penValue = sanitizedValue({ el, kind: 'draw' }, ink);
+          }
           recordByNode.set(el, row);
         }
         if (!slotReveal.has(el)) slotReveal.set(el, Object.hasOwn(initialReveal.slots ?? {}, old) ? initialReveal.slots[old] : undefined);
@@ -328,9 +338,10 @@
   }
   const answer = (slot, value) => records.has(slot) ? setValue(records.get(slot), value, true) : null;
   function clearAnswers() {
-    stored = {};
+    stored = {}; storedPens = {};
     for (const row of records.values()) {
-      row.value = undefined; row.result = null; delete row.el.dataset.value;
+      row.value = undefined; row.penValue = undefined; row.result = null;
+      delete row.el.dataset.value; delete row.el.dataset.penValue;
       row.control?.reset?.();
       row.control?.paint(undefined); updateRow(row);
     }
@@ -343,7 +354,7 @@
         updatePanel(item);
       }
     }
-    if (storageKey) store('removeItem', storageKey);
+    if (storageKey) { store('removeItem', storageKey); store('removeItem', `${storageKey}:pen`); }
     updateScore();
   }
 
@@ -596,9 +607,10 @@
         const v = value[+hit.dataset.i];
         if (v == null) continue;
         const width = Number(hit.getAttribute('width')), pad = Math.min(.6, width * .05);
-        const y = Math.min(bottom - .3, toSvg(v));
+        const baseline = toSvg(0), valueY = toSvg(v);
+        const y = Math.min(baseline, valueY);
         const mark = runtime(svgNode('rect', { class: 'ws-user-bar', x: Number(hit.getAttribute('x')) + pad,
-          y, width: width - 2 * pad, height: bottom - y }));
+          y, width: width - 2 * pad, height: Math.abs(baseline - valueY) }));
         mark.append(svgNode('title', {})); mark.firstChild.textContent = String(v);
         plot.append(mark);
       }
@@ -608,12 +620,10 @@
   // The CSS-sized canvas does not take space; normalized points survive reflow and printing.
   function pen(row, alongsidePlot = false) {
     const el = row.el, figure = el.matches('figure');
-    // A figure with plot + pen has one authored slot, reserved for points/line.
-    // Its optional pen is scratch work; it never changes the slot's value shape.
-    let scratch;
-    const drawing = () => alongsidePlot ? scratch : row.value;
+    // Keep plot values unchanged; the accompanying pen is stored separately.
+    const drawing = () => alongsidePlot ? row.penValue : row.value;
     const setDrawing = strokes => {
-      if (alongsidePlot) { scratch = { strokes }; paint(scratch); }
+      if (alongsidePlot) { row.penValue = { strokes }; saveValues(); paint(row.penValue); }
       else setValue(row, { strokes });
     };
     const anchor = figure ? el.querySelector('svg:not(.ws-match-lines), img') : el;
@@ -703,8 +713,8 @@
       if (type === 'pointerup') move(event);
       const { strokes } = gesture; gesture = undefined; setDrawing(strokes);
     });
-    return { paint: value => paint(alongsidePlot && usable() ? scratch : value), resize: true,
-      reset() { gesture = undefined; scratch = undefined; tool(alongsidePlot ? 'plot' : 'ink'); } };
+    return { paint: value => paint(alongsidePlot && usable() ? row.penValue : value), resize: true,
+      reset() { gesture = undefined; tool(alongsidePlot ? 'plot' : 'ink'); } };
   }
   function installControl(row) {
     if (row.control) return;
@@ -815,6 +825,7 @@
         panel.attempted = true;
         for (const row of panel.rows) { row.result = check(row); updateRow(row); }
         updatePanel(item); updateScore();
+        document.dispatchEvent(new CustomEvent('sheet:check', { detail: { item: item.dataset.id } }));
       }));
     }
     const toggleButton = (label, action, property) => uiButton(label, action, () => {
@@ -1131,6 +1142,7 @@
     const build = json(document.querySelector('meta[name="sheet-build"]')?.content, {});
     storageKey = `pbj-sheet:${build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
     stored = json(store('getItem', storageKey), {});
+    storedPens = json(store('getItem', `${storageKey}:pen`), {});
     const content = document.getElementById('sheet-reveal')?.textContent.trim();
     if (canReveal && content) {
       try { initialReveal = decodeReveal(salt(), content) || {}; } catch { /* input and hashing are still available */ }
@@ -1264,6 +1276,9 @@
         const value = recordByNode.get(node)?.value;
         if (keepValues && value !== undefined) el.dataset.value = JSON.stringify(value);
         else el.removeAttribute('data-value');
+        const penValue = recordByNode.get(node)?.penValue;
+        if (keepValues && penValue !== undefined) el.dataset.penValue = JSON.stringify(penValue);
+        else el.removeAttribute('data-pen-value');
         const originalOrder = recordByNode.get(node)?.control?.initial;
         const list = el.querySelector('.ws-order-list');
         if (originalOrder && list) {
@@ -1305,5 +1320,6 @@
 
   core.attach({ init, layoutFlow, afterLayout, studentPreview: () => preview, beforePrintButton, report,
     editMarkup, copiedItem, cleanItem, cleanDocument });
+  core.verdicts = () => Object.fromEntries([...records.values()].filter(r => r.auto).map(r => [r.slot, r.result]));
   Object.assign(window.sheet, { view, slots, answer, values, score, clearAnswers });
 })();

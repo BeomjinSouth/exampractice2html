@@ -8,10 +8,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const out = path.join(here, '_out');
+const out = process.env.SHEET_TEST_TMP || path.join(here, '_out');
 await fs.mkdir(out, { recursive: true });
 const work = await fs.mkdtemp(path.join(process.env.SHEET_TEST_TMP || out, 'run-'));
-const profile = path.join(out, 'profile');
+const profile = path.join(work, 'profile');
 const shots = path.join(work, 'screens');
 const quote = JSON.stringify;
 const run = promisify(execFile);
@@ -124,7 +124,7 @@ async function fixture(name, policy = '시도 후') {
   const [html, css, ...parts] = await Promise.all([
     fs.readFile(path.join(here, `fixture-${name}.html`), 'utf8'),
     fs.readFile(path.join(here, '../../assets/engine/sheet.css'), 'utf8'),
-    ...['sheet.js','solve.js'].map(file => fs.readFile(path.join(here, '../../assets/engine', file), 'utf8')),
+    ...['sheet.js','solve.js','sync.js'].map(file => fs.readFile(path.join(here, '../../assets/engine', file), 'utf8')),
   ]);
   const script = parts.join('\n');
   assert.doesNotMatch(script, /<\/script/i, '스크립트는 HTML에 그대로 내장되어야 합니다.');
@@ -694,6 +694,195 @@ try {
       assert.equal(await tab.js('document.querySelector(".ws-video iframe").src'), 'https://www.youtube-nocookie.com/embed/M7lc1UVf-VE?autoplay=1&start=30');
       assert.equal(await tab.js(`new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('iframe')===null`),true);
     });
+  });
+  const syncConfig = {v:1,url:'https://records.invalid',key:'legacy-anon-key',table:'sheet_records',sheet:'fixture-sheet',title:'그래프와 수'};
+  const mockScript = `<script>
+    window.syncMock = { calls: [], fail: false, loginFail: false, rows: [] };
+    window.confirm = () => true;
+    window.fetch = async (url, options = {}) => {
+      const call = { url: String(url), method: options.method || 'GET', headers: options.headers || {},
+        body: options.body ? JSON.parse(options.body) : null, keepalive: options.keepalive || false };
+      syncMock.calls.push(call);
+      if (syncMock.fail) throw new Error('offline');
+      if (call.url.includes('/auth/')) return { ok: !syncMock.loginFail, status: syncMock.loginFail ? 400 : 200,
+        json: async () => ({ access_token: 'teacher-token' }) };
+      return { ok: true, status: 200, json: async () => syncMock.rows };
+    };
+  <\/script>`;
+  const withSync = html => html.replace('</head>', `<meta name="sheet-sync" content='${quote(syncConfig)}'></head>`)
+    .replace('<script id="sheet-js">', `${mockScript}<script id="sheet-js">`);
+  const teacherSource = await usingTab(interactive, tab => tab.js('sheet.serialize()'));
+  const studentSource = await usingTab(interactive, tab => tab.js('sheet.exportStudent()'));
+  const syncTeacher = await saveFile('sync-teacher', withSync(teacherSource));
+  const syncStudent = await saveFile('sync-student', withSync(studentSource));
+  await test('학생 기록 전송·이름·제출·대기열·온라인 재전송', () => usingTab(syncStudent, async tab => {
+    await tab.js('sheet.clearAnswers(); localStorage.clear()');
+    await tab.js(`sheet.view('a4')`,true); await tab.click(action('sync-submit'));
+    await eventually(() => tab.js(`sheet.view() === 'solve'`), '이름 안내를 위한 풀이 화면');
+    await tab.click(action('check', item('q1')));
+    assert.equal(await tab.js('syncMock.calls.length'), 0);
+    assert.equal(await tab.js('document.querySelector(".ws-sync-warning").hidden'), false);
+    await setInput(tab, `${slot('head.이름')} input`, '가상 학생');
+    await tab.js(`sheet.answer('q1.1','0.5'); sheet.answer('q1.2','오답')`);
+    await tab.click(action('check', item('q1')));
+    await eventually(() => tab.js('syncMock.calls.length === 1'), '확인 기록 전송');
+    const sent = await tab.js('syncMock.calls[0]');
+    assert.equal(sent.url, 'https://records.invalid/rest/v1/sheet_records');
+    assert.equal(sent.method, 'POST'); assert.equal(sent.keepalive, true);
+    assert.deepEqual(sent.headers, {apikey:'legacy-anon-key',Authorization:'Bearer legacy-anon-key','Content-Type':'application/json',Prefer:'return=minimal'});
+    assert.deepEqual(Object.keys(sent.body), ['sheet_id','sheet_title','build','client_id','student','event','item','score','answers','verdicts']);
+    assert.equal(sent.body.sheet_id,'fixture-sheet'); assert.equal(sent.body.build,'interactive-');
+    assert.match(sent.body.client_id,/^[0-9a-f]{32}$/); assert.deepEqual(sent.body.student,{'이름':'가상 학생'});
+    assert.equal(sent.body.event,'check'); assert.equal(sent.body.item,'q1');
+    assert(!Object.keys(sent.body.answers).some(key => key.startsWith('head.')));
+    assert.equal(sent.body.answers['q1.1'],'0.5'); assert.equal(sent.body.verdicts['q1.1'],true);
+    assert.equal(sent.body.verdicts['q1.2'],false); assert.deepEqual(sent.body.score,{checked:2,correct:1,total:11});
+    await tab.js('syncMock.fail = true'); await tab.click(action('sync-submit'));
+    await eventually(() => tab.js(`document.querySelector(${quote(action('sync-retry'))}).textContent.includes('보내지 못함')`), '실패 상태');
+    const queued = await tab.js(`JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.endsWith(':queue'))))`);
+    assert.equal(queued.length,1); assert.equal(queued[0].event,'submit'); assert.equal(queued[0].item,null);
+    await tab.js('syncMock.fail = false; window.dispatchEvent(new Event("online"))');
+    await eventually(() => tab.js(`document.querySelector(${quote(action('sync-retry'))}).textContent.includes('보냄')`), '온라인 재전송');
+    assert.equal(await tab.js(`Object.keys(localStorage).some(k=>k.endsWith(':queue'))`),false);
+    assert.equal(await tab.js('syncMock.calls.length'),3);
+    await tab.js(`sheet.view('a4')`,true); assert.equal((await tab.report()).print_leaks,0);
+    assert.equal(await tab.js('document.querySelector(".ws-sync-notice").checkVisibility()'),false);
+    await tab.js('sheet.clearAnswers()');
+  }));
+  await test('nosync·교사 미리보기·설정 없음은 학생 기록 전송 안 함', async () => {
+    for (const suffix of ['?nosync','#nosync']) await usingTab(syncStudent + suffix, async tab => {
+      await tab.js(`sheet.answer('head.이름','가상 학생')`); await tab.click(action('check',item('q1')));
+      assert.equal(await tab.js('syncMock.calls.length'),0); assert.equal(await tab.js(`!!document.querySelector(${quote(action('sync-submit'))})`),false);
+    });
+    await usingTab(syncTeacher, async tab => {
+      await tab.click(action('preview-student')); await tab.js(`sheet.answer('head.이름','가상 학생')`);
+      await tab.click(action('check',item('q1'))); assert.equal(await tab.js('syncMock.calls.length'),0);
+      assert.equal(await tab.js(`!!document.querySelector(${quote(action('sync-submit'))})`),false);
+    });
+    await usingTab(studentInteractive, async tab => assert.equal(await tab.js(`!!document.querySelector(${quote(action('sync-submit'))})`),false));
+  });
+  await test('새 공개 키·최대 50건 대기열·수동 재시도', async () => {
+    const url = await saveFile('sync-publishable',withSync(studentSource).replace('legacy-anon-key','sb_publishable_fixture'));
+    await usingTab(url, async tab => {
+      await tab.js(`sheet.clearAnswers(); localStorage.clear(); sheet.answer('head.이름','가상 학생'); syncMock.fail=true`);
+      await tab.js(`for(let i=0;i<56;i++) document.dispatchEvent(new CustomEvent('sheet:check',{detail:{item:'q1'}}))`);
+      await eventually(() => tab.js(`document.querySelector(${quote(action('sync-retry'))}).textContent.includes('보내지 못함')`), '대기열 저장');
+      assert.equal(await tab.js(`JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.endsWith(':queue')))).length`),50);
+      assert.equal(await tab.js('syncMock.calls[0].headers.apikey'),'sb_publishable_fixture');
+      assert.equal(await tab.js('Object.hasOwn(syncMock.calls[0].headers,"Authorization")'),false);
+      await tab.js('syncMock.fail=false'); await tab.click(action('sync-retry'));
+      await eventually(() => tab.js(`document.querySelector(${quote(action('sync-retry'))}).textContent.includes('보냄')`), '대기열 수동 재시도');
+      assert.equal(await tab.js('syncMock.calls.length'),51);
+      assert.equal(await tab.js(`Object.keys(localStorage).some(k=>k.endsWith(':queue'))`),false);
+    });
+  });
+  await test('정답 공개 없음이어도 제출', async () => {
+    const source = await usingTab(await fixture('interactive','없음'), tab => tab.js('sheet.exportStudent()'));
+    await usingTab(await saveFile('sync-no-reveal',withSync(source)),async tab=>{
+      await tab.js(`sheet.clearAnswers(); sheet.answer('head.이름','가상 학생')`);
+      await tab.click(action('sync-submit'));
+      await eventually(()=>tab.js('syncMock.calls.length===1'),'공개 없음 제출');
+      assert.equal(await tab.js('syncMock.calls[0].body.event'),'submit');
+      assert.deepEqual(await tab.js('syncMock.calls[0].body.score'),{checked:0,correct:0,total:0});
+    });
+  });
+  await test('교사 로그인·기록 표·정답 비교·CSV·로그아웃', () => usingTab(syncTeacher, async tab => {
+    const rows = [
+      {client_id:'one',created_at:'2026-01-02T04:00:00Z',student:{'이름':'가상 학생','반':'1','번':'2'},event:'check',score:{correct:1,checked:2,total:11},answers:{'q1.1':'0.5','q1.2':'오답'},verdicts:{'q1.1':true,'q1.2':false}},
+      {client_id:'two',created_at:'2026-01-02T03:00:00Z',student:{'이름':'다른 학생'},event:'submit',score:{correct:1,checked:1,total:11},answers:{'q1.1':'1/2'},verdicts:{'q1.1':true}},
+      {client_id:'one',created_at:'2026-01-02T02:00:00Z',student:{'이름':'가상 학생'},event:'submit',score:{},answers:{},verdicts:{}},
+    ];
+    await tab.js(`syncMock.rows = ${quote(rows)}`); await tab.click(action('student-records'));
+    await setInput(tab,'.ws-records input[type=email]','teacher@example.invalid');
+    await setInput(tab,'.ws-records input[type=password]','test-password');
+    await tab.js('syncMock.loginFail = true; document.querySelector(".ws-records-login").requestSubmit()');
+    await eventually(() => tab.js('document.querySelector(".ws-records-message").textContent.includes("로그인하지")'), '로그인 실패');
+    await tab.js('syncMock.loginFail = false; document.querySelector(".ws-records-login").requestSubmit()');
+    await eventually(() => tab.js('document.querySelectorAll(".ws-records-table tbody tr").length === 2'), '학생 표');
+    const calls = await tab.js('syncMock.calls');
+    assert.equal(calls[1].url,'https://records.invalid/auth/v1/token?grant_type=password');
+    assert.deepEqual(calls[1].body,{email:'teacher@example.invalid',password:'test-password'});
+    assert.equal(calls[2].url,'https://records.invalid/rest/v1/sheet_records?sheet_id=eq.fixture-sheet&order=created_at.desc&limit=5000');
+    assert.equal(calls[2].headers.Authorization,'Bearer teacher-token');
+    assert.equal(await tab.js('document.querySelector(".ws-records input[type=password]").value'),'');
+    assert.equal(await tab.js('Object.values(sessionStorage).includes("teacher-token")'),true);
+    assert.equal(await tab.js('Object.values(localStorage).includes("teacher-token")'),false);
+    assert.equal(await tab.js('document.querySelector(".ws-records-login").checkVisibility()'),false);
+    assert.match(await tab.js('document.querySelector(".ws-records-summary").textContent'),/학생 수2제출 수2/);
+    assert.match(await tab.js('document.querySelector(".ws-records-rates").textContent'),/1\.1 · 100% \(2\/2\)/);
+    assert.match(await tab.js('document.querySelector(".ws-records-table tbody tr").textContent'),/가상 학생.*제출.*1\/2.*✓.*✗/);
+    await tab.click('.ws-records-table tbody tr');
+    assert.match(await tab.js('document.querySelector(".ws-records-detail").textContent'),/가상 학생의 답.*0\.5.*12/s);
+    for (const width of [390,1024]) {
+      await tab.send('Emulation.setDeviceMetricsOverride',metrics(width,width===390?844:768,width===390));
+      await tab.js('new Promise(resolve => requestAnimationFrame(resolve))',true);
+      const {data} = await tab.send('Page.captureScreenshot',{format:'png'});
+      await fs.writeFile(path.join(shots,`records-${width}.png`),Buffer.from(data,'base64'));
+    }
+    await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:work});
+    await tab.click(action('records-csv'));
+    const csv = await eventually(() => fs.readFile(path.join(work,'학생 기록.csv')).catch(() => false),'CSV 내려받기');
+    assert.deepEqual([...csv.subarray(0,3)],[0xef,0xbb,0xbf]); assert.match(csv.toString('utf8'),/가상 학생/);
+    await tab.js('syncMock.rows=[]'); await tab.click(action('records-refresh'));
+    await eventually(() => tab.js('document.querySelector(".ws-records-message").textContent.includes("sheet_teachers")'), '빈 결과 안내');
+    await tab.js(`syncMock.rows=${quote(rows)}`); await tab.click(action('records-refresh'));
+    await eventually(() => tab.js('document.querySelectorAll(".ws-records-table tbody tr").length === 2'), '기록 다시 표시');
+    await tab.click('.ws-records-table tbody tr');
+    await tab.click(action('records-logout')); assert.equal(await tab.js('Object.values(sessionStorage).includes("teacher-token")'),false);
+    assert.equal(await tab.js('document.querySelectorAll(".ws-records-table tbody tr").length'),0);
+    assert.equal(await tab.js('document.querySelector(".ws-records-detail").textContent'),'');
+  }));
+  await test('휴대폰 머리표·OX와 음수 막대·펜 복원', async () => {
+    let html = studentSource.replace('data-kind="수업"','data-kind="연습"');
+    const head = `<table class="ws-head ws-head--연습"><tr><td class="ws-head-title"><div class="ws-head-1">기록 시험</div></td></tr><tr><td class="ws-head-name">1학년 (<span class="ws-name-slot" data-slot="head.반" data-check-kind="name">&nbsp;&nbsp;&nbsp;</span>)반 (<span class="ws-name-slot" data-slot="head.번" data-check-kind="name">&nbsp;&nbsp;&nbsp;&nbsp;</span>)번 이름 : (<span class="ws-name-slot" data-slot="head.이름" data-check-kind="name">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span>)</td></tr></table>`;
+    html = html.replace(/<table class="ws-head ws-head--수업">[\s\S]*?<\/table>/, head).replace('data-ymap="0 4 34 6"','data-ymap="-4 4 34 6"');
+    const freshCss = await fs.readFile(path.join(here,'../../assets/engine/theme-fresh.css'),'utf8');
+    for (const theme of ['정본','산뜻']) {
+      const themed = theme === '산뜻' ? html.replace('data-theme="정본"','data-theme="산뜻"').replace('</head>',`<style id="sheet-theme">${freshCss}</style></head>`) : html;
+      const url = await saveFile(`mobile-${theme}`,themed);
+      await usingTab(url, async tab => {
+        await tab.js('sheet.clearAnswers()'); await tab.js(`sheet.view('solve')`,true);
+        for (const width of [360,390,1024]) {
+          await tab.send('Emulation.setDeviceMetricsOverride',metrics(width,width===1024?768:844,width!==1024));
+          await tab.js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',true);
+          const report = await tab.report();
+          if (report.overflow_x) {
+            const outside = await tab.js(`[...document.querySelectorAll('body *')].filter(el=>{const r=el.getBoundingClientRect();return r.width && (r.right>innerWidth+1 || r.left< -1)}).slice(0,12).map(el=>({tag:el.tagName,cls:el.className?.baseVal ?? el.className,id:el.id,rect:[el.getBoundingClientRect().left,el.getBoundingClientRect().right]}))`);
+            assert.fail(`${theme} ${width}: 넘침 ${report.overflow_x}px ${quote(outside)}`);
+          }
+          assert.equal(await tab.js(`(() => {const cell=document.querySelector('.ws-head-name'), r=cell.getBoundingClientRect();return [...cell.querySelectorAll('.ws-name-slot')].every(el=>{const b=el.getBoundingClientRect();return b.left>=r.left && b.right<=r.right;})})()`),true);
+          const ox = await tab.js(`(() => {const cells=[...document.querySelectorAll('.ws-ox-n,.ws-ox-o,.ws-ox-x')];
+            const single=cells.every(el=>{const r=document.createRange();r.selectNodeContents(el);return [...r.getClientRects()].filter(x=>x.width&&x.height).length===1});
+            const picks=[...document.querySelectorAll('.ws-ox-o,.ws-ox-x')].map(el=>el.getBoundingClientRect().top);
+            return single && Math.abs(picks[0]-picks[1])<2;})()`);
+          assert(ox,`${theme} ${width} OX 한 줄`);
+          if (width !== 360) {
+            await tab.js('window.scrollTo(0,0); new Promise(requestAnimationFrame)',true);
+            const {cssContentSize:s} = await tab.send('Page.getLayoutMetrics');
+            const {data} = await tab.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:true,clip:{x:0,y:0,width:Math.ceil(s.width),height:Math.ceil(s.height),scale:1}});
+            await fs.writeFile(path.join(shots,`sync-mobile-${theme}-${width}.png`),Buffer.from(data,'base64'));
+          }
+        }
+        await tab.js(`sheet.answer('q3.4',[2,-2])`);
+        assert.deepEqual(await tab.js(`Array.from(document.querySelectorAll('${slot('q3.4')} .ws-user-bar')).map(e=>[+e.getAttribute('y'),+e.getAttribute('height')])`),[[13,7],[20,7]]);
+        await setInput(tab,'.ws-explore-ctrl input','-2');
+        assert.equal(await tab.js(`document.querySelector('.ws-explore [data-y-for="2"]').textContent`),'−4');
+        await tab.js(`sheet.answer('q3.1',[1])`); await tab.click(action('pen',slot('q3.1')));
+        await tab.mouseClick(`${slot('q3.1')} canvas`);
+        assert.deepEqual((await valuesOf(tab))['q3.1'],[1]);
+        const saved = await tab.js('window.__sheetCore.serialize(true,true)');
+        assert.match(saved,/data-pen-value=/);
+        await usingTab(await saveFile(`pen-copy-${theme}`,saved),async copy=>{
+          assert.deepEqual((await valuesOf(copy))['q3.1'],[1]);
+          assert(await copy.js(`document.querySelector('${slot('q3.1')} canvas').getContext('2d').getImageData(0,0,1000,200).data.some(v=>v!==0)`));
+        });
+      });
+      await usingTab(url,async copy=>{
+        assert.deepEqual((await valuesOf(copy))['q3.1'],[1]);
+        assert(await copy.js(`document.querySelector('${slot('q3.1')} canvas').getContext('2d').getImageData(0,0,1000,200).data.some(v=>v!==0)`));
+        await copy.js('sheet.clearAnswers()');
+      });
+    }
   });
   await test('콘솔 예외와 외부 요청 없음', async () => { assert.deepEqual(exceptions, []); assert.deepEqual(remotes.filter(u=>u !== 'https://www.youtube-nocookie.com/embed/M7lc1UVf-VE?autoplay=1&start=30'), []); });
   console.log(`화면 · ${shots}`);

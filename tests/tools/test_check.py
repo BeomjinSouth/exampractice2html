@@ -629,6 +629,7 @@ class DeliveryGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             files = ('assets/engine/sheet.js', 'assets/templates/구성.json', 'assets/kit/blocks.json',
+                     'assets/kit/terms.json', 'assets/kit/expressions.json',
                      'scripts/sheet_build.py', 'scripts/sheet_markup.py', 'scripts/sheet_answer.py',
                      'scripts/sheet_plan.py', 'scripts/sheet_common.py', 'scripts/sheet_sync.py')
             for name in files:
@@ -642,7 +643,11 @@ class DeliveryGateTest(unittest.TestCase):
                 changed_engine = sheet_build.engine_sha256()
                 self.assertNotEqual(initial, changed_engine)
                 (root / 'scripts/sheet_build.py').write_text('수정된 조립기', encoding='utf-8')
-                self.assertNotEqual(changed_engine, sheet_build.engine_sha256())
+                changed_build = sheet_build.engine_sha256()
+                self.assertNotEqual(changed_engine, changed_build)
+                # plan이 읽는 학년 용어·교과서 표현 자료가 바뀌어도 예전 검사 결과를 믿지 않는다.
+                (root / 'assets/kit/expressions.json').write_text('수정된 표현', encoding='utf-8')
+                self.assertNotEqual(changed_build, sheet_build.engine_sha256())
 
     def test_doctor_does_not_print_configuration(self):
         import sheet

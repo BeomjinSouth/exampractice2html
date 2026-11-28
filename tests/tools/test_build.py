@@ -188,6 +188,23 @@ class BuildTest(unittest.TestCase):
         self.assertIn('구성.json', output)
         self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
+    def test_derive_accepts_edited_sheet_from_an_older_build_record(self):
+        # 스크립트 해시가 없는 예전 조립 기록이면, 스킬을 업데이트한 뒤에도 예전 엔진으로 만든 편집본을 derive할 수 있어야 한다.
+        self.interactive_fixture()
+        self.cli('build', self.folder)
+        record = self.manifest()
+        record.pop('sheet_js_sha256')
+        self.record.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        teacher = self.teacher.read_text(encoding='utf-8')
+        older = teacher.replace('<script id="sheet-js">', '<script id="sheet-js">\n/* 예전 엔진 */', 1)
+        self.assertNotEqual(older, teacher)
+        self.teacher.write_text(older, encoding='utf-8')
+        output = self.cli('derive', self.teacher)
+        self.assertNotIn('foreign-code', output)
+        # 덧붙인 스크립트는 예전 기록이어도 막는다.
+        self.teacher.write_text(older.replace('</body>', '<script id="extra"></script></body>'), encoding='utf-8')
+        self.assertIn('foreign-code', self.cli('derive', self.teacher, status=1))
+
     def test_saved_teacher_survives_derive_and_requires_force_to_overwrite(self):
         self.fixture()
         self.cli('build', self.folder)

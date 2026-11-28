@@ -244,9 +244,9 @@ class ForeignCodeAudit(HTMLParser):
         if self.script:
             problems.append(f'{self.script} 스크립트가 닫히지 않았습니다.')
         if self.engine_hash is not None:
-            # Older manifests had no script hash. Trust the installed code, never the HTML.
-            expected = recorded_hash if recorded_hash is not None else sha256(engine_script().encode('utf-8'))
-            if self.engine_hash != expected:
+            # 예전 조립 기록에는 스크립트 해시가 없다. 그때는 내용 비교를 건너뛰고 덧붙인 요소만 본다.
+            # 지금 설치본과 비교하면 스킬을 업데이트한 뒤 예전 활동지의 브라우저 편집본을 derive할 수 없다.
+            if recorded_hash is not None and self.engine_hash != recorded_hash:
                 problems.append('sheet-js 스크립트 내용이 조립 때와 다릅니다.')
         elif recorded_hash is not None and 'sheet-js' not in self.seen:
             problems.append('조립 때 넣은 sheet-js 스크립트가 없습니다.')

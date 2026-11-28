@@ -227,19 +227,29 @@
   const records = new Map(), dash = new Set();
   let initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
-  let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton;
+  let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton, saveStatus;
   let lockedMedia = [];
-  const store = (op, ...args) => { try { return window.localStorage[op](...args); } catch { return undefined; } };
+  const store = (op, ...args) => {
+    try {
+      const result = window.localStorage[op](...args);
+      return op === 'getItem' ? result : true;
+    } catch { return undefined; }
+  };
+  function showSaveFailure(failed) {
+    const message = failed ? '이 기기에 저장되지 않았어요. ‘답을 넣어 저장’으로 파일에 저장하세요.' : '';
+    if (saveStatus && saveStatus.textContent !== message) saveStatus.textContent = message;
+  }
   const usable = () => (!teacher || preview) && !pendingRestore;
   const solveOnly = (tag, cls, text) => runtime(make(tag, `${cls} ws-solve-only`, text));
   const uiButton = (label, action, fn, options) => core.button(label, action, event => { if (usable()) fn(event); }, options);
   function saveValues() {
     if (!storageKey || pendingRestore) return;
-    store('setItem', storageKey, JSON.stringify(values()));
-    if (!teacher) store('setItem', `${storageKey}:saved-at`, String(Date.now()));
     const pens = Object.fromEntries([...records.values()].filter(r => r.penValue !== undefined).map(r => [r.slot, r.penValue]));
-    if (Object.keys(pens).length) store('setItem', `${storageKey}:pen`, JSON.stringify(pens));
-    else store('removeItem', `${storageKey}:pen`);
+    const saved = store('setItem', storageKey, JSON.stringify(values())) && (Object.keys(pens).length
+      ? store('setItem', `${storageKey}:pen`, JSON.stringify(pens))
+      : store('removeItem', `${storageKey}:pen`));
+    if (saved && !teacher) store('setItem', `${storageKey}:saved-at`, String(Date.now()));
+    showSaveFailure(!saved);
   }
   function attr(el, name, value) {
     let saved = originalAttrs.get(el);
@@ -397,7 +407,10 @@
     if (pendingRestore) return null;
     const next = sanitizedValue(row, value);
     if (next === undefined) return null;
-    if (!same(next, row.value)) { row.value = next; row.result = null; saveValues(); }
+    return applyValue(row, same(next, row.value) ? row.value : next, evaluate);
+  }
+  function applyValue(row, next, evaluate = false) {
+    if (next !== row.value) { row.value = next; row.result = null; saveValues(); }
     if (evaluate) row.result = check(row);
     if (usable()) {
       row.control?.paint(row.value);
@@ -430,7 +443,8 @@
       }
     }
     if (storageKey) {
-      for (const suffix of ['', ':pen', ':saved-at']) store('removeItem', storageKey + suffix);
+      const removed = ['', ':pen', ':saved-at'].map(suffix => store('removeItem', storageKey + suffix));
+      if (removed.every(Boolean)) showSaveFailure(false);
     }
     if (wasPending) core.layout();
     updateScore();
@@ -726,7 +740,7 @@
       setValue(row, values);
     };
     svg.addEventListener('click', event => {
-      if (!usable()) return;
+      if (!usable() || row.penPanning) return;
       const p = svgPoint(svg, event);
       if (!p) return;
       if (nl) {
@@ -808,30 +822,64 @@
     const el = row.el, figure = el.matches('figure');
     // Keep plot values unchanged; the accompanying pen is stored separately.
     const drawing = () => alongsidePlot ? row.penValue : row.value;
-    const setDrawing = strokes => {
-      if (alongsidePlot) { row.penValue = { strokes }; saveValues(); paint(row.penValue); }
-      else setValue(row, { strokes });
+    const setDrawing = value => {
+      if (alongsidePlot) { row.penValue = value; saveValues(); paint(value); }
+      else applyValue(row, value);
     };
-    const anchor = figure ? el.querySelector('svg:not(.ws-match-lines), img') : el;
+    const history = [];
+    function commit(strokes) {
+      history.push(drawing());
+      setDrawing({ strokes });
+    }
+    const anchor = figure ? el.querySelector('svg:not(.ws-match-lines), img') : runtime(make('div', 'ws-draw-frame'));
     if (!anchor) return;
+    if (!figure) {
+      el.append(anchor);
+      const table = el.closest('.ws-ans-table');
+      if (table) toggle(table, 'ws-draw-table', true);
+    }
     const canvas = runtime(make('canvas', 'ws-pen'));
     canvas.setAttribute('aria-label', '그리기 칸');
     const ink = runtime(svgNode('svg', { class: 'ws-pen-ink', 'aria-hidden': 'true',
       viewBox: '0 0 1 1', preserveAspectRatio: 'none' }));
-    el.append(canvas, ink);
+    (figure ? el : anchor).append(canvas, ink);
     const tools = solveOnly('div', 'ws-pen-tools');
-    let selected = alongsidePlot ? 'plot' : 'ink', gesture;
+    tools.setAttribute('role', 'group');
+    tools.setAttribute('aria-label', '그리기 도구');
+    const status = solveOnly('div', 'ws-pen-status');
+    status.setAttribute('aria-live', 'polite');
+    const initialTool = alongsidePlot ? 'plot' : 'ink';
+    let selected, gesture, radius = 0;
     const modes = [];
     function tool(which) {
+      stopTracking();
       selected = which;
-      canvas.classList.toggle('ws-pen-pass-through', which === 'plot');
+      row.penPanning = which === 'pan';
+      canvas.classList.toggle('ws-pen-pass-through', which === 'plot' || row.penPanning);
       for (const [key, button] of modes) button.setAttribute('aria-pressed', String(key === which));
+      status.textContent = '';
+      paintCanvas(drawing());
     }
-    if (alongsidePlot) modes.push(['plot', uiButton('점 찍기', 'pen-plot', () => tool('plot'))]);
-    modes.push(['ink', uiButton('펜', 'pen', () => tool('ink'))], ['erase', uiButton('지우개', 'eraser', () => tool('erase'))]);
-    tool(selected);
-    tools.append(...modes.map(([,button]) => button), uiButton('모두 지우기', 'pen-clear', () => setDrawing([])));
-    el.append(tools);
+    function addMode(key, label, action) {
+      const button = uiButton(label, action, () => tool(key), { pressed: key === initialTool });
+      tools.append(button);
+      modes.push([key, button]);
+    }
+    if (alongsidePlot) addMode('plot', '점 찍기', 'pen-plot');
+    addMode('ink', '펜', 'pen');
+    addMode('line', '곧은 선', 'pen-line');
+    if (!alongsidePlot) addMode('compass', '컴퍼스', 'pen-compass');
+    addMode('erase', '지우개', 'eraser');
+    const undo = uiButton('되돌리기', 'pen-undo', () => {
+      stopTracking();
+      if (history.length) setDrawing(history.pop());
+    }, { disabled: true });
+    tools.append(undo, uiButton('모두 지우기', 'pen-clear', () => {
+      stopTracking();
+      if (drawing()?.strokes.length) commit([]);
+    }));
+    addMode('pan', '화면 이동', 'pen-pan');
+    el.append(tools, status);
     let printedStrokes;
     function paint(value) {
       // Print can hide the canvas before layout; size both layers from the figure, not the canvas.
@@ -843,7 +891,7 @@
           Object.assign(canvas.style, box);
           Object.assign(ink.style, box);
         }
-      }
+      } else anchor.style.setProperty('--ws-draw-ratio', String(core.drawRatio(el)));
       const strokes = value?.strokes;
       if (strokes !== printedStrokes) {
         printedStrokes = strokes;
@@ -852,9 +900,10 @@
           points: (path.length === 1 ? [path[0], path[0]] : path).join(' '),
         })));
       }
-      paintCanvas(value);
+      undo.disabled = !history.length;
+      paintCanvas(gesture || value, gesture);
     }
-    function paintCanvas(value) {
+    function paintCanvas(value, previewGesture) {
       const { width, height } = canvas.getBoundingClientRect();
       if (!width || !height) return;
       const ratio = Math.min(3, Math.max(2, devicePixelRatio || 1));
@@ -863,18 +912,45 @@
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.clearRect(0,0,w,h); ctx.lineWidth = 1.8 * ratio; ctx.lineCap = ctx.lineJoin = 'round'; ctx.strokeStyle = '#161616';
-      for (const path of value?.strokes ?? []) {
+      const trace = path => {
         const [[x,y], ...rest] = path;
         ctx.beginPath(); ctx.moveTo(x*w,y*h);
         if (!rest.length) ctx.lineTo(x*w+.01,y*h);
         for (const [a,b] of rest) ctx.lineTo(a*w,b*h);
         ctx.stroke();
+      };
+      for (const path of value?.strokes ?? []) trace(path);
+      if (previewGesture?.which === 'line') trace([previewGesture.start, previewGesture.last]);
+      if (previewGesture?.which === 'compass' && previewGesture.dragged) {
+        const [x,y] = previewGesture.start;
+        const r = distancePx(previewGesture.start, previewGesture.last, width, height);
+        ctx.save();
+        ctx.setLineDash([4*ratio, 4*ratio]); ctx.beginPath();
+        ctx.ellipse(x*w, y*h, r*w/width, r*h/height, 0, 0, 2*Math.PI);
+        ctx.stroke(); ctx.restore();
       }
     }
-    const point = event => {
-      const r = canvas.getBoundingClientRect();
-      return [clamp((event.clientX-r.left)/r.width,0,1), clamp((event.clientY-r.top)/r.height,0,1)].map(v => Number(v.toFixed(5)));
-    };
+    const rounded = p => p.map(v => Number(clamp(v, 0, 1).toFixed(5)));
+    const point = (event, r) => rounded([(event.clientX-r.left)/r.width, (event.clientY-r.top)/r.height]);
+    const distancePx = (a, b, w, h) => Math.hypot((a[0]-b[0])*w, (a[1]-b[1])*h);
+    const unitBox = { x0: 0, x1: 1, y0: 0, y1: 1, x: v => v, y: v => v };
+    function circlePaths([x,y], ry) {
+      const points = Array.from({ length: 73 }, (_, i) => {
+        const theta = i * Math.PI / 36;
+        return [x + radius * Math.cos(theta), y + ry * Math.sin(theta)];
+      });
+      // Keep the visible arcs without flattening out-of-bounds points onto the frame edge.
+      const paths = [];
+      for (let i = 1; i < points.length; i++) {
+        const segment = clipSegment(points[i-1], points[i], unitBox);
+        if (!segment) continue;
+        const [a,b] = segment.map(rounded);
+        const last = paths.at(-1);
+        if (last && same(last.at(-1), a)) last.push(b);
+        else paths.push([a,b]);
+      }
+      return paths;
+    }
     function eraseAt(strokes, points) {
       const { width:w, height:h } = canvas.getBoundingClientRect();
       const [p,q] = points.map(([x,y]) => [x*w, y*h]);
@@ -891,13 +967,15 @@
       }));
     }
     canvas.addEventListener('pointerdown', event => {
-      if (!usable() || event.button !== 0 || gesture || selected === 'plot') return;
+      if (!usable() || event.button !== 0 || gesture || selected === 'plot' || selected === 'pan') return;
       event.preventDefault();
-      const p = point(event), erasing = selected === 'erase';
-      let strokes = clone(drawing()?.strokes ?? []);
-      if (erasing) strokes = eraseAt(strokes,[p,p]); else strokes.push([p]);
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const p = point(event, rect), before = drawing()?.strokes ?? [];
+      const strokes = selected === 'erase' ? eraseAt(before,[p,p]) : selected === 'ink' ? [...before, [p]] : before;
       const listeners = new AbortController();
-      gesture = { id:event.pointerId, strokes, erasing, last:p, listeners };
+      status.textContent = '';
+      gesture = { id:event.pointerId, which:selected, strokes, start:p, last:p, listeners };
       // Chrome can lose capture while the pointer is still down. Keep tracking this
       // pointer through release, even if the next event targets another element.
       const options = { capture: true, signal: listeners.signal };
@@ -906,19 +984,22 @@
       window.addEventListener('pointercancel', finish, options);
       window.addEventListener('blur', finish, { signal: listeners.signal });
       if (event.isTrusted) canvas.setPointerCapture(event.pointerId);
-      paintCanvas(gesture);
+      paintCanvas(gesture, gesture);
     });
     function move(event) {
       if (gesture?.id !== event.pointerId) return;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
       const samples = event.getCoalescedEvents?.();
       for (const sample of samples?.length ? samples : [event]) {
-        const p = point(sample);
+        const p = point(sample, rect);
         if (same(p, gesture.last)) continue;
-        if (gesture.erasing) gesture.strokes = eraseAt(gesture.strokes,[gesture.last,p]);
-        else gesture.strokes.at(-1).push(p);
+        if (gesture.which === 'erase') gesture.strokes = eraseAt(gesture.strokes,[gesture.last,p]);
+        else if (gesture.which === 'ink') gesture.strokes.at(-1).push(p);
+        else if (distancePx(gesture.start, p, rect.width, rect.height) >= 5) gesture.dragged = true;
         gesture.last = p;
       }
-      paintCanvas(gesture);
+      paintCanvas(gesture, gesture);
     }
     function stopTracking() {
       gesture?.listeners.abort();
@@ -927,12 +1008,30 @@
     function finish(event) {
       if (!gesture || (event.type !== 'blur' && gesture.id !== event.pointerId)) return;
       if (event.type === 'pointerup') move(event);
-      const { strokes } = gesture;
+      const { strokes, start, last, which, dragged } = gesture;
       stopTracking();
-      setDrawing(strokes);
+      const { width, height } = canvas.getBoundingClientRect();
+      if (event.type === 'pointerup' && usable() && width && height) {
+        if (which === 'ink' || (which === 'erase' && strokes.length < (drawing()?.strokes.length ?? 0))) {
+          commit(strokes); return;
+        }
+        if (which === 'line' && !same(start, last)) { commit([...strokes, [start, last]]); return; }
+        if (which === 'compass') {
+          if (dragged) {
+            const distance = distancePx(start, last, width, height);
+            if (distance >= 5) radius = distance / width;
+          } else if (!radius) status.textContent = '먼저 끌어서 컴퍼스를 벌리세요';
+          else {
+            const paths = circlePaths(start, radius * width / height);
+            if (paths.length) { commit([...strokes, ...paths]); return; }
+          }
+        }
+      }
+      paintCanvas(drawing());
     }
+    tool(initialTool);
     return { paint: value => paint(alongsidePlot && usable() ? row.penValue : value), resize: true,
-      reset() { stopTracking(); tool(alongsidePlot ? 'plot' : 'ink'); } };
+      reset() { history.length = 0; radius = 0; tool(initialTool); } };
   }
   function installControl(row) {
     if (row.control) return;
@@ -1464,6 +1563,11 @@
       core.addToolbar(viewButton, saveButton, clearButton, prompt);
     }
     core.addToolbar(scoreLabel);
+    if (!teacher) {
+      saveStatus = runtime(make('span', 'ws-save-status'));
+      saveStatus.setAttribute('aria-live', 'polite');
+      core.addToolbar(saveStatus);
+    }
     narrowTableScreen.addEventListener('change', schedulePaint);
     window.addEventListener('beforeprint', () => {
       printing ??= mode;

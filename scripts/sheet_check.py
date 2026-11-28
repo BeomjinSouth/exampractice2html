@@ -441,11 +441,44 @@ def _audit_graph_labels(pdf, regions, role, problems):
     return measured
 
 
+_PEN_ASPECT_JS = """(() => Object.fromEntries([...document.querySelectorAll(%s)]
+  .filter(layer => layer.getClientRects().length)
+  .map(layer => {
+    const r = layer.getBoundingClientRect();
+    return [layer.closest('[data-slot]')?.dataset.slot, r.height ? r.width / r.height : 0];
+  }).filter(([slot]) => slot)))()"""
+
+
+def _pen_aspects(protocol, *, print_media=False):
+    selector = '#sheet-pages svg.ws-pen-ink[data-sheet-runtime]' if print_media else '#sheet-flow canvas.ws-pen'
+    return protocol.evaluate(_PEN_ASPECT_JS % json.dumps(selector)) or {}
+
+
+def _print_pen_aspects(protocol):
+    protocol.call('Emulation.setEmulatedMedia', {'media': 'print'})
+    try:
+        protocol.evaluate("sheet.view('a4')", True)
+        return _pen_aspects(protocol, print_media=True)
+    finally:
+        protocol.call('Emulation.setEmulatedMedia', {'media': ''})
+
+
+def _audit_pen_aspects(screen, printed, name, problems):
+    for slot in sorted(screen.keys() | printed.keys()):
+        a, b = screen.get(slot), printed.get(slot)
+        if a and b and abs(a - b) <= b * .015 + 1e-12:
+            continue
+        detail = f'화면 {a:.3f}, A4 {b:.3f}' if a and b else '한쪽 펜 층을 재지 못함'
+        _problem(problems, 'error', 'pen-aspect-mismatch', None, slot.rsplit('.', 1)[0],
+                 f'{name}: {slot} 펜 층의 가로세로 비율이 맞지 않습니다 ({detail}).',
+                 '화면과 인쇄에서 펜 층의 그리기 틀 비율을 같게 유지하세요.')
+
+
 _PEN_REGIONS_JS = """(() => {
   const pages = [...document.querySelectorAll('#sheet-pages .ws-page')];
   return [...document.querySelectorAll('#sheet-pages :is(figure[data-pen="1"], .ws-ans[data-kind="draw"][data-slot])')]
     .map(el => {
-      const anchor = el.matches('figure') ? el.querySelector('img, svg:not(.ws-pen-ink)') : el;
+      const anchor = el.matches('figure') ? el.querySelector('img, svg:not(.ws-pen-ink)') : el.querySelector('.ws-draw-frame') || el;
       if (!anchor) return null;
       const r = anchor.getBoundingClientRect(), paper = el.closest('.ws-page'), p = paper.getBoundingClientRect();
       if (!r.width || !r.height) return null;
@@ -690,6 +723,7 @@ def _interactive_check(protocol, out, table, problems):
         table = None
     _audit_later_answers(table, protocol.evaluate(_ITEM_TEXT_JS), problems)
     try:
+        printed_aspects = _print_pen_aspects(protocol)
         for name, width, height in (("화면-폰.png", 390, 844), ("화면-태블릿.png", 1024, 768)):
             protocol.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
                                                                   "deviceScaleFactor": 1, "mobile": False})
@@ -710,6 +744,7 @@ def _interactive_check(protocol, out, table, problems):
             elif overflow > 1:
                 _problem(problems, "error", "screen-overflow", None, None,
                          f"{name}: 가로로 {overflow}px 넘칩니다.", "해당 폭의 표·그림·문항 배치를 고치세요.")
+            _audit_pen_aspects(_pen_aspects(protocol), printed_aspects, name, problems)
             size = protocol.call("Page.getLayoutMetrics").get("cssContentSize", {})
             full_height = max(height, math.ceil(size.get("height", height)))
             data = protocol.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True,
@@ -760,6 +795,7 @@ def _interactive_check(protocol, out, table, problems):
                     or any(not isinstance(slot, str) for slot in screen['clipped'])):
                 raise CheckError('답을 채운 폰 화면의 넘침을 확인할 수 없습니다.')
             info['filled_screen'] = screen
+            filled_aspects = _pen_aspects(protocol)
             if screen['overflow_x'] > 1:
                 _problem(problems, 'error', 'filled-screen-overflow', None, None,
                          f"답과 정답을 보이는 폰 화면이 가로로 {screen['overflow_x']}px 넘칩니다.",
@@ -809,6 +845,7 @@ def _interactive_check(protocol, out, table, problems):
                 _problem(problems, "error", "filled-print-clipped", None, None,
                          "A4 보기에서 채운 답이 잘리는 자리: " + ", ".join(clipped),
                          "빈칸·이름 칸의 너비와 서술 칸의 높이를 확인하세요.")
+            _audit_pen_aspects(filled_aspects, _print_pen_aspects(protocol), '화면-폰-채움.png', problems)
             filled_pdf = _print_pdf(protocol)
             drawn = {slot for slot, value in entered['values'].items()
                      if isinstance(value, dict) and value.get('strokes')}

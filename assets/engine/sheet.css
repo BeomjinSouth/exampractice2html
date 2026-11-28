@@ -396,8 +396,17 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   vector-effect: non-scaling-stroke;
 }
 .ws-pen-pass-through { pointer-events: none; }
+.ws-draw-frame { position: relative; aspect-ratio: var(--ws-draw-ratio); overflow: hidden; }
+#sheet-flow .ws-draw-frame { box-shadow: inset 0 0 0 1px #b2b2b2; }
+#sheet-pages .ws-draw-frame { position: absolute; inset: 0 1.8mm auto; }
+:root[data-role="teacher"]:not([data-sheet-preview]) :is(.ws-draw-frame, .ws-pen-tools, .ws-pen-status) { display: none !important; }
 .ws-pen-tools { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-block-start: 4px; }
-.ws-ans > .ws-pen-tools { position: absolute; right: 4px; bottom: 4px; padding: 2px; background: #fff; }
+.ws-pen-tools button { white-space: nowrap; }
+@media screen and (max-width: 719.98px) {
+  #sheet-flow .ws-draw-table col:first-child { width: 20% !important; }
+  #sheet-flow .ws-draw-table col:last-child { width: 80% !important; }
+  #sheet-flow .ws-pen-tools button { padding-inline: 5px; min-height: 30px; }
+}
 :root[data-role="student"] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
 :root[data-sheet-preview] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
 :root:is([data-role="student"], [data-sheet-preview]) .ws-answer-live svg:is([data-map], [data-ymap]) { cursor: pointer; }
@@ -455,6 +464,10 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 .ws-check-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 7px; padding-block-start: 7px; border-block-start: 1px solid #d4d4d4; }
 .ws-item-score:empty { display: none; }
 .ws-score, .ws-item-score { font-variant-numeric: tabular-nums; font-weight: 700; }
+.ws-save-status, .ws-pen-status { color: #854700; font-weight: 700; }
+.ws-save-status:not(:empty) { flex-basis: 100%; }
+.ws-save-status:empty { position: absolute; }
+.ws-pen-status { font: 13px/1.45 var(--sheet-sans); text-align: center; }
 .ws-verdict, .ws-reveal { font-size: 13px; overflow-wrap: anywhere; }
 span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 .ws-verdict.ws-ok { color: #0b653c; font-weight: 700; }

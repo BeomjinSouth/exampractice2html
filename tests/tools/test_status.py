@@ -129,6 +129,66 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(result, 0, output)
         self.assertIn('편집본이 원본', output)
 
+    def test_edited_text_warnings_replace_old_counts_and_respect_solution_policy(self):
+        build = json.loads(self.build.read_text(encoding='utf-8'))
+        build.update(grade='중1', unit='삼각형의 작도', plan_warnings={'text-length': 10, 'term-beyond-grade': 0})
+        self.build.write_text(json.dumps(build), encoding='utf-8')
+        source = self.teacher.read_text(encoding='utf-8').replace('data-role="teacher"',
+                    'data-role="teacher" data-saved-at="2026-01-01" data-interactive="1" data-reveal="교사만"')
+        source = source.replace('</html>', '''<body><div id="sheet-src"><section class="ws-item" data-id="q1">
+            <p data-src="삼각형의 내심을 구하시오. 분모를 이항하여 $3 cm$를 구하시오.">발문</p>
+            <p data-src="결과는 {{|삼각형의 내심}}입니다.">빈칸</p>
+            <div class="ws-key" data-src="삼각형의 내심">비공개 정답 그림</div></section></div>
+            <div id="sheet-teacher" class="ws-teacher-only"><section class="ws-item" data-solution-for="q1">
+            <p class="ws-t-ans"><span data-src="삼각형의 내심">풀이</span></p>
+            <p class="ws-t-mis"><span data-src="삼각형의 내심">비공개 예상 오개념</span></p>
+            </section></div></body></html>''')
+        for policy, count in [('교사만', 1), ('시도 후', 2)]:
+            self.teacher.write_text(source.replace('data-reveal="교사만"', f'data-reveal="{policy}"'), encoding='utf-8')
+            self.stamp(self.teacher, 1)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(sheet_check.cmd_status(self.folder), 1)
+            result = output.getvalue()
+            self.assertIn(f'term-beyond-grade {count}건', result)
+            self.assertIn('textbook-expression 1건', result)
+            self.assertIn('math-unit-upright 1건', result)
+            self.assertNotIn('text-length', result)
+            self.assertIn('편집본 미검사', result)
+            self.assertIn('원고 경고 절이 없습니다', result)
+        with self.review.open('a', encoding='utf-8') as review:
+            review.write('## 원고 경고\n' + ''.join(f'- {code}: 그대로 둠. 비교 예시\n' for code in
+                         ('term-beyond-grade', 'textbook-expression', 'math-unit-upright')))
+        self.stamp(self.review, 3)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sheet_check.cmd_status(self.folder), 0)
+        self.assertEqual(output.getvalue().count('편집본 미검사'), 2)
+
+    def test_warning_review_rejects_placeholders_and_accepts_punctuation(self):
+        from sheet_plan import Issue
+        self.fake_plan.load_plan = lambda folder: ({}, b'', [Issue('warning', '$', '', '', 'test-warning')])
+        original = self.review.read_text(encoding='utf-8') + '## 원고 경고\n'
+        for decision, expected in [('고침 — .', 1), ('그대로 둠 — …', 1), ('고침: (까닭)', 1), ('고침 — 가!', 1),
+                                   ('그대로 둠. 근거', 0), ('고침: 실제 근거', 0), ('고침-근거', 0),
+                                   ('고침 – 근거', 0), ('고침 — 근거', 0)]:
+            with self.subTest(decision=decision):
+                self.review.write_text(original + f'- `test-warning`: {decision}\n', encoding='utf-8')
+                self.stamp(self.review, 3)
+                result, output = self.status()
+                self.assertEqual(result, expected, output)
+
+    def test_unchecked_html_is_named_in_gate_and_delivery_but_not_delivered(self):
+        extra = '삼각형의 작도 (태블릿 작도판).html'
+        for name in (extra, '활동 (내 답).html', '활동 (내 답) (1).html'):
+            (self.folder / name).write_text('<html></html>', encoding='utf-8')
+        (self.out / '비교.html').write_text('<html></html>', encoding='utf-8')
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        note = f'검사하지 않은 HTML: {extra} — 정답 유출·인쇄·호환 검사를 거치지 않았습니다'
+        self.assertEqual(output.count(note), 2)
+        self.assertNotIn('내 답', output)
+        self.assertNotIn('비교.html', output)
+        self.assertNotIn(f'전달: {self.folder / extra}', output)
+
     def test_plan_errors_and_unavailable(self):
         self.fake_plan.load_plan = lambda folder: ({}, b'', [types.SimpleNamespace(level='error')])
         result, output = self.status()

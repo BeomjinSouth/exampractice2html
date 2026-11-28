@@ -27,6 +27,60 @@ TEACHER_ONLY = 'ws-teacher-only'
 KINDS_LABEL = {'평가': '수행평가', '연습': '연습지'}
 
 
+def student_policy(interactive, reveal_policy):
+    """Return whether to keep grading hashes and the public answer/solution bundle."""
+    return (interactive and reveal_policy in ('시도 후', '바로', '교사만'),
+            interactive and reveal_policy in ('시도 후', '바로'))
+
+
+def _attrs_text(attrs):
+    return ''.join(f' {key}="{escape(value)}"' if value is not None else f' {key}'
+                   for key, value in attrs.items())
+
+
+def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), unit='', blank=False):
+    answer, *alternatives = (plain(value).strip() for value in (source, *accept))
+    number = num(answer)
+    if mode == 'number' and number is None:
+        raise ValueError(f'{slot}: 정답을 수로 읽을 수 없습니다.')
+    kind = 'open'
+    if answer and mode != 'off':
+        if mode != 'text' and number is not None:
+            kind = 'number'
+        elif mode == 'text' or (len(answer) <= 12 if blank else accept):
+            kind = 'text'
+    attrs = {'data-check-kind': kind}
+    descriptor = {'mode': mode, 'accept': list(accept)}
+    if kind != 'open':
+        answers = [answer, *alternatives]
+        normalized = [canonical(kind, value) for value in answers]
+        if any(value is None for value in normalized):
+            raise ValueError(f'{slot}: 허용 답을 정답과 같은 형식으로 읽을 수 없습니다.')
+        if kind == 'number':
+            from fractions import Fraction
+            wrong = Fraction(number) + 1
+            while str(wrong) in normalized:
+                wrong += 1
+            wrong = str(wrong)
+            keyboard = input_mode(answers)
+            if keyboard:
+                attrs['data-input-mode'] = keyboard
+            forms = number_forms(answers, unit)
+            if grading and any('@' in form for form in forms):
+                attrs['data-check-unit'] = '1'
+        else:
+            wrong = answer + '오답'
+            while any(candidate in normalized for candidate in text_candidates(wrong)):
+                wrong += '오답'
+            forms = normalized
+        if grading:
+            attrs['data-check-hash'] = ','.join(dict.fromkeys(check_hash(salt, kind, form) for form in forms))
+        descriptor.update(right=answer, wrong=wrong)
+    if kind != 'open' or mode != 'auto' or accept:
+        attrs['data-check'] = json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))
+    return attrs
+
+
 def mm(value):
     return f'{value:.12g}'
 
@@ -165,6 +219,7 @@ class Renderer:
         self.grid_index = 0
         self.interactive = self.meta.get('interactive', self.kind in ('수업', '연습'))
         self.reveal_policy = self.meta.get('reveal', '시도 후')
+        self.grading, self.published = student_policy(self.interactive, self.reveal_policy)
         self.theme = self.meta.get('theme', '산뜻' if self.kind == '수업' else '정본')
         self.accent = self.meta.get('accent', '하늘')
         self.salt = make_salt() if self.interactive else None
@@ -172,102 +227,74 @@ class Renderer:
         self.item_id = None
         self.slot_index = 0
 
-    def slot(self, kind, right=None, *, accept=(), mode='auto', answer_html='', snap=None, count=None, unit=''):
+    def slot(self, kind, right=None, *, accept=(), mode='auto', answer_html='', snap=None, count=None, unit='', blank=False):
         if not self.interactive:
             return ''
         self.slot_index += 1
         slot = f'{self.item_id}.{self.slot_index}'
-        attrs = f' data-slot="{escape(slot)}" data-check-kind="{kind}"'
-        if answer_html and self.reveal_policy in ('시도 후', '바로'):
+        attrs = {'data-slot': slot, 'data-check-kind': kind}
+        if answer_html and self.published:
             self.reveal_data['slots'][slot] = {'answer_html': answer_html}
-        if kind in ('open', 'draw', 'self', 'name'):
-            if kind == 'open' and (mode != 'auto' or accept):
-                descriptor = {'mode': mode, 'accept': list(accept)}
-                attrs += ' data-check="' + escape(json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))) + '"'
-            return attrs
-        values = [right, *accept] if kind in ('number', 'text') else [right]
-        normalized = [canonical(kind, plain(v) if kind in ('number', 'text') else v, snap) for v in values]
-        if any(v is None for v in normalized):
+        if kind == 'writing':
+            attrs.update(_text_slot_attrs(slot, right, self.salt, self.grading, mode=mode, accept=accept,
+                                         unit=unit, blank=blank))
+            return _attrs_text(attrs)
+        if kind in ('draw', 'self', 'name'):
+            return _attrs_text(attrs)
+        normalized = canonical(kind, right, snap)
+        if normalized is None:
             raise ValueError(f'{slot}: 정답을 {kind} 형식으로 정규화할 수 없습니다.')
-        if kind == 'number':
-            texts = [plain(v) for v in values]
-            keyboard = input_mode(texts)
-            if keyboard:
-                attrs += f' data-input-mode="{keyboard}"'
-        if self.reveal_policy != '없음':
-            forms = number_forms(texts, unit) if kind == 'number' else normalized
-            if kind == 'number' and any('@' in value for value in forms):
-                attrs += ' data-check-unit="1"'
-            hashes = ','.join(dict.fromkeys(check_hash(self.salt, kind, v) for v in forms))
-            attrs += f' data-check-hash="{hashes}"'
-        if kind in ('number', 'text'):
-            actual = plain(right)
-            wrong = actual + '오답'
-            if kind == 'number':
-                from fractions import Fraction
-                number = Fraction(normalized[0])
-                wrong = str(number + 1)
-                while canonical(kind, wrong) in normalized:
-                    number += 1
-                    wrong = str(number + 1)
+        if self.grading:
+            attrs['data-check-hash'] = check_hash(self.salt, kind, normalized)
+        if kind == 'choice':
+            wrong = [i for i in range(1, (count or max(right)) + 1) if i not in right][:1]
+            if not wrong:
+                wrong = right[:-1] or [0]
+        elif kind == 'ox':
+            wrong = 'X' if normalized == 'o' else 'O'
+        elif kind == 'order':
+            wrong = list(right)
+            wrong[0], wrong[1] = wrong[1], wrong[0]
+        elif kind == 'match':
+            wrong = dict(right)
+            keys = list(wrong)
+            wrong[keys[0]], wrong[keys[1]] = wrong[keys[1]], wrong[keys[0]]
+        elif kind == 'points':
+            wrong = [list(p) if isinstance(p, list) else p for p in right]
+            if isinstance(wrong[0], list):
+                wrong[0][0] += snap or 1
             else:
-                while any(candidate in normalized for candidate in text_candidates(wrong)):
-                    wrong += '오답'
-        else:
-            actual = right
-            if kind == 'choice':
-                wrong = [i for i in range(1, (count or max(right)) + 1) if i not in right][:1]
-                if not wrong:
-                    wrong = right[:-1] or [0]
-            elif kind == 'ox':
-                wrong = 'X' if canonical(kind, right) == 'o' else 'O'
-            elif kind == 'order':
-                wrong = list(right)
-                wrong[0], wrong[1] = wrong[1], wrong[0]
-            elif kind == 'match':
-                wrong = dict(right)
-                keys = list(wrong)
-                wrong[keys[0]], wrong[keys[1]] = wrong[keys[1]], wrong[keys[0]]
-            elif kind == 'points':
-                wrong = [list(p) if isinstance(p, list) else p for p in right]
-                if isinstance(wrong[0], list):
-                    wrong[0][0] += snap or 1
-                else:
-                    wrong[0] += snap or 1
-            elif kind == 'line':
-                wrong = [list(point) for point in right]
-                wrong[1][1] += snap or 1
-                if canonical(kind, wrong, snap) == normalized[0] or canonical(kind, wrong, snap) is None:
-                    wrong[1] = list(right[1])
-                    wrong[1][0] += snap or 1
-            elif kind == 'bars':
-                wrong = list(right)
                 wrong[0] += snap or 1
-            else:
-                raise ValueError(f'{slot}: 알 수 없는 판별 종류입니다.')
-            if canonical(kind, wrong, snap) is None or canonical(kind, wrong, snap) in normalized:
-                raise ValueError(f'{slot}: 다른 오답을 만들 수 없습니다.')
-        descriptor = {'mode': mode, 'accept': list(accept), 'right': actual, 'wrong': wrong}
-        attrs += ' data-check="' + escape(json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))) + '"'
-        return attrs
+        elif kind == 'line':
+            wrong = [list(point) for point in right]
+            wrong[1][1] += snap or 1
+            if canonical(kind, wrong, snap) in (normalized, None):
+                wrong[1] = list(right[1])
+                wrong[1][0] += snap or 1
+        elif kind == 'bars':
+            wrong = list(right)
+            wrong[0] += snap or 1
+        else:
+            raise ValueError(f'{slot}: 알 수 없는 판별 종류입니다.')
+        if canonical(kind, wrong, snap) in (normalized, None):
+            raise ValueError(f'{slot}: 다른 오답을 만들 수 없습니다.')
+        descriptor = {'mode': mode, 'accept': list(accept), 'right': right, 'wrong': wrong, 'answer_html': answer_html}
+        attrs['data-check'] = json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))
+        return _attrs_text(attrs)
 
     def blank_slot(self, answers, rendered, tail, column='', row=''):
-        first = plain(answers[0])
-        kind = 'number' if num(first) is not None else 'text' if len(first) <= 12 else 'open'
-        return self.slot(kind, answers[0], accept=answers[1:], answer_html=rendered, unit=inferred_unit(tail, column, row))
+        return self.slot('writing', answers[0], accept=answers[1:], answer_html=rendered,
+                         unit=inferred_unit(tail, column, row), blank=True)
 
     def answer_slot(self, answer, *, mode='auto', accept=(), draw=False, unit=''):
         if draw:
             return self.slot('draw')
-        value = plain(answer)
-        kind = ('open' if mode == 'off' else 'number' if mode == 'number' or (mode == 'auto' and num(value) is not None)
-                else 'text' if mode == 'text' or (mode == 'auto' and accept) else 'open')
         token = blank_hook.set(None)
         try:
             markup = render_markup(answer)
         finally:
             blank_hook.reset(token)
-        return self.slot(kind, answer, mode=mode, accept=accept, answer_html=markup, unit=unit)
+        return self.slot('writing', answer, mode=mode, accept=accept, answer_html=markup, unit=unit)
 
     def name_line(self, with_slots=False):
         fields = self.meta.get('name_fields', ['반', '번', '이름'])
@@ -1043,11 +1070,11 @@ class Renderer:
             items.append(section(private_id('t-memo'), f'<h2 class="ws-t-h">교사용 메모</h2><ul class="ws-t-list">{lines}</ul>'))
         for solution in teacher.get('solutions', []):
             item = solution['item']
-            if self.interactive and self.reveal_policy in ('시도 후', '바로'):
-                video = solution.get('video')
+            video = solution.get('video')
+            video = {'yt': youtube_id(video['url']), 'start': video.get('start', 0)} if video else None
+            if self.published:
                 self.reveal_data['items'][item] = solution_public(
-                    solution['answer'], solution.get('steps', []), solution.get('rubric', []),
-                    {'yt': youtube_id(video['url']), 'start': video.get('start', 0)} if video else None)
+                    solution['answer'], solution.get('steps', []), solution.get('rubric', []), video)
             label = str(self.first_number[item]) + '번' if item in self.first_number else item + ' 풀이'
             parts = [f'<h3 class="ws-t-q">{label}</h3>',
                      f'<p class="ws-t-ans"><b>예시 답안</b> {editable("span", solution["answer"])}</p>']
@@ -1058,7 +1085,10 @@ class Renderer:
                                       ('misconceptions', 'ws-t-mis', '예상 오개념')):
                 for text in solution.get(key, []):
                     parts.append(f'<p class="{cls}"><b>{heading}</b> {editable("span", text)}</p>')
-            items.append(section(private_id('t-' + item), '\n'.join(parts), f' data-solution-for="{escape(item)}"'))
+            attrs = {'data-solution-for': item}
+            if video:
+                attrs['data-solution-video'] = json.dumps(video, separators=(',', ':'))
+            items.append(section(private_id('t-' + item), '\n'.join(parts), _attrs_text(attrs)))
         return '\n'.join(items)
 
 
@@ -1185,6 +1215,7 @@ class StudentFilter(HTMLParser):
         self.has_src = False
         self.title_start = None
         self.has_runtime = False
+        self.grading = self.published = False
 
     def absolute_position(self):
         line, column = self.getpos()
@@ -1195,9 +1226,11 @@ class StudentFilter(HTMLParser):
         classes = (values.get('class') or '').split()
         start = self.absolute_position()
         maybe_end = start + len(self.get_starttag_text())
-        drop = bool(PRIVATE_CLASSES.intersection(classes) or values.get('id') == 'sheet-teacher')
         if tag == 'html':
             self.role, self.sheet = values.get('data-role'), values.get('data-sheet') == '1'
+            self.grading, self.published = student_policy('data-interactive' in values, values.get('data-reveal', '시도 후'))
+        drop = bool(PRIVATE_CLASSES.intersection(classes) or values.get('id') == 'sheet-teacher'
+                    or (values.get('id') == 'sheet-reveal' and not self.published))
         if values.get('id') == 'sheet-src' and not drop and self.cut_start is None:
             self.has_src = True
         if values.get('id') == 'sheet-pages' or 'data-sheet-runtime' in values:
@@ -1216,6 +1249,8 @@ class StudentFilter(HTMLParser):
         if tag == 'title':
             self.title_start = maybe_end
         forbidden = {'data-src', 'data-check'}
+        if not self.grading:
+            forbidden |= {'data-check-hash', 'data-check-unit'}
         if tag == 'html':
             forbidden |= {'data-answers', 'data-sheet-edit', 'data-sheet-preparing'}
         if tag == 'html' or forbidden.intersection(values) or 'ws-key-choice' in classes:
@@ -1279,15 +1314,32 @@ class _Element:
     body: int
     end: int
     children: list = field(default_factory=list)
+    parent: '_Element' = field(default=None, repr=False, compare=False)
 
     def has(self, cls):
         return cls in (self.attrs.get('class') or '').split()
 
-    def walk(self):
-        for child in self.children:
-            if isinstance(child, _Element):
-                yield child
-                yield from child.walk()
+    def walk(self, *, public=False):
+        for child in self.elements():
+            if public and PRIVATE_CLASSES.intersection((child.attrs.get('class') or '').split()):
+                continue
+            yield child
+            yield from child.walk(public=public)
+
+    def elements(self):
+        return [child for child in self.children if isinstance(child, _Element)]
+
+    def closest(self, predicate):
+        el = self
+        while el is not None and not predicate(el):
+            el = el.parent
+        return el
+
+    def text(self, *, without_blanks=False):
+        if without_blanks and self.has('ws-blank'):
+            return ''
+        return ''.join(child.text(without_blanks=without_blanks) if isinstance(child, _Element) else child
+                       for child in self.children)
 
 
 class _Document(HTMLParser):
@@ -1308,7 +1360,7 @@ class _Document(HTMLParser):
     def _open(self, tag, attrs, single):
         start = self.position()
         end = start + len(self.get_starttag_text())
-        el = _Element(tag, dict(attrs), start, end, end)
+        el = _Element(tag, dict(attrs), start, end, end, parent=self.stack[-1])
         self.stack[-1].children.append(el)
         if not single and tag not in VOID:
             self.stack.append(el)
@@ -1360,22 +1412,157 @@ def _read_reveal(doc, salt):
     raise ValueError('교사용 공개 자료의 형식을 읽을 수 없습니다.')
 
 
-def _rebuild_reveal(doc, previous):
+def _table_unit(el, tail=''):
+    cell = el.closest(lambda node: node.tag in ('td', 'th'))
+    if cell is None:
+        return inferred_unit(tail)
+    row = cell.parent
+    table = row.closest(lambda node: node.tag == 'table')
+    if table is None:
+        return inferred_unit(tail)
+    cells = [node for node in row.elements() if node.tag in ('td', 'th')]
+    index = cells.index(cell)
+    column = row_label = ''
+    if table.has('ws-data') or table.has('ws-steps'):
+        # Table header blanks are rendered outside the assembler's unit context.
+        head = next((node for node in table.elements() if node.tag == 'thead'), None)
+        if head and head.elements() and row.parent is not head:
+            headings = head.elements()[0].elements()
+            if index < len(headings):
+                column = headings[index].text(without_blanks=True)
+        if table.has('ws-data') and index and not any(node.has('ws-blank') for node in cells[0].walk()):
+            row_label = cells[0].text()
+    elif table.has('ws-ans-table'):
+        rows = row.parent.elements()
+        row_index = rows.index(row)
+        for distance, candidate in enumerate(reversed(rows[:row_index + 1])):
+            lab = next((node for node in candidate.elements() if node.has('ws-lab')), None)
+            if lab is not None:
+                if distance < int(lab.attrs.get('rowspan', '1')):
+                    label = next((node for node in lab.walk() if node.has('ws-lab-text')), lab)
+                    row_label = label.text(without_blanks=True)
+                break
+    return inferred_unit(tail, column, row_label)
+
+
+_TEXT_ATTRS = ('data-check-kind', 'data-check-hash', 'data-check-unit', 'data-check', 'data-input-mode')
+_NON_GRADING = frozenset(('open', 'draw', 'self', 'name'))
+
+
+def _refresh_grading(doc, salt, grading):
+    """Read editable sources, keeping the DOM positions and their saved slot names."""
+    public = doc.lookup('id', 'sheet-src')
+    patches, displays, seen, paired = [], {}, set(), set()
+
+    def update(el, values, clear):
+        attrs = {key: value for key, value in el.attrs.items() if key not in clear}
+        attrs.update(values)
+        if attrs != el.attrs:
+            patches.append((el.start, el.body, '<' + el.tag + _attrs_text(attrs) + '>'))
+
+    for section in public.elements():
+        if not section.has('ws-item') or section.has('ws-teacher-only'):
+            continue
+        item = section.attrs.get('data-id') or '(이름 없는 문항)'
+        elements = list(section.walk(public=True))
+        index = 0
+        for el in elements:
+            if 'data-slot' not in el.attrs and not (el.has('ws-blank') or el.has('ws-ans')):
+                continue
+            name = el.attrs.get('data-slot') or '(이름 없음)'
+            if item == 'head' and el.attrs.get('data-check-kind') == 'name':
+                valid = name.startswith('head.') and bool(name.removeprefix('head.'))
+            else:
+                index += 1
+                valid = name == f'{item}.{index}'
+            if not valid or name in seen:
+                label = '빈칸' if el.has('ws-blank') else '답 칸' if el.has('ws-ans') else '판별 자리'
+                raise ValueError(f'{item} 문항 {label} {name}: 자리 이름이 맞지 않거나 중복됩니다.')
+            seen.add(name)
+        for el in elements:
+            if 'data-src' in el.attrs:
+                dom_blanks = [node for node in el.walk(public=True) if node.has('ws-blank')
+                              and node.parent.closest(lambda node: 'data-src' in node.attrs) is el]
+                source_blanks = []
+
+                def collect(answers, rendered, tail):
+                    source_blanks.append((answers, rendered, tail))
+                    return ''
+
+                token = blank_hook.set(collect)
+                try:
+                    parsed = inspect_markup(el.attrs['data-src'], interactive=True)
+                except ValueError as error:
+                    raise ValueError(f'{item} 문항 {el.tag} 글자 칸: {error}') from error
+                finally:
+                    blank_hook.reset(token)
+                if len(parsed.blanks) != len(dom_blanks) or len(parsed.blanks) != len(source_blanks):
+                    slots = ', '.join(node.attrs.get('data-slot') or '(이름 없음)' for node in dom_blanks)
+                    raise ValueError(f'{item} 문항 {el.tag} 빈칸{f" ({slots})" if slots else ""}: 원본 표기와 본문의 빈칸 수 또는 정답이 맞지 않습니다.')
+                for node, blank, (answers, rendered, tail) in zip(dom_blanks, parsed.blanks, source_blanks):
+                    if (node.attrs.get('data-mark') or '') != blank.mark:
+                        raise ValueError(f'{item} 문항 {node.attrs.get("data-slot") or "빈칸"}: 빈칸 기호가 원본 표기와 다릅니다.')
+                    name = node.attrs['data-slot']
+                    paired.add(node.start)
+                    update(node, _text_slot_attrs(name, answers[0], salt, grading, accept=answers[1:],
+                                                  unit=_table_unit(el, tail), blank=True), _TEXT_ATTRS)
+                    displays[name] = {'answer_html': rendered}
+            if el.has('ws-blank'):
+                if el.start not in paired:
+                    raise ValueError(f'{item} 문항 {el.attrs.get("data-slot") or "빈칸"}: 빈칸의 원본 표기(data-src)를 찾을 수 없습니다.')
+                continue
+            if 'data-slot' not in el.attrs and not el.has('ws-ans'):
+                continue
+            name, kind = el.attrs['data-slot'], el.attrs.get('data-check-kind')
+            try:
+                if el.has('ws-ans') and el.attrs.get('data-kind') != 'draw':
+                    key = next((node for node in el.elements() if node.has('ws-key')), None)
+                    if key is None or 'data-src' not in key.attrs:
+                        raise ValueError('답 칸의 원본 표기(data-src)를 찾을 수 없습니다.')
+                    source = key.attrs['data-src']
+                    saved = json.loads(el.attrs.get('data-check') or '{}')
+                    mode, accept = saved.get('mode', 'auto'), saved.get('accept', [])
+                    if mode not in ('auto', 'off', 'number', 'text') or not isinstance(accept, list) or not all(isinstance(v, str) for v in accept):
+                        raise ValueError('답 칸의 판별 방식이나 허용 답이 올바르지 않습니다.')
+                    if not plain(source).strip():
+                        raise ValueError('답 칸의 정답이 비어 있습니다.')
+                    update(el, _text_slot_attrs(name, source, salt, grading, mode=mode, accept=accept,
+                                                unit=_table_unit(el)), _TEXT_ATTRS)
+                    displays[name] = {'answer_html': render_markup(source)}
+                elif kind not in _NON_GRADING:
+                    saved = json.loads(el.attrs['data-check'])
+                    snap = float(el.attrs['data-snap']) if 'data-snap' in el.attrs else None
+                    right, wrong = (canonical(kind, saved[key], snap) for key in ('right', 'wrong'))
+                    if right is None or wrong in (None, right):
+                        raise ValueError('정답과 시험용 오답을 읽을 수 없습니다.')
+                    values = {'data-check-hash': check_hash(salt, kind, right)} if grading else {}
+                    update(el, values, ('data-check-hash', 'data-check-unit'))
+            except (ValueError, KeyError, TypeError, AttributeError) as error:
+                raise ValueError(f'{item} 문항 {name}: 판별 자료를 다시 만들 수 없습니다. {error}') from error
+    if not patches:
+        return doc, displays
+    parts, last = [], 0
+    for start, end, value in sorted(patches):
+        parts.extend((doc.source[last:start], value))
+        last = end
+    parts.append(doc.source[last:])
+    return _Document(''.join(parts)), displays
+
+
+def _rebuild_reveal(doc, previous, displays):
     public = doc.lookup('id', 'sheet-src')
     slots = {}
-    for el in public.walk():
-        slot, kind = el.attrs.get('data-slot'), el.attrs.get('data-check-kind')
-        if not slot:
-            continue
-        key = next((child for child in el.walk() if child.has('ws-key')), None)
-        if kind in ('open', 'number', 'text') and key is not None:
-            source = key.attrs.get('data-src')
-            answer = render_markup(source) if source is not None else doc.inner(key)
-            if answer:
-                slots[slot] = {'answer_html': answer}
-        elif slot in previous['slots']:
+    for el in public.walk(public=True):
+        slot = el.attrs.get('data-slot')
+        if slot in displays:
+            slots[slot] = displays[slot]
+        elif slot and el.attrs.get('data-check-kind') not in _NON_GRADING:
             # Non-text controls can have display forms not in their DOM (e.g. a line's source equation).
-            slots[slot] = previous['slots'][slot]
+            saved = json.loads(el.attrs.get('data-check') or '{}')
+            if saved.get('answer_html'):
+                slots[slot] = {'answer_html': saved['answer_html']}
+            elif slot in previous['slots']:
+                slots[slot] = previous['slots'][slot]
     items = {}
     teacher = doc.lookup('id', 'sheet-teacher')
     if teacher is None:
@@ -1404,7 +1591,9 @@ def _rebuild_reveal(doc, previous):
                  for child in el.walk() if child.tag == 'li' and 'data-src' in child.attrs]
         rubric = [child.attrs['data-src'] for el in fields if el.has('ws-t-rubric')
                   for child in el.walk() if (child.attrs.get('data-src') or '').strip()]
-        items[item] = solution_public(answer, steps, rubric, previous['items'].get(item, {}).get('video'))
+        video = section.attrs.get('data-solution-video')
+        video = json.loads(video) if video else previous['items'].get(item, {}).get('video')
+        items[item] = solution_public(answer, steps, rubric, video)
     return {'slots': slots, 'items': items}
 
 
@@ -1425,7 +1614,7 @@ def _edition_body(doc, *, with_hashes=False):
 def _edition(source, student_doc, public):
     # Hash the unsalted grading inputs, not the randomly salted verifier or the test's wrong examples.
     answers = []
-    for el in source.lookup('id', 'sheet-src').walk():
+    for el in source.lookup('id', 'sheet-src').walk(public=True):
         if el.attrs.get('data-check-hash') and el.attrs.get('data-check'):
             row = json.loads(el.attrs['data-check'])
             answers.append((el.attrs.get('data-slot'), row.get('right'), row.get('accept', [])))
@@ -1486,8 +1675,7 @@ def document_html(renderer, build_meta, fonts):
     private = renderer.render_teacher()
     interactive = f' data-interactive="1" data-reveal="{escape(renderer.reveal_policy)}"' if renderer.interactive else ''
     salt = f'<meta name="sheet-salt" content="{escape(renderer.salt)}">\n' if renderer.interactive else ''
-    reveal_tag = (_reveal_tag(renderer.salt, renderer.reveal_data) + '\n'
-                  if renderer.interactive and renderer.reveal_policy in ('시도 후', '바로') else '')
+    reveal_tag = _reveal_tag(renderer.salt, renderer.reveal_data) + '\n' if renderer.published else ''
     return (f'<!doctype html>\n<html lang="ko" data-sheet="1" data-role="teacher" data-kind="{renderer.kind}" '
             f'data-columns="{renderer.columns}" data-answers="on"{interactive} data-theme="{escape(renderer.theme)}" '
             f'data-accent="{escape(renderer.accent)}">\n<head>\n'
@@ -1619,7 +1807,8 @@ def cmd_build(folder: Path, force=False) -> int:
         print('다음: 편집을 보존하려면 derive를, 덮어쓰려면 원본을 백업한 뒤 build --force를 실행하세요.')
         return 1
     metadata = {'tool': TOOL, 'version': VERSION, 'built_at': datetime.now(timezone.utc).isoformat(),
-                'source_sha256': sha256(source), 'engine_sha256': engine_sha256()}
+                'source_sha256': sha256(source), 'engine_sha256': engine_sha256(),
+                'grade': data['meta'].get('grade'), 'unit': data['meta'].get('unit')}
     warnings = []
     font_css, font_bytes = font_styles(data, warnings)
     renderer = Renderer(data, folder, warnings)
@@ -1627,7 +1816,7 @@ def cmd_build(folder: Path, force=False) -> int:
         teacher_text = document_html(renderer, metadata, font_css)
         teacher_doc = _Document(teacher_text)
         student_doc = _Document(strip_teacher(teacher_text))
-        metadata['edition'] = _edition(teacher_doc, student_doc, renderer.reveal_data if renderer.interactive else None)
+        metadata['edition'] = _edition(teacher_doc, student_doc, renderer.reveal_data if renderer.published else None)
         teacher_data = _replace_metadata(teacher_doc, metadata).encode('utf-8')
         student_data = _replace_metadata(student_doc, metadata).encode('utf-8')
         answers = answer_table_from_html(teacher_text)
@@ -1659,17 +1848,21 @@ def cmd_build(folder: Path, force=False) -> int:
 
 def _derive_documents(source, previous_student):
     # Validate the saved teacher DOM before interpreting any of its metadata.
-    student = strip_teacher(source)
+    strip_teacher(source)
     doc = _Document(source)
     root = next(el for el in doc.root.walk() if el.tag == 'html')
-    published = 'data-interactive' in root.attrs and root.attrs.get('data-reveal', '시도 후') in ('시도 후', '바로')
+    interactive = 'data-interactive' in root.attrs
+    grading, published = student_policy(interactive, root.attrs.get('data-reveal', '시도 후'))
     salt = doc.metadata('sheet-salt')
+    if interactive and not salt:
+        raise ValueError('판별 자료를 만들 salt가 없습니다.')
+    if interactive:
+        doc, displays = _refresh_grading(doc, salt, grading)
+        source = doc.source
     public = None
     old = doc.lookup('id', 'sheet-reveal')
     if published:
-        if not salt:
-            raise ValueError('공개 자료를 만들 salt가 없습니다.')
-        public = _rebuild_reveal(doc, _read_reveal(doc, salt))
+        public = _rebuild_reveal(doc, _read_reveal(doc, salt), displays)
         if old is not None:
             source = source[:old.body] + reveal(salt, public) + source[old.end:]
         else:
@@ -1681,8 +1874,7 @@ def _derive_documents(source, previous_student):
         source = source[:old.start] + source[source.index('>', old.end) + 1:]
     if source != doc.source:
         doc = _Document(source)
-        student = strip_teacher(source)
-    student_doc = _Document(student)
+    student_doc = _Document(strip_teacher(source))
     metadata = json.loads(doc.metadata('sheet-build') or '{}')
     if not isinstance(metadata, dict):
         raise ValueError('조립 메타데이터가 올바르지 않습니다.')
@@ -1725,7 +1917,7 @@ def cmd_derive(teacher: Path) -> int:
             previous_student = None
         refreshed, derived, edition = _derive_documents(source, previous_student)
         payload = derived.encode('utf-8')
-        answers = answer_table_from_html(source)
+        answers = answer_table_from_html(refreshed)
     except ValueError as error:
         print(f'오류: {error}')
         print('다음: 저장한 교사용 HTML에서 derive를 실행하세요.')

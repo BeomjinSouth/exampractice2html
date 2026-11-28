@@ -262,6 +262,7 @@ class Markup:
     plain: str
     outside_math: str
     blanks: tuple
+    public_source: str
 
 
 def join_inline_parts(parts):
@@ -312,6 +313,7 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
         raise MarkupError('한 필드에는 줄을 바꾸지 마세요.')
     pos = 0
     blanks = []
+    blank_spans = []
     outside_math = []
 
     def at(token):
@@ -390,6 +392,7 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
                     # A marked blank can be two handwriting cells wide; unmarked lines keep the 18 mm minimum.
                     width = max(9 if mark else 18, max(lengths) * 4.5)
                 blanks.append(Blank(mark, plain.strip(), tuple(answers[1:]), answers[0] if answers else '', width))
+                blank_spans.append((start, pos, mark))
                 width = table_blank_mm if table_blank_mm is not None else width
                 mark_attr = f' data-mark="{html.escape(mark)}"' if mark else ''
                 style = '' if width is None else f' style="--ws-blank-min:{js_number(width)}mm"'
@@ -408,7 +411,12 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
         rendered, plain = join_inline_parts(sequence())
     except RecursionError as error:
         raise MarkupError('수식이나 강조의 중첩을 줄이세요.') from error
-    return Markup(rendered, plain, ''.join(outside_math), tuple(blanks))
+    public_parts, last = [], 0
+    for start, end, mark in blank_spans:
+        public_parts.extend((source[last:start], mark or ' '))
+        last = end
+    public_parts.append(source[last:])
+    return Markup(rendered, plain, ''.join(outside_math), tuple(blanks), ''.join(public_parts))
 
 
 def js_number(value):

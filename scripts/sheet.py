@@ -1,7 +1,10 @@
 """A4 활동지 원고와 HTML을 관리하는 명령줄 도구."""
 import argparse
 import importlib
+import importlib.util
 import json
+import os
+import shutil
 from pathlib import Path
 import sys
 from uuid import uuid4
@@ -74,6 +77,34 @@ def cmd_blocks(kind=None):
     return 0
 
 
+def cmd_doctor():
+    from sheet_sync import config_path
+    import cdp
+
+    configured = os.environ.get('SHEET_BROWSER')
+    browser = None
+    if configured:
+        browser = shutil.which(configured) or (configured if Path(configured).is_file() else None)
+    else:
+        old = os.environ.pop('DECK_BROWSER', None)
+        try:
+            browser = cdp.find_browser()
+        except cdp.BrowserError:
+            pass
+        finally:
+            if old is not None:
+                os.environ['DECK_BROWSER'] = old
+    print('| 항목 | 확인 결과 |')
+    print('| --- | --- |')
+    print(f'| Python | {sys.version.split()[0]} |')
+    print(f'| Chrome/Edge | {browser or "찾지 못함"} |')
+    for name, module in (('fonttools', 'fontTools'), ('pillow', 'PIL'), ('pymupdf', 'pymupdf')):
+        print(f'| {name} | {"설치됨" if importlib.util.find_spec(module) else "설치되지 않음"} |')
+    print(f'| 학생 기록 설정 파일 | {"있음" if config_path().is_file() else "없음"} |')
+    print('다음: 빠진 항목을 확인하고 필요한 모듈을 설치하세요.')
+    return 0
+
+
 def main(argv=None) -> int:
     parser = Parser(prog='sheet.py', description=__doc__)
     subs = parser.add_subparsers(dest='command', required=True, title='명령')
@@ -90,6 +121,7 @@ def main(argv=None) -> int:
     for name, help_text in [('show', '설정을 확인합니다.'), ('test', '시험 기록을 전송합니다.'),
                             ('schema', '데이터베이스 SQL을 출력합니다.'), ('off', '연동 설정을 끕니다.')]:
         sync_commands.add_parser(name, help=help_text)
+    subs.add_parser('doctor', help='설치 상태를 확인합니다.')
     blocks = subs.add_parser('blocks', help='블록 등록부를 봅니다.')
     blocks.add_argument('kind', nargs='?', metavar='종류')
     art = subs.add_parser('art', help='활동지 그림을 만들거나 가져옵니다.')
@@ -116,6 +148,8 @@ def main(argv=None) -> int:
         if args.command == 'sync':
             from sheet_sync import cmd_sync
             return cmd_sync(args)
+        if args.command == 'doctor':
+            return cmd_doctor()
         if args.command == 'blocks':
             return cmd_blocks(args.kind)
         if args.command == 'art':

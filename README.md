@@ -36,13 +36,13 @@ Codex(또는 Claude Code)에게 이렇게 말하세요.
    ```
 
    같은 이름의 폴더가 이미 있으면 덮어쓰지 말고 사용자에게 알린다(업데이트는 그 폴더에서 `git pull`).
-2. 필요한 것을 확인한다: Python 3.9 이상, Chrome 또는 Edge. 있으면 좋은 Python 모듈(없어도 동작하지만 글꼴 내장·쪽 그림이 빠진다):
+2. Python 3.9 이상과 Chrome 또는 Edge가 필요하다. 글꼴 내장과 필수 쪽 그림·모아보기를 위해 다음 모듈을 설치한다:
 
    ```bash
    python -m pip install fonttools pillow pymupdf
    ```
 
-3. 확인: `python -X utf8 ~/.codex/skills/pbj-html-sheet/scripts/sheet.py blocks`가 블록 목록을 출력하면 설치된 것이다.
+3. 확인: `python -X utf8 ~/.codex/skills/pbj-html-sheet/scripts/sheet.py doctor`로 Python 버전, 브라우저 경로, 모듈 설치와 학생 기록 설정 파일 유무를 확인한다. 설정 값은 출력하지 않는다. 쪽 그림을 만들지 못하면 위 모듈을 설치하고 `check`를 다시 실행한다.
 4. 사용자에게 Codex(또는 Claude Code)를 새로 열어야 스킬이 보인다고 알린다.
 
 글꼴은 컴퓨터에 설치된 Noto Sans KR·Noto Serif KR을 잘라 파일 안에 넣습니다(없으면 맑은 고딕·바탕으로 대신). 새로 내려받지 않습니다.

@@ -160,6 +160,75 @@ class PlanTest(unittest.TestCase):
         self.assertEqual([(i.path, i.hint) for i in warnings],
                          [('items[0].blocks[0].rows[0].grow', 'grow를 빼고 lines로 정하세요.')])
 
+    def test_grade_terms_student_text_and_private_answers(self):
+        block = {'type': 'question', 'text': '기울기와 $x$절편을 알아봅시다.'}
+        data = document(block, {'type': 'text', 'text': '소인수분해와 {{|기울기}}'},
+                        {'type': 'answer', 'rows': [{'label': '답', 'answer': '기울기'}]})
+        data['meta']['grade'] = '중학교 1학년'
+        data['teacher'] = {'memo': ['기울기'], 'solutions': [{'item': 'q1', 'answer': '기울기', 'steps': ['기울기']}]}
+        terms = [i for i in validate(data, ROOT) if i.code == 'term-beyond-grade']
+        self.assertEqual(len(terms), 2)
+        self.assertTrue(all(i.path == 'items[0].blocks[0].text' for i in terms))
+        self.assertTrue(any('x절편' in i.message for i in terms))
+        for grade in ('중2', '2학년', '중학교 2학년', '고등학교 1학년', '미상'):
+            with self.subTest(grade=grade):
+                data['meta']['grade'] = grade
+                self.assertFalse([i for i in validate(data, ROOT) if i.code == 'term-beyond-grade'])
+
+    def test_grade_terms_nested_fields_and_teacher_graph(self):
+        data = document({'type': 'split', 'left': [{'type': 'explore', 'prompt': '기울기', 'fn': 'a*x',
+                    'x': [-1, 1], 'y': [-1, 1], 'unit_mm': 4,
+                    'params': [{'name': 'a', 'label': '기울기', 'min': 0, 'max': 2, 'step': 1, 'value': 1}]}],
+                    'right': [{'type': 'grid', 'mode': 'coord', 'x': [-1, 1], 'y': [-1, 1], 'unit_mm': 4,
+                    'draw': [{'points': [[0, 0]], 'names': ['기울기']},
+                             {'points': [[1, 1]], 'names': ['기울기'], 'teacher': True}]}]})
+        data['meta']['grade'] = '1학년'
+        paths = [i.path for i in validate(data, ROOT) if i.code == 'term-beyond-grade']
+        self.assertEqual(len(paths), 3, paths)
+        self.assertTrue(any('params[0].label' in p for p in paths))
+        self.assertTrue(any('draw[0].names[0]' in p for p in paths))
+        self.assertFalse(any('draw[1]' in p for p in paths))
+
+    def test_grade_terms_across_student_facing_blocks(self):
+        blocks = [
+            {'type': 'notice', 'label': '기울기', 'lines': ['기울기']},
+            {'type': 'situation', 'title': '기울기', 'lines': ['기울기'], 'note': '기울기'},
+            {'type': 'callout', 'kind': '개념', 'title': '기울기', 'lines': ['기울기']},
+            {'type': 'table', 'header': ['기울기'], 'rows': [['기울기']]},
+            {'type': 'choices', 'options': ['기울기', '보기'], 'answer': 1},
+            {'type': 'ox', 'items': [{'text': '기울기', 'answer': 'O'}]},
+            {'type': 'match', 'left': ['기울기', '가'], 'right': ['나', '다']},
+            {'type': 'order', 'items': ['기울기', '가']},
+            {'type': 'ask', 'tag': '질문', 'text': '기울기', 'lines': 2, 'answer': '기울기'},
+            {'type': 'chart', 'kind': 'bar', 'labels': ['기울기'], 'values': [1], 'x_label': '기울기'},
+            {'type': 'checklist', 'items': ['기울기']},
+        ]
+        data = document(*blocks)
+        data['meta'].update(grade='중1', kind='수업')
+        data['items'][0]['hints'] = ['기울기']
+        terms = [i for i in validate(data, ROOT) if i.code == 'term-beyond-grade']
+        self.assertEqual(len(terms), 18, [(i.path, i.message) for i in terms])
+        self.assertFalse(any(i.path.endswith('.answer') for i in terms))
+        self.assertTrue(any(i.path.endswith('.hints[0]') for i in terms))
+
+    def test_histogram_polygon_frequency_validation(self):
+        for kind in ('histogram', 'polygon'):
+            with self.subTest(kind=kind):
+                block = {'type': 'chart', 'kind': kind, 'bins': [0, 1, 3], 'values': [-1.5, 2.5],
+                         'plot': {'answer': [-2, 1.5]}}
+                issues = validate(document(block), ROOT)
+                self.assertTrue(any(i.code == 'unequal-bin-width' for i in issues))
+                self.assertTrue(any(i.level == 'error' and i.path.endswith('values[0]') for i in issues))
+                self.assertTrue(any(i.level == 'error' and i.path.endswith('plot.answer[0]') for i in issues))
+                self.assertEqual(sum(i.code == 'frequency-not-integer' for i in issues), 3)
+                for label in ('상대도수', '비율'):
+                    block['y_label'] = label
+                    issues = validate(document(block), ROOT)
+                    self.assertFalse(any(i.code == 'frequency-not-integer' for i in issues))
+                    self.assertTrue(any(i.level == 'error' and i.path.endswith('values[0]') for i in issues))
+                block.update(bins=[0, .1, .2], values=[1, 2], plot={'answer': [1, 2]})
+                self.assertFalse(any(i.code == 'unequal-bin-width' for i in validate(document(block), ROOT)))
+
     def test_all_warnings_nonblocking(self):
         data = document({'type': 'question', 'text': '1. 점 A □ ' + '가' * 161},
                         {'type': 'answer', 'rows': [{'label': '풀이', 'mark': '㉠', 'answer': '예시 답안'}]})

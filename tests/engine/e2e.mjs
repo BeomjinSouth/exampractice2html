@@ -114,7 +114,7 @@ const examples = [
 const revealPayload = {
   slots: Object.fromEntries([...examples.map(([slot,,canonical]) => [slot, { answer_html: canonical }]),
     ['q1.4', { answer_html: '분자와 분모를 같은 수로 나눴어요.' }]]),
-  items: { q1: { solution_html: '<p>풀이 표식: 분수 식을 약분했어요.</p>', rubric: ['분자와 분모에 같은 수를 썼나요?'], video: { yt: 'M7lc1UVf-VE', start: 5 } } },
+  items: { q1: { solution_html: '<p><b>예시 답안</b> 풀이 표식: 분수 식을 약분했어요.</p><ol><li>분모를 확인해요.</li></ol>', rubric: ['분자와 분모에 같은 수를 썼나요?', '$2$배를 확인했나요?'], video: { yt: 'M7lc1UVf-VE', start: 5 } } },
 };
 function fixtureData(html, policy) {
   const attr = value => quote(value).replace(/[&"<>]/g, c => ({'&':'&amp;','"':'&quot;','<':'&lt;','>':'&gt;'})[c]);
@@ -564,12 +564,20 @@ try {
           await setInput(tab, `${slot('q1.4')} textarea`, '!?');
           assert.equal(await status('compare'), true);
           await setInput(tab, `${slot('q1.4')} textarea`, '원점');
-          assert.equal(await status('compare'), false);
+          assert.equal(await status('compare'), true, '서술만 쓰면 나머지 칸의 답을 짐작할 수 있음');
+          if (policy === '시도 후') assert.equal(await status('reveal-solution'), true);
+          await tab.js(`sheet.answer('q1.2','서로 수직'); sheet.answer('q1.3','2')`);
+          assert.equal(await status('compare'), false, '정답 여부가 아니라 모든 응답 칸을 시도했는지 봄');
           await tab.click(action('compare',q1));
           assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare input').checkVisibility()`), true);
+          assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare math')?.textContent`), '2');
+          await setInput(tab, `${slot('q1.3')} textarea`, '');
+          assert.equal(await status('compare'), true);
+          assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare').hidden`), true);
+          if (policy === '시도 후') assert.equal(await status('reveal-solution'), true);
+          await tab.js(`sheet.answer('q1.3','1')`);
           if (policy === '시도 후') {
-            assert.equal(await status('reveal-solution'), true);
-            await tab.js(`sheet.answer('q1.2','서로 평행'); sheet.answer('q1.3','1')`);
+            await tab.js(`sheet.answer('q1.2','서로 평행')`);
             assert.equal(await status('reveal-solution'), false, '펜 칸은 채우지 않아도 됨');
           }
           await tab.click(action('reveal-solution',q1));
@@ -579,7 +587,7 @@ try {
             await setInput(tab, `${slot('q1.2')} input`, '');
             assert.equal(await status('reveal-solution'), true);
             assert.equal(await tab.js(`document.querySelector('${q1} .ws-solution:not(.ws-compare)').hidden`), true);
-            assert.equal(await revealedCount(), 3);
+            assert.equal(await revealedCount(), 2, '지운 칸 정답과 서술 예시를 함께 숨김');
           }
         } else assert.equal(await tab.js('!!document.querySelector("#sheet-reveal,.ws-reveal,.ws-solution")'), false);
         const shownHints = () => tab.js(`document.querySelectorAll('${q1} .ws-hint:not([hidden])').length`);
@@ -854,13 +862,29 @@ try {
       await tab.click(action('save-answers'));
       const file = path.join(work,'그래프와 수 (내 답).html');
       await eventually(()=>fs.readFile(file,'utf8').catch(()=>false),'답 HTML 내려받기');
-      await usingTab(pathToFileURL(file).href, async copy => {
-        await copy.js(`localStorage.setItem('pbj-sheet:interactive-fixture:student',${quote(quote({'head.이름':'다른 자동 저장 값'}))})`);
+      const fileUrl = pathToFileURL(file).href;
+      // Chrome's local files can share storage in this profile. Start with a clean device.
+      await tab.js('sheet.clearAnswers()');
+      const device = { 'head.이름':'기기에서 고친 이름', 'q1.1':'3/4', 'q1.3':'2' };
+      await usingTab(fileUrl, async copy => {
+        assert.deepEqual(await valuesOf(copy),filled, '기기 답이 없으면 파일 답을 바로 표시');
+        assert.equal(await copy.js('!!document.querySelector(".ws-answer-prompt:not([hidden])")'), false);
+        await copy.js(`localStorage.setItem('pbj-sheet:interactive-fixture:student',${quote(quote(device))})`);
       });
-      await usingTab(pathToFileURL(file).href, async copy => {
+      await usingTab(fileUrl, async copy => {
         assert.deepEqual(await valuesOf(copy),{});
         await copy.click(action('resume-answers'));
-        assert.deepEqual(await valuesOf(copy),filled);
+        assert.deepEqual(await valuesOf(copy),device, '파일의 이전 값이나 기기에서 지운 답을 가져오지 않음');
+        await setInput(copy, `${slot('q1.1')} input`, '4/5');
+      });
+      await usingTab(fileUrl, async copy => {
+        await copy.click(action('resume-answers'));
+        assert.deepEqual(await valuesOf(copy),{ ...device, 'q1.1':'4/5' });
+      });
+      await usingTab(fileUrl, async copy => {
+        assert.deepEqual(await valuesOf(copy),{});
+        await copy.click(action('open-file-answers'));
+        assert.deepEqual(await valuesOf(copy),filled, '기기 답으로 파일의 빈칸을 채우지 않음');
         assert.equal(await copy.js(`document.querySelector(${quote(name)}).value`),filled['head.이름']);
         await copy.js(`window.confirm = () => { throw Error('브라우저 확인창을 열면 안 됩니다'); }; localStorage.setItem('sample-sync:queue','보존')`);
         await copy.click(action('clear-answers'));
@@ -878,6 +902,7 @@ try {
     await usingTab(studentInteractive, async tab => {
       assert.deepEqual(await valuesOf(tab),{});
       await tab.click(action('start-fresh'));
+      await tab.click(action('confirm-start-fresh'));
       assert.deepEqual(await valuesOf(tab),{});
       assert.equal(await tab.js(`document.querySelector(${quote(name)}).value`), '');
       assert.equal(await tab.js(`localStorage.getItem('pbj-sheet:interactive-fixture:student:saved-at')`), null);
@@ -924,6 +949,46 @@ try {
       await copy.js('sheet.clearAnswers()');
     });
   }));
+  await test('교사용 풀이와 채점 요소 편집 → 저장 → 학생용 풀이 열기', async () => {
+    const saved = await usingTab(interactive, async tab => {
+      await tab.key('e');
+      const edit = async (sel,text) => { await tab.mouseClick(sel,2); await paste(tab,text); await tab.key('Enter'); };
+      await edit('.ws-t-ans [data-src]', '새 예시 답안 표식');
+      await edit('.ws-t-steps li','풀이 새 문장: $\\frac{1}{2}$로 나타내요.');
+      await edit('.ws-t-rubric [data-src]', '되돌릴 문장');
+      await tab.key('z',2);
+      assert.match(await tab.js('document.querySelector(".ws-t-rubric").textContent'), /분자와 분모/);
+      await edit('.ws-t-rubric [data-src]', '$3$배를 확인했나요?');
+      assert.equal(await tab.js('document.querySelector(".ws-t-steps math mfrac").textContent'),'12');
+      return tab.js('sheet.serialize()');
+    });
+    const html = await usingTab(await saveFile('edited-solution-teacher', saved), tab => tab.js('sheet.exportStudent()'));
+    assert.doesNotMatch(html,/풀이 새 문장|3\$배를 확인|교사만 보는 문장|다음 시간에 확인/);
+    await usingTab(await saveFile('edited-solution-student', html), async tab => {
+      await tab.js(`sheet.clearAnswers(); sheet.answer('q1.1','0.5'); sheet.answer('q1.2','서로 평행'); sheet.answer('q1.3','1'); sheet.answer('q1.4','설명')`);
+      await tab.click(action('check',item('q1')));
+      await tab.click(action('reveal-solution',item('q1')));
+      const box = `${item('q1')} .ws-solution:not(.ws-compare)`;
+      assert.match(await tab.js(`document.querySelector('${box}').textContent`),/새 예시 답안 표식.*풀이 새 문장/s);
+      assert.equal(await tab.js(`document.querySelector('${box} mfrac')?.textContent`),'12');
+      assert.equal(await tab.js(`document.querySelector('${box} .ws-compare-list math')?.textContent`),'3');
+      assert(await tab.js(`!!document.querySelector('${box} ${action('play-video')}')`), '풀이 영상 유지');
+      assert.doesNotMatch(await tab.js(`document.querySelector('${box}').textContent`), /분모를 확인|되돌릴 문장|교사만 보는 문장/);
+      await tab.js('sheet.clearAnswers()');
+    });
+  });
+  await test('MathML 배치가 안 될 때만 풀기 화면에 안내', async () => {
+    const broken = await saveFile('mathml-no-layout', (await fs.readFile(fileURLToPath(studentInteractive),'utf8'))
+      .replace('</head>','<style>math, mfrac, msup, math * { display:inline !important; }</style></head>'));
+    await usingTab(studentInteractive, async tab => assert.equal(await tab.js('!!document.querySelector(".ws-math-notice")'),false));
+    await usingTab(broken, async tab => {
+      assert.equal(await tab.js('document.querySelector(".ws-math-notice")?.checkVisibility()'),true);
+      assert.match(await tab.js('document.querySelector(".ws-math-notice").textContent'),/수식.*최신 브라우저/);
+      await tab.js(`sheet.view('a4')`,true);
+      assert.equal(await tab.js('document.querySelector(".ws-math-notice").checkVisibility()'),false);
+      assert.equal((await tab.report()).print_leaks,0);
+    }, metrics(390,844,true));
+  });
   await test('1판에는 2판 장치가 없고, 영상은 누를 때만 임베드', async () => {
     const staticHtml = await usingTab(interactive, tab => tab.js(`sheet.exportStudent().replace(' data-interactive="1"','')`));
     await usingTab(await saveFile('static-v2-blocks',staticHtml), async tab => {
@@ -962,6 +1027,103 @@ try {
   const studentSource = await usingTab(interactive, tab => tab.js('sheet.exportStudent()'));
   const syncTeacher = await saveFile('sync-teacher', withSync(teacherSource));
   const syncStudent = await saveFile('sync-student', withSync(studentSource));
+  await test('공용 기기의 복원 선택·날짜·재확인·제출 잠금', async () => {
+    const old = { 'head.이름':'앞 학생', 'q1.1':'0.5' };
+    const key = 'pbj-sheet:interactive-fixture:student';
+    const url = await saveFile('sync-restore', withSync(studentSource).replace('<script id="sheet-js">',
+      '<script>delete HTMLElement.prototype.inert;<\/script><script id="sheet-js">'));
+    await usingTab(url, async tab => {
+      await tab.js(`sheet.clearAnswers(); localStorage.clear(); syncMock.fail = true; sheet.answer('head.이름','앞 학생'); sheet.answer('q1.1','0.5')`);
+      await tab.click(action('check',item('q1')));
+      await eventually(() => tab.js('Object.keys(localStorage).some(k=>k.endsWith(":queue"))'), '앞 학생 전송 대기');
+      await tab.js(`localStorage.setItem(${quote(key + ':saved-at')}, String(+new Date(2024,10,27,9,10)))`);
+    });
+    await usingTab(url, async tab => {
+      assert.deepEqual(await valuesOf(tab),{});
+      const prompt = '.ws-answer-prompt:not([hidden])';
+      assert.equal(await tab.js(`document.querySelector('${prompt} button').dataset.sheetAction`), 'start-fresh');
+      assert.equal(await tab.js('document.activeElement.dataset.sheetAction'), 'start-fresh');
+      assert.match(await tab.js(`document.querySelector('${prompt}').textContent`), /11월 27일 09:10/);
+      assert.match(await tab.js(`document.querySelector('${action('resume-answers')}').textContent`), /이 기기에서 내가 쓰던 답/);
+      for (const name of ['sync-submit','sync-retry','save-answers','clear-answers']) {
+        assert.equal(await tab.js(`document.querySelector('${action(name)}').disabled`), true, name);
+        await tab.click(action(name));
+      }
+      assert.equal(await tab.js('syncMock.calls.length'), 0);
+      assert.equal(await tab.js(`sheet.answer('q1.1','2')`), null);
+      assert.equal(await tab.js(`(() => { const v=document.querySelector('main video'); v.focus(); return document.activeElement === v; })()`), false);
+      await tab.click(action('start-fresh'));
+      assert.equal(await tab.js(`localStorage.getItem(${quote(key)})`),quote(old));
+      assert.equal(await tab.js('document.activeElement.dataset.sheetAction'), 'cancel-start-fresh');
+      await tab.click(action('cancel-start-fresh'));
+      assert.equal(await tab.js('document.activeElement.dataset.sheetAction'), 'start-fresh');
+      await tab.click(action('start-fresh')); await tab.click(action('confirm-start-fresh'));
+      assert.deepEqual(await valuesOf(tab),{});
+      assert.equal(await tab.js(`localStorage.getItem(${quote(key)})`),null);
+      assert.equal(await tab.js('document.querySelector(\'.ws-in\').disabled'), false);
+      assert.equal(await tab.js('document.querySelector("main video").controls'), true);
+      await tab.click(action('sync-retry'));
+      await eventually(() => tab.js('syncMock.calls.length === 1'), '앞 학생 기록 재전송');
+      assert.deepEqual(await tab.js('syncMock.calls[0].body.student'),{'이름':'앞 학생'});
+      assert.deepEqual(await tab.js('syncMock.calls[0].body.answers'),{'q1.1':'0.5'});
+    }, metrics(390,844,true));
+  });
+  await test('교사 편집 판을 학생 자동 저장과 기록에서 분리', async () => {
+    const legacy = 'interactive-';
+    const savedBuild = html => JSON.parse(/<meta name="sheet-build" content="([^"]*)"/.exec(html)[1].replaceAll('&quot;', '"'));
+    const [teacherHtml, studentHtml, answerOnly] = await usingTab(syncTeacher, async tab => {
+      const edit = async (sel,text) => { await tab.mouseClick(sel,2); await paste(tab,text); await tab.key('Enter'); };
+      const saved = () => tab.js('sheet.serialize()');
+      const before = savedBuild(await saved());
+      await tab.click(action('preview-student'));
+      await tab.js(`sheet.answer('head.이름','미리보기 시험'); sheet.answer('q2.4',['t2','t3','t1']); sheet.clearAnswers()`);
+      await tab.click(action('return-teacher'));
+      assert.deepEqual(savedBuild(await saved()), before, '학생 화면을 미리 보거나 입력해도 같은 판');
+      await tab.key('e');
+      await edit('.ws-t-list li','교사만 보는 새 메모');
+      assert.deepEqual(savedBuild(await saved()), before);
+      await edit(`${slot('q1.3')} .ws-key`,'$2$');
+      const answer = savedBuild(await saved());
+      await tab.key('z',2);
+      assert.deepEqual(savedBuild(await saved()), before);
+      await edit(qText('q1'),'0.75를 분수로 쓰세요. {{㉠|$\\frac{3}{4}$|26}}');
+      const after = await saved();
+      const exported = await tab.js('sheet.exportStudent()');
+      assert.deepEqual(savedBuild(after), savedBuild(exported));
+      assert.deepEqual(savedBuild(await saved()), savedBuild(after), '그대로 다시 저장해도 같은 판');
+      return [after, exported, answer];
+    });
+    const edition = savedBuild(teacherHtml).edition;
+    assert(edition && edition !== answerOnly.edition && answerOnly.edition, '정답만 또는 발문·빈칸을 고쳐도 각각 새 판');
+    assert.equal(savedBuild(teacherHtml).source_sha256, 'interactive-fixture');
+    const oldState = { 'head.이름':'구판 학생', 'q1.1':'1/2' };
+    const url = await saveFile('new-edition-student',studentHtml);
+    await usingTab(url, async tab => {
+      await tab.js(`localStorage.clear(); localStorage.setItem('pbj-sheet:interactive-fixture:student',${quote(quote(oldState))})`);
+    });
+    const posted = await usingTab(url, async tab => {
+      assert.deepEqual(await valuesOf(tab),{});
+      assert.equal(await tab.js(`!!document.querySelector('${action('resume-answers')}')`),false);
+      await tab.js(`sheet.answer('head.이름','신판 학생'); sheet.answer('q1.1','3/4')`);
+      await tab.click(action('check',item('q1')));
+      await eventually(() => tab.js('syncMock.calls.length === 1'), '신판 확인 기록');
+      return tab.js('syncMock.calls[0].body');
+    });
+    assert.equal(posted.build, edition);
+    await usingTab(await saveFile('new-edition-teacher',teacherHtml), async tab => {
+      assert.equal(savedBuild(await tab.js('sheet.serialize()')).edition,edition);
+      const current = { ...posted, created_at:'2026-01-02T09:00:00Z' };
+      const old = { ...current, build: legacy, event:'submit', student:{'이름':'구판 학생'} };
+      await tab.js(`syncMock.rows=${quote([current,old])}`);
+      await tab.click(action('student-records'));
+      await setInput(tab,'.ws-records input[type=email]','teacher@example.invalid');
+      await setInput(tab,'.ws-records input[type=password]','test-password');
+      await tab.js('document.querySelector(".ws-records-login").requestSubmit()');
+      await eventually(() => tab.js('document.querySelectorAll(".ws-records-table tbody tr").length === 2'), '새 판 학생 표');
+      const states = await tab.js(`[...document.querySelectorAll('.ws-records-table tbody tr')].map(tr=>[tr.cells[0].textContent,tr.cells[4].textContent])`);
+      assert.deepEqual(Object.fromEntries(states),{'신판 학생':'미제출','구판 학생':'다른 판에서 제출'});
+    });
+  });
   await test('학생 기록 전송·이름·제출·대기열·온라인 재전송', () => usingTab(syncStudent, async tab => {
     await tab.js('sheet.clearAnswers(); localStorage.clear()');
     await tab.js(`sheet.view('a4')`,true); await tab.click(action('sync-submit'));
@@ -1353,7 +1515,7 @@ try {
         assert.match(saved,/data-pen-value=/);
         await usingTab(await saveFile(`pen-copy-${theme}`,saved),async copy=>{
           assert.deepEqual(await valuesOf(copy), {});
-          await copy.click(action('resume-answers'));
+          await copy.click(action('open-file-answers'));
           assert.deepEqual((await valuesOf(copy))['q3.1'],[1]);
           assert(await copy.js(`document.querySelector('${slot('q3.1')} canvas').getContext('2d').getImageData(0,0,1000,200).data.some(v=>v!==0)`));
         });

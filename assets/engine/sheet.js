@@ -319,6 +319,7 @@
   let src, teacherSrc, main, userStyle, fontStyle, toolbar, notice, answerButton, editButton, undoButton;
   let studentItems = [], teacherItems = [], pages = [], edit = false, draft, saveHandle, saving = false;
   let fontRun = 0, activeFont = false, copySerial = 0, solve;
+  let originalEditionContent, lastEditionContent, lastEdition;
   const undoStack = [];
   const originalMarks = new WeakMap();
   let boxBases = new WeakMap();
@@ -607,6 +608,31 @@
       el.removeAttribute('data-check');
     }
   }
+  function editionContent() {
+    const items = studentItems.filter(item => !item.matches('.ws-teacher-only')).map(item => {
+      const copy = cleanItem(item, true);
+      for (const node of all(copy, '[data-sheet-runtime], .ws-teacher-only')) node.remove();
+      return copy.outerHTML;
+    });
+    return JSON.stringify([items, solve?.revealData()]);
+  }
+  function buildMeta() {
+    let build = {};
+    try { build = JSON.parse(document.querySelector('meta[name="sheet-build"]')?.content || '{}') || {}; }
+    catch { /* Older files may not carry build metadata. */ }
+    if (originalEditionContent !== undefined) {
+      const content = editionContent();
+      if (content !== originalEditionContent) {
+        if (content !== lastEditionContent) {
+          lastEditionContent = content;
+          const bytes = crypto.getRandomValues(new Uint8Array(16));
+          lastEdition = 'e-' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+        }
+        return { ...build, edition: lastEdition };
+      }
+    }
+    return build;
+  }
   function serialize(asStudent = false, keepValues = false) {
     const copy = root.cloneNode(true);
     copy.removeAttribute('data-sheet-edit');
@@ -615,6 +641,14 @@
     copy.querySelector('#sheet-src')?.replaceChildren(...studentItems.map(item => cleanItem(item, !asStudent, keepValues)));
     solve?.cleanDocument(copy);
     copy.querySelector('#sheet-teacher')?.replaceChildren(...teacherItems.map(item => cleanItem(item, true)));
+    if (teacher) {
+      const build = buildMeta();
+      if (build.edition) {
+        let meta = copy.querySelector('meta[name="sheet-build"]');
+        if (!meta) { meta = make('meta'); meta.name = 'sheet-build'; copy.querySelector('head').append(meta); }
+        meta.content = JSON.stringify(build);
+      }
+    }
     for (const el of all(copy, '[data-sheet-runtime]')) el.remove();
     for (const el of all(copy, '[contenteditable]')) el.removeAttribute('contenteditable');
     if (asStudent || !teacher) {
@@ -1051,6 +1085,7 @@
     createToolbar();
     if (teacher) bindEditor();
     solve?.init();
+    if (teacher) originalEditionContent = editionContent();
   }
 
   window.sheet = {
@@ -1062,7 +1097,8 @@
   // layout은 DOM을 옮긴 뒤 동기 측정한다. 편집·저장 훅은 원본 대신 수정할 사본을 받는다.
   if (root.dataset.interactive === '1') window.__sheetCore = {
     attach(extension) { solve = extension; root.dataset.view = 'a4'; },
-    items: () => studentItems, layout, refreshFontLayout, renderMarkup, serialize, download, fileName,
+    items: () => studentItems, teacherItems: () => teacherItems, buildMeta,
+    layout, refreshFontLayout, renderMarkup, serialize, download, fileName,
     addToolbar(...nodes) { toolbar.append(...nodes); }, button, commitDraft,
     stopEditing() { if (edit) setEdit(false); },
     syncAnswerButton() { answerButton?.setAttribute('aria-pressed', String(answersOn())); },

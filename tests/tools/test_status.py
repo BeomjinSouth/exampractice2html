@@ -201,12 +201,16 @@ class StatusTest(unittest.TestCase):
         for name in (extra, '활동 (내 답).html', '활동 (내 답) (1).html'):
             (self.folder / name).write_text('<html></html>', encoding='utf-8')
         (self.out / '비교.html').write_text('<html></html>', encoding='utf-8')
+        # 조립 도구가 남긴 예전 판 보관 폴더는 스킬 밖 파일로 세지 않는다.
+        (self.folder / '_이전').mkdir()
+        (self.folder / '_이전' / '활동-001.html').write_text('<html></html>', encoding='utf-8')
         result, output = self.status()
         self.assertEqual(result, 0, output)
         note = f'검사하지 않은 HTML: {extra} — 정답 유출·인쇄·호환 검사를 거치지 않았습니다'
         self.assertEqual(output.count(note), 2)
         self.assertNotIn('내 답', output)
         self.assertNotIn('비교.html', output)
+        self.assertNotIn('활동-001.html', output)
         self.assertNotIn(f'전달: {self.folder / extra}', output)
 
     def test_plan_errors_and_unavailable(self):

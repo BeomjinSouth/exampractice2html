@@ -1281,7 +1281,8 @@ def _unchecked_html(folder, build):
              if isinstance(build.get(key), dict) and isinstance(build[key].get('file'), str)}
     names = []
     for directory, subdirs, files in os.walk(folder):
-        subdirs[:] = [name for name in subdirs if name != '검사']
+        # 검사 산출물과 조립·검사·그림 도구가 남긴 예전 판(_이전)은 스킬 밖 파일이 아니다.
+        subdirs[:] = [name for name in subdirs if name not in ('검사', '_이전')]
         parent = Path(directory).relative_to(folder)
         for name in files:
             if (Path(name).suffix.lower() != '.html' or

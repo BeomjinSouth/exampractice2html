@@ -58,7 +58,7 @@
     "description": "그림과 캡션을 나란히 놓은 표",
     "fields": {"items": "그림 객체 2개. 각각 src 또는 svg, width_mm, alt, caption, teacher_only만 사용. 각각 그리려면 split에 figure를 하나씩 배치", "items[].caption": "각 그림 아래 설명"},
     "required": ["items", "items[].caption"], "limits": {"items[].caption": 90, "items[].alt": 120},
-    "example": {"type": "figures", "items": [{"svg": "<svg viewBox='0 0 20 20'><circle cx='10' cy='10' r='8'/></svg>", "width_mm": 20, "caption": "그림 가"}, {"svg": "<svg viewBox='0 0 20 20'><rect x='2' y='2' width='16' height='16'/></svg>", "width_mm": 20, "caption": "그림 나"}]}
+    "example": {"type": "figures", "items": [{"svg": "<svg viewBox='0 0 20 20'><circle cx='10' cy='10' r='8'/></svg>", "width_mm": 20, "caption": "그림 가", "alt": "원"}, {"svg": "<svg viewBox='0 0 20 20'><rect x='2' y='2' width='16' height='16'/></svg>", "width_mm": 20, "caption": "그림 나", "alt": "정사각형"}]}
   },
   "grid": {
     "description": "실제 크기 모눈 또는 좌표평면",

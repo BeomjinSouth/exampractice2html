@@ -470,6 +470,27 @@ class BuildTest(unittest.TestCase):
         self.cli('derive', self.teacher)
         self.assertNotIn(answer['src'], self.student.read_text(encoding='utf-8'))
 
+    def test_svg_answer_recolors_without_losing_transparency_or_local_paint(self):
+        from xml.etree import ElementTree as ET
+        figure = {'type': 'figure', 'width_mm': 60, 'alt': '두 점', 'svg': '<svg viewBox="0 0 60 20"/>',
+                  'answer': '<svg viewBox="0 0 60 20"><defs><linearGradient id="fade">'
+                            '<stop stop-color="rgba(0,0,0,.3)" stop-opacity=".5"/></linearGradient></defs>'
+                            '<rect width="60" height="20" fill="rgba(0,0,0,0)"/>'
+                            '<path fill="url(#fade)" opacity=".7" style="fill-opacity:.4;stroke:hsla(240 50% 50% / 25%) !important"/>'
+                            '<circle fill="transparent" style="stroke:rgba(0,0,0,.5)"/></svg>'}
+        self.source.write_text(json.dumps({'version': 1, 'meta': {'title': self.title, 'sync': False},
+                                          'items': [{'id': 'q1', 'blocks': [figure]}]}), encoding='utf-8')
+        self.cli('build', self.folder)
+        answer = next(a['src'] for tag, a in Tags(self.teacher.read_text(encoding='utf-8')).tags
+                      if tag == 'img' and 'ws-fig-answer' in a.get('class', ''))
+        defs, rect, path, circle = ET.fromstring(base64.b64decode(answer.split(',', 1)[1]))
+        self.assertEqual(rect.get('fill'), 'rgba(192,0,0,0)')
+        self.assertEqual(defs[0][0].attrib, {'stop-color': 'rgba(192,0,0,.3)', 'stop-opacity': '.5'})
+        self.assertEqual(path.attrib, {'fill': 'url(#fade)', 'opacity': '.7',
+                                       'style': 'fill-opacity:.4;stroke:rgba(192,0,0,25%)!important'})
+        self.assertEqual(circle.attrib, {'fill': 'transparent', 'style': 'stroke:rgba(192,0,0,.5)'})
+        self.assertNotIn(answer, self.student.read_text(encoding='utf-8'))
+
     def test_source_audit_distinguishes_public_box_coordinates_and_private_images(self):
         from sheet_build import strip_teacher
         from sheet_check import _audit_source
@@ -549,6 +570,44 @@ class BuildTest(unittest.TestCase):
         self.cli('build', self.folder)
         self.assertIn(key[0].get('d'), self.student.read_text(encoding='utf-8'))
         self.assertNotEqual(self.edition(self.student), before)
+
+    def test_dense_chart_axes_space_numbers_without_removing_ticks_or_guides(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': self.title}}, self.folder, [])
+        dense = {'type': 'chart', 'kind': 'box', 'x': [0, 100], 'x_step': 5, 'width_mm': 65,
+                 'guides': True, 'groups': [{'label': '1반', 'data': [45, 55, 60, 85, 100]}]}
+        polygon = {'type': 'chart', 'kind': 'polygon', 'width_mm': 65, 'height_mm': 28,
+                   'bins': list(range(0, 101, 5)), 'values': [20] * 20, 'y_step': 1}
+        histogram = {**polygon, 'kind': 'histogram', 'teacher': True}
+        scatter = {'type': 'chart', 'kind': 'scatter', 'width_mm': 65, 'points': [[10, 10]],
+                   'x': [0, 100], 'x_step': 2, 'y': [0, 20], 'y_step': 1, 'height_mm': 28}
+        for block, ends, tick_count in [(dense, ('0', '100'), 21), (polygon, ('−5', '105'), 23),
+                                        (histogram, ('0', '100'), 21), (scatter, ('0', '100'), 51)]:
+            with self.subTest(kind=block['kind']):
+                svg = ET.fromstring(renderer.chart(block)).find('svg')
+                xlabels = [t for t in svg.findall('text') if t.get('text-anchor') == 'middle']
+                self.assertEqual((xlabels[0].text, xlabels[-1].text), ends)
+                self.assertLess(len(xlabels), tick_count)
+                for a, b in zip(xlabels, xlabels[1:]):
+                    # With the print font, a digit is about 0.56 em wide.
+                    width = (len(a.text) + len(b.text)) * float(a.get('font-size')) * .56
+                    self.assertGreater(float(b.get('x')) - float(a.get('x')), width / 2)
+                if block is dense:
+                    self.assertEqual([t.text for t in xlabels[:3]], ['0', '10', '20'])
+                    self.assertEqual(svg.find("path[@class='ws-chart-guides']").get('d').count('V'), 21)
+                    self.assertEqual(svg.findall('path')[1].get('d').count('v'), 21)
+                elif block is polygon:
+                    self.assertEqual(sum(p.get('d').count('v1.2') for p in svg.findall('path')), 23)
+                elif block is scatter:
+                    self.assertEqual(sum(p.get('d').count('v1.2') for p in svg.findall('path')), 51)
+                elif block is histogram:
+                    guides = svg.find("path[@class='ws-chart-guides']").get('d')
+                    self.assertEqual((guides.count('V'), guides.count('H')), (20, 20))
+                if block is not dense:
+                    ylabels = [t for t in svg.findall('text') if t.get('text-anchor') == 'end']
+                    self.assertEqual((ylabels[0].text, ylabels[-1].text), ('0', '20'))
+                    self.assertLess(len(ylabels), 21)
 
     def test_chart_kinds_and_histogram_bin_widths(self):
         charts = [

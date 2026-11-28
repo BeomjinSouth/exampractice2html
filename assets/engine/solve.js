@@ -458,7 +458,24 @@
       row.restoredDrawing = !!drawing?.strokes.length;
     }
   }
-  let sheetSymbols = '';
+  let sheetSymbols = '', activeSymbols;
+  function hideSymbols() {
+    if (activeSymbols) activeSymbols.bar.hidden = true;
+    activeSymbols = undefined;
+  }
+  function positionSymbols() {
+    if (!activeSymbols) return;
+    const { input, bar } = activeSymbols, rect = input.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0;
+    const right = left + (viewport?.width ?? window.innerWidth), bottom = top + (viewport?.height ?? window.innerHeight);
+    const margin = 4, gap = 4, width = bar.offsetWidth, height = bar.offsetHeight;
+    const x = clamp(rect.left, left + margin, Math.max(left + margin, right - width - margin));
+    const preferredY = rect.bottom + gap + height <= bottom - margin ? rect.bottom + gap : rect.top - gap - height;
+    const y = clamp(preferredY, top + margin, Math.max(top + margin, bottom - height - margin));
+    bar.style.left = `${x}px`;
+    bar.style.top = `${y}px`;
+  }
   function indexSlots() {
     records.clear();
     for (const item of core.items()) {
@@ -701,7 +718,21 @@
       button.click();
     });
     let symbols;
+    function showSymbols() {
+      if (!symbols || !usable() || mode !== 'solve') return;
+      if (activeSymbols?.bar !== symbols) hideSymbols();
+      symbols.hidden = false;
+      activeSymbols = { input, bar: symbols };
+      positionSymbols();
+    }
+    function leaveSymbols(event) {
+      if (event.relatedTarget === input || symbols?.contains(event.relatedTarget)) return;
+      if (activeSymbols?.bar === symbols) hideSymbols();
+    }
+    input.addEventListener('focus', showSymbols);
+    input.addEventListener('blur', leaveSymbols);
     function syncSymbols() {
+      if (activeSymbols?.bar === symbols) hideSymbols();
       symbols?.remove();
       symbols = undefined;
       if (!['number', 'radical'].includes(row.kind)) return;
@@ -709,22 +740,26 @@
         if (!sheetSymbols.includes(symbol)) continue;
         if (!symbols) {
           symbols = solveOnly('span', 'ws-symbols');
-          if (answerBox) el.append(symbols); else el.after(symbols);
+          symbols.hidden = true;
+          symbols.addEventListener('focusout', leaveSymbols);
+          // Keep the ink immediately after the input for A4, and the buttons next in tab order.
+          ink.after(symbols);
         }
         const button = make('button', '', symbol);
         button.type = 'button';
         button.dataset.symbol = symbol;
-        button.setAttribute('aria-label', `${label} 넣기`);
-        button.addEventListener('mousedown', event => event.preventDefault());
+        button.setAttribute('aria-label', label);
+        button.addEventListener('pointerdown', event => event.preventDefault());
         button.addEventListener('click', () => {
           if (!usable() || mode !== 'solve') return;
           const start = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? start;
-          input.focus();
+          input.focus({ preventScroll: true });
           input.setRangeText(symbol, start, end, 'end');
-          setValue(row, input.value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
         });
         symbols.append(button);
       }
+      if (document.activeElement === input) showSymbols();
     }
     syncSymbols();
     return { syncSymbols, paint(value) {
@@ -1728,6 +1763,7 @@
       delayedPaint = null;
       if (usable()) for (const row of records.values()) if (row.control?.resize) row.control.paint(row.value);
       if (mainNode) updateTableOverflow(mainNode);
+      positionSymbols();
     });
   }
   const resizeObserver = new ResizeObserver(schedulePaint);
@@ -1742,6 +1778,7 @@
   }
   function changeView(next) {
     if (mode === next) return;
+    hideSymbols();
     if (next === 'a4' && mainNode) stopVideo(mainNode);
     mode = root.dataset.view = next;
     syncToolbar(); core.layout();
@@ -1823,6 +1860,10 @@
       core.addToolbar(saveStatus);
     }
     narrowScreen.addEventListener('change', schedulePaint);
+    window.addEventListener('scroll', positionSymbols, true);
+    window.addEventListener('resize', positionSymbols);
+    window.visualViewport?.addEventListener('scroll', positionSymbols);
+    window.visualViewport?.addEventListener('resize', positionSymbols);
     window.addEventListener('beforeprint', () => {
       printing ??= mode;
       // An inline answer entered in A4 view may have wrapped since its last layout.

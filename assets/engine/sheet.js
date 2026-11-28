@@ -427,6 +427,24 @@
     }
     orderSolutions(order, numbers);
   }
+  function solutionLabel(item) {
+    const visibleText = node => {
+      if (!node) return '';
+      const copy = node.cloneNode(true);
+      for (const hidden of all(copy, `${privateContent}, [data-sheet-runtime]`)) hidden.remove();
+      return copy.textContent.replace(/\s+/g, ' ').trim();
+    };
+    for (const heading of all(item, '.ws-heading').filter(node => !node.closest(privateContent))) {
+      const title = [visibleText(heading.querySelector('.ws-heading-tag')), visibleText(heading.querySelector('.ws-heading-text'))]
+        .filter(Boolean).join(' · ');
+      if (title) return title;
+    }
+    for (const question of all(item, '.ws-q-text').filter(node => !node.closest(privateContent))) {
+      const text = Array.from(visibleText(question));
+      if (text.length) return text.slice(0, 30).join('') + (text.length > 30 ? '…' : '');
+    }
+    return `${item.dataset.id} 풀이`;
+  }
   function orderSolutions(order, numbers) {
     // 메모와 연결되지 않은 교사 쪽은 제자리에 두고, 연결된 풀이만 문항 순서에 맞춘다.
     const linked = section => order.has(section.dataset.solutionFor);
@@ -436,7 +454,7 @@
       if (!linked(section)) continue;
       const current = teacherItems[i] = solutions[index++];
       const id = current.dataset.solutionFor, label = current.querySelector('.ws-t-q');
-      if (label) label.textContent = numbers.has(id) ? `${numbers.get(id)}번` : `${id} 풀이`;
+      if (label) label.textContent = numbers.has(id) ? `${numbers.get(id)}번` : solutionLabel(studentItems[order.get(id)]);
     }
   }
   function prepareBoxes(items) {
@@ -740,6 +758,18 @@
     const write = v => v == null ? node.removeAttribute(attr) : node.setAttribute(attr, v);
     if (value !== old) change(() => write(value), () => write(old));
   }
+  function deleteItem(list, item, index) {
+    const linked = list === studentItems
+      ? teacherItems.map((section, i) => ({ section, i })).filter(({ section }) => section.dataset.solutionFor === item.dataset.id)
+      : [];
+    change(() => {
+      list.splice(index, 1); item.remove();
+      for (const { section, i } of [...linked].reverse()) { teacherItems.splice(i, 1); section.remove(); }
+    }, () => {
+      list.splice(index, 0, item);
+      for (const { section, i } of linked) teacherItems.splice(i, 0, section);
+    });
+  }
   function setEdit(on) {
     cancelDraft();
     edit = on;
@@ -778,7 +808,7 @@
             button('↓', 'down', () => focusTool('down', () => move(i + 1)), { title: '아래로 이동', disabled: linked || !canMove(i + 1) }),
             button(firstColumn ? '새 단에서' : '새 쪽에서', 'break', () => focusTool('break', () => changeAttribute(item, 'data-break', item.dataset.break === '1' ? null : '1')), { pressed: item.dataset.break === '1', disabled: span(item) }),
             button('복제', 'duplicate', () => focusTool('duplicate', () => duplicateItem(list, item, i)), { disabled: linked }),
-            button('삭제', 'delete', () => focusTool('delete', () => change(() => { list.splice(i, 1); item.remove(); }, () => list.splice(i, 0, item)))),
+            button('삭제', 'delete', () => focusTool('delete', () => deleteItem(list, item, i))),
           );
           if (list === studentItems && solve) {
             const tables = all(item, 'table.ws-data').filter(table => table.querySelector('th[data-src], td[data-src]') &&

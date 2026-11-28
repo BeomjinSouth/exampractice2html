@@ -289,7 +289,7 @@
   const records = new Map(), dash = new Set();
   let initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
-  let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton, saveStatus;
+  let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton, saveStatus, clearFailure = false;
   let oldStorageKeys = [];
   let lockedMedia = [];
   const store = (op, ...args) => {
@@ -299,7 +299,8 @@
     } catch { return undefined; }
   };
   function showSaveFailure(failed) {
-    const message = failed ? '이 기기에 저장되지 않았어요. ‘답을 넣어 저장’으로 파일에 저장하세요.' : '';
+    const message = [clearFailure ? '이 기기에 남은 답을 지우지 못했어요. 선생님께 알려 주세요.' : '',
+      failed ? '이 기기에 저장되지 않았어요. ‘답을 넣어 저장’으로 파일에 저장하세요.' : ''].filter(Boolean).join(' ');
     if (saveStatus && saveStatus.textContent !== message) saveStatus.textContent = message;
   }
   const usable = () => (!teacher || preview) && !pendingRestore;
@@ -480,7 +481,7 @@
     return applyValue(row, same(next, row.value) ? row.value : next, evaluate);
   }
   function applyValue(row, next, evaluate = false) {
-    if (next !== row.value) { row.value = next; row.result = null; saveValues(); }
+    if (next !== row.value) { row.value = next; row.result = null; row.confirmed = false; saveValues(); }
     if (evaluate) row.result = check(row);
     if (usable()) {
       row.control?.paint(row.value);
@@ -498,7 +499,7 @@
     const wasPending = !!pendingRestore;
     closeRestorePrompt();
     for (const row of records.values()) {
-      row.value = undefined; row.penValue = undefined; row.result = null;
+      row.value = undefined; row.penValue = undefined; row.result = null; row.confirmed = false;
       delete row.el.dataset.value; delete row.el.dataset.penValue;
       row.control?.reset?.();
       row.control?.paint(undefined); updateRow(row);
@@ -509,12 +510,14 @@
         Object.assign(panel, { attempted: false, emptyAttempt: false, answers: false, solution: false, comparing: false, hintCount: 0 });
         if (panel.solutionBox) { stopVideo(panel.solutionBox); panel.solutionBox.remove(); panel.solutionBox = undefined; }
         if (panel.compareBox) { panel.compareBox.remove(); panel.compareBox = undefined; }
+        panel.rubricList = undefined;
         updatePanel(item);
       }
     }
     if (storageKey) {
       const removed = ['', ':pen', ':saved-at'].map(suffix => store('removeItem', storageKey + suffix));
-      if (removed.every(Boolean)) showSaveFailure(false);
+      clearFailure = !removed.every(Boolean);
+      showSaveFailure(false);
     }
     if (wasPending) core.layout();
     updateScore();
@@ -978,7 +981,7 @@
     viewport.setAttribute('role', 'region');
     viewport.setAttribute('aria-label', '크게 보는 그림');
     const zoomButton = uiButton('크게', 'pen-zoom', () => {
-      if (mode !== 'solve' || !narrowScreen.matches) return;
+      if (mode !== 'solve') return;
       enlarged = !enlarged;
       zoomButton.setAttribute('aria-pressed', String(enlarged));
       paint(drawing());
@@ -1005,7 +1008,7 @@
       paintCanvas(drawing());
     }
     function syncView() {
-      const zoom = enlarged && mode === 'solve' && narrowScreen.matches && usable();
+      const zoom = enlarged && mode === 'solve' && usable();
       if (zoom === !!viewport.parentElement) return;
       stopTracking();
       panGesture = undefined;
@@ -1290,6 +1293,7 @@
       check.type = 'checkbox'; label.append(check, content); entry.append(label); list.append(entry);
     }
     box.append(list);
+    return list;
   }
   function bindVideo(box, data, title = '영상') {
     if (!/^[\w-]{11}$/.test(data?.yt ?? '')) return;
@@ -1337,7 +1341,8 @@
         if (panel.emptyAttempt) { updatePanel(item); return; }
         panel.attempted = true;
         for (const row of panel.rows) {
-          row.result = policy === '시도 후' && !hasResponse(row) ? null : check(row);
+          row.confirmed = hasResponse(row);
+          row.result = policy === '시도 후' && !row.confirmed ? null : check(row);
           updateRow(row);
         }
         updatePanel(item); updateScore();
@@ -1370,6 +1375,7 @@
     };
     const missing = panel.rows.find(r => multiple.has(r.kind) && !completeResponse(r));
     const answerRows = panel.rows.filter(r => r.kind !== 'open' && slotReveal.get(r.el)?.answer_html &&
+      (policy === '바로' || r.confirmed) &&
       (multiple.has(r.kind) ? completeResponse(r) : policy === '바로' || hasResponse(r)));
     const answerReady = unlocked && answerRows.length > 0;
     const solutionReady = unlocked && !missing && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
@@ -1385,14 +1391,13 @@
       ? compare : !!(answerReady && panel.answers && answerRows.includes(row)));
     if (compare && itemReveal.get(item)?.rubric?.length && !panel.compareBox) {
       panel.compareBox = solveOnly('div', 'ws-solution ws-compare');
-      appendRubric(panel.compareBox, itemReveal.get(item).rubric); item.append(panel.compareBox);
+      item.append(panel.compareBox);
     }
     if (panel.compareBox) panel.compareBox.hidden = !compare;
     const show = !!(solutionReady && panel.solutionButton && panel.solution);
     if (show && !panel.solutionBox) {
       const reveal = itemReveal.get(item), box = panel.solutionBox = solveOnly('div', 'ws-solution');
       if (reveal.solution_html) putHtml(box, reveal.solution_html);
-      appendRubric(box, reveal.rubric);
       if (reveal.video) {
         const frame = make('div', 'ws-video-frame'); bindVideo(frame, reveal.video, '풀이 영상'); box.append(frame);
       }
@@ -1401,6 +1406,13 @@
     if (panel.solutionBox) {
       if (!show && !panel.solutionBox.hidden) stopVideo(panel.solutionBox);
       panel.solutionBox.hidden = !show;
+    }
+    const rubricTarget = compare ? panel.compareBox : show ? panel.solutionBox : null;
+    if (rubricTarget && itemReveal.get(item)?.rubric?.length) {
+      if (!panel.rubricList) panel.rubricList = appendRubric(rubricTarget, itemReveal.get(item).rubric);
+      const video = rubricTarget.querySelector('.ws-video-frame');
+      if (panel.rubricList && (panel.rubricList.parentElement !== rubricTarget || (video && panel.rubricList.nextElementSibling !== video)))
+        rubricTarget.insertBefore(panel.rubricList, video);
     }
     panel.hints.forEach((hint, i) => attr(hint, 'hidden', active && i < panel.hintCount ? null : ''));
     if (panel.hintButton) {
@@ -1485,10 +1497,13 @@
     let fn;
     try { fn = parseExpression(block.dataset.fn || '', names); } catch { return; }
     const scope = Object.create(null), tool = solveOnly('div', 'ws-explore-ctrl');
+    const prompt = block.querySelector('.ws-explore-prompt');
+    const originalLabel = svg.getAttribute('aria-label');
     const pathD = path.getAttribute('d'), initial = cells.map(el => el.innerHTML);
     const restoredHtml = new Map(cells.map((el, i) => [el, initial[i]]));
     const reset = () => {
       if (pathD == null) path.removeAttribute('d'); else path.setAttribute('d', pathD);
+      attr(svg, 'aria-label', originalLabel);
       cells.forEach((cell, i) => { if (cell.innerHTML !== initial[i]) cell.innerHTML = initial[i]; });
     };
     function render() {
@@ -1508,6 +1523,12 @@
         last = finite ? [x,y] : undefined;
       }
       path.setAttribute('d', d.join(' '));
+      const title = prompt?.cloneNode(true);
+      if (title) for (const node of all(title, '.ws-key, .ws-teacher-only, [data-sheet-runtime]')) node.remove();
+      const expression = (block.dataset.fn || '').replace(/\*\*/g, '^').replace(/\*/g, '×').replace(/-/g, '−');
+      const values = params.map(p => `${p.name}=${nfmt(scope[p.name])}`).join(', ');
+      const label = [title?.textContent.replace(/\s+/g, ' ').trim(), `y=${expression} 그래프`, values].filter(Boolean).join(', ');
+      attr(svg, 'role', 'img'); attr(svg, 'aria-label', label);
       for (const cell of cells) {
         const value = compute(Number(cell.dataset.yFor));
         cell.textContent = Number.isFinite(value) ? nfmt(value) : '—';
@@ -1543,7 +1564,6 @@
       });
       label.append(name, input, out); tool.append(label);
     }
-    const prompt = block.querySelector('.ws-explore-prompt');
     if (prompt) prompt.after(tool); else block.prepend(tool);
     exploreOriginal.set(block, { render, path, pathD, restoredHtml });
   }

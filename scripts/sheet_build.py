@@ -37,6 +37,45 @@ def student_policy(interactive, reveal_policy):
             interactive and reveal_policy in ('시도 후', '바로'))
 
 
+def _visible_label(source):
+    """Use the rendered student text, without blank answers, for a solution title."""
+    class Text(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.parts = []
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    parser = Text()
+    parser.feed(render_markup(inspect_markup(source).public_source))
+    return ' '.join(''.join(parser.parts).split())
+
+
+def _solution_label(item):
+    def blocks_in_order(blocks):
+        for block in blocks:
+            if block.get('teacher_only'):
+                continue
+            yield block
+            if block['type'] == 'split':
+                yield from blocks_in_order(block['left'])
+                yield from blocks_in_order(block['right'])
+
+    blocks = list(blocks_in_order(item['blocks']))
+    for block in blocks:
+        if block['type'] == 'heading':
+            heading = ' · '.join(filter(None, (_visible_label(block.get('tag', '')), _visible_label(block.get('text', '')))))
+            if heading:
+                return heading
+    for block in blocks:
+        if block['type'] == 'question':
+            text = _visible_label(block['text'])
+            if text:
+                return text[:30] + ('…' if len(text) > 30 else '')
+    return item['id'] + ' 풀이'
+
+
 def _attrs_text(attrs):
     return ''.join(f' {key}="{escape(value)}"' if value is not None else f' {key}'
                    for key, value in attrs.items())
@@ -1013,6 +1052,11 @@ class Renderer:
         unit = block['unit_mm']
         live = caption is None
         figure = self.grid({'mode': 'coord', 'x': block['x'], 'y': block['y'], 'unit_mm': unit}, live_map=live, fit=fit)
+        expression = block['fn'].replace('**', '^').replace('*', '×').replace('-', '−')
+        title = _visible_label(block.get('prompt', ''))
+        values = ', '.join(f'{name}={mm(value).replace("-", "−")}' for name, value in params.items())
+        label = ', '.join(filter(None, (title, f'y={expression} 그래프', values)))
+        figure = figure.replace('aria-label="좌표평면"', f'aria-label="{escape(label)}"', 1)
         path = []
         active = False
         for i in range(241):
@@ -1292,6 +1336,7 @@ class Renderer:
         if memo:
             lines = ''.join(editable('li', p) for p in memo)
             items.append(section(private_id('t-memo'), f'<h2 class="ws-t-h">교사용 메모</h2><ul class="ws-t-list">{lines}</ul>'))
+        students = {item['id']: item for item in self.data['items']}
         for solution in teacher.get('solutions', []):
             item = solution['item']
             video = solution.get('video')
@@ -1299,8 +1344,8 @@ class Renderer:
             if self.published:
                 self.reveal_data['items'][item] = solution_public(
                     solution['answer'], solution.get('steps', []), solution.get('rubric', []), video)
-            label = str(self.first_number[item]) + '번' if item in self.first_number else item + ' 풀이'
-            parts = [f'<h3 class="ws-t-q">{label}</h3>',
+            label = str(self.first_number[item]) + '번' if item in self.first_number else _solution_label(students[item])
+            parts = [f'<h3 class="ws-t-q">{escape(label)}</h3>',
                      f'<p class="ws-t-ans"><b>예시 답안</b> {editable("span", solution["answer"])}</p>']
             if solution.get('steps'):
                 steps = ''.join(editable('li', step) for step in solution['steps'])

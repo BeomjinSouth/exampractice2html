@@ -524,26 +524,42 @@ def _pen_aspects(sizes):
     return {slot: size['width_px'] / size['height_px'] if size['height_px'] else 0 for slot, size in sizes.items()}
 
 
+_PEN_SLOTS_JS = """(() => [...document.querySelectorAll(
+  '#sheet-flow figure[data-pen="1"][data-slot], #sheet-flow .ws-ans[data-kind="draw"][data-slot]')]
+  .filter(el => el.getClientRects().length).map(el => el.dataset.slot))()"""
+
+
 _PEN_ZOOM_JS = """(async () => {
   const buttons = [...document.querySelectorAll('#sheet-flow [data-sheet-action="pen-zoom"]')]
-    .filter(button => button.getClientRects().length && button.getAttribute('aria-pressed') === 'false');
-  if (!buttons.length) return null;
+    .filter(button => (button.checkVisibility ? button.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})
+      : button.getClientRects().length && getComputedStyle(button).visibility === 'visible')
+      && button.getAttribute('aria-pressed') === 'false');
+  const zoomed_slots = buttons.map(button => button.closest('[data-slot]')?.dataset.slot).filter(Boolean);
   try {
     for (const button of buttons) button.click();
-    await new Promise(resolve => requestAnimationFrame(resolve));
-    return {pen_sizes: (%s), overflow_x: sheet.report().overflow_x};
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return {pen_sizes: (%s), zoomed_slots, overflow_x: sheet.report().overflow_x};
   } finally {
     for (const button of buttons) button.click();
   }
 })()"""
 
 
-def _audit_pen_zoom(normal, enlarged, problems):
-    for slot, before in normal.items():
-        after = enlarged.get(slot)
-        if after and before['width_px'] > 0 and after['width_px'] <= before['width_px'] * 1.3:
+def _valid_pen_size(size):
+    return (isinstance(size, dict) and all(type(size.get(k)) in (int, float) and math.isfinite(size[k])
+                                           and size[k] > 0 for k in ('width_px', 'height_px')))
+
+
+def _audit_pen_zoom(normal, enlarged, problems, name='', zoomed=None, expected=()):
+    for slot in sorted(normal.keys() | set(expected)):
+        before, after = normal.get(slot), enlarged.get(slot)
+        if not _valid_pen_size(before) or not _valid_pen_size(after) or (zoomed is not None and slot not in zoomed):
+            _problem(problems, 'warning', 'pen-zoom-missing', None, slot.rsplit('.', 1)[0],
+                     f'{name}: {slot} 펜 그림의 크게 단추 또는 확대 전후 크기를 확인하지 못했습니다.',
+                     '풀기 화면에서 크게 단추와 펜 그림의 측정값을 확인하세요.')
+        elif after['width_px'] <= before['width_px'] * 1.3:
             _problem(problems, 'warning', 'pen-zoom-ineffective', None, slot.rsplit('.', 1)[0],
-                     f"{slot}: 펜 그림이 보통 {before['width_px']:.2f}×{before['height_px']:.2f}px에서 "
+                     f"{name}: {slot}: 펜 그림이 보통 {before['width_px']:.2f}×{before['height_px']:.2f}px에서 "
                      f"크게 {after['width_px']:.2f}×{after['height_px']:.2f}px로 충분히 커지지 않습니다.",
                      '크게 보기에서 펜 그림의 너비와 스타일을 확인하세요.')
 
@@ -851,16 +867,23 @@ def _interactive_check(protocol, out, table, problems):
             files.append(path)
             screen_entry = {"file": str(path), "width": width, "height": height, "pen_sizes": pen_sizes,
                             "image_height": full_height, "view": report.get("view"), "overflow_x": overflow}
-            if width == 390 and pen_sizes:
+            pen_slots = protocol.evaluate(_PEN_SLOTS_JS)
+            expected = set(printed_aspects) | set(pen_slots if isinstance(pen_slots, list) else [])
+            if pen_sizes or expected:
                 zoom = protocol.evaluate(_PEN_ZOOM_JS % (_PEN_SIZES_JS % json.dumps('#sheet-flow canvas.ws-pen')), True)
-                if zoom is not None:
-                    screen_entry['pen_zoom'] = zoom
-                    _audit_pen_aspects(_pen_aspects(zoom['pen_sizes']), printed_aspects, '폰 화면 크게 보기', problems)
-                    _audit_pen_zoom(pen_sizes, zoom['pen_sizes'], problems)
-                    if zoom['overflow_x'] > 1:
-                        _problem(problems, 'error', 'screen-overflow', None, None,
-                                 f"폰 화면에서 펜 그림을 크게 펼치면 가로로 {zoom['overflow_x']}px 넘칩니다.",
-                                 '크게 펼친 그림은 그림 칸 안에서만 움직이게 하세요.')
+                zoom = zoom if isinstance(zoom, dict) else {}
+                enlarged = zoom.get('pen_sizes') if isinstance(zoom.get('pen_sizes'), dict) else {}
+                zoomed = zoom.get('zoomed_slots') if isinstance(zoom.get('zoomed_slots'), list) else []
+                screen_entry['pen_zoom'] = zoom
+                _audit_pen_zoom(pen_sizes, enlarged, problems, name, zoomed, expected)
+                measured = {slot: size for slot, size in enlarged.items() if slot in zoomed and _valid_pen_size(size)}
+                printed_measured = {slot: printed_aspects[slot] for slot in measured if slot in printed_aspects}
+                _audit_pen_aspects(_pen_aspects(measured), printed_measured, name + ' 크게 보기', problems)
+                zoom_overflow = zoom.get('overflow_x')
+                if type(zoom_overflow) in (int, float) and math.isfinite(zoom_overflow) and zoom_overflow > 1:
+                    _problem(problems, 'error', 'screen-overflow', None, None,
+                             f'{name}: 펜 그림을 크게 펼치면 가로로 {zoom_overflow}px 넘칩니다.',
+                             '크게 펼친 그림은 그림 칸 안에서만 움직이게 하세요.')
             info["screens"].append(screen_entry)
         if table is not None:
             rows = table["slots"]

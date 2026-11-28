@@ -23,8 +23,9 @@ from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_mark
 from sheet_plan import (SVG_URL, answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
-from sheet_answer import (canonical, check_hash, fraction_requirement, inferred_unit, input_mode, make_salt,
-                          normalized_unit, numeric_details, plain, radical_parts, reveal, text_candidates, writing_forms)
+from sheet_answer import (FRACTION_FORMS, RADICAL_FORMS, canonical, check_hash, fraction_requirement, inferred_unit,
+                          input_mode, make_salt, norm, normalized_unit, numeric_details, plain, qualified_number,
+                          radical_parts, radical_requirement, reveal, text_candidates, writing_forms)
 
 KEY_COLOR = '#c00000'  # --ws-key-color; data images cannot inherit the document's CSS.
 TEACHER_ONLY = 'ws-teacher-only'
@@ -81,35 +82,41 @@ def _attrs_text(attrs):
                    for key, value in attrs.items())
 
 
-def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), unit='', blank=False, rendered=None):
+def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), unit='', blank=False, rendered=None,
+                     assessment=False):
     # Rendering and grading use the same parser; fail closed if either path drifts.
     parsed = [inspect_markup(value, answer=True) for value in (source, *accept)]
     if rendered is not None and parsed[0].html != rendered:
         raise ValueError(f'{slot}: answer-render-mismatch: 화면 수식과 판별 자료가 맞지 않습니다.')
     answer, *alternatives = (value.plain.strip().replace('−', '-') for value in parsed)
     answers = [answer, *alternatives]
-    numeric = numeric_details(answer)
+    numeric = numeric_details(answer, authored=True)
     if mode == 'number' and numeric is None:
         raise ValueError(f'{slot}: 정답을 수로 읽을 수 없습니다.')
     kind = 'open'
     if answer and mode != 'off':
         if mode != 'text' and numeric is not None:
             kind = 'number'
-        elif mode == 'auto' and all(map(radical_parts, answers)):
+        elif mode == 'auto' and all(radical_parts(value, authored=True) for value in answers):
             kind = 'radical'
-        elif mode == 'text' or (len(answer) <= 12 if blank else accept):
+        elif mode == 'text' or qualified_number(answer) is not None or (len(answer) <= 12 if blank else accept):
             kind = 'text'
-    shape = [symbol for symbol in ('π', '√') if any(symbol in value for value in answers)]
-    if any((parts := numeric_details(value)) and parts[0].endswith('π') for value in answers) and 'π' not in shape:
-        shape.insert(0, 'π')
-    if (kind == 'number' and any((parts := numeric_details(value)) and parts[2] in ('reduced', 'unreduced')
-                                 for value in answers) or kind == 'radical' and any('/' in value for value in answers)):
-        shape.append('fraction')
+    shape = []
+    if kind != 'open' or not assessment:
+        normalized = list(map(norm, answers))
+        if any('π' in value or ((parts := numeric_details(value, authored=True)) and parts[0].endswith('π'))
+               for value in normalized):
+            shape.append('π')
+        if any('√' in value or re.search(r'루트(?=[0-9(])', value) for value in normalized):
+            shape.append('√')
+        if any('<mfrac' in part.html for part in parsed) or any(
+                re.search(r'[0-9a-zπ)]/[-+(0-9a-zπ√]|[0-9)]/루트[0-9(]', value) for value in normalized):
+            shape.append('fraction')
     # Set even the empty shape: deriving an edited sheet replaces old writing metadata.
     attrs = {'data-check-kind': kind, 'data-writing-shape': ' '.join(shape)}
     descriptor = {'mode': mode, 'accept': list(accept)}
     if kind != 'open':
-        forms = writing_forms(kind, answers, unit)
+        forms = writing_forms(kind, answers, unit, auto=mode == 'auto')
         if not forms:
             raise ValueError(f'{slot}: 허용 답을 정답과 같은 형식으로 읽을 수 없습니다.')
         if kind == 'number':
@@ -129,8 +136,10 @@ def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), uni
             while any(candidate in forms for candidate in text_candidates(wrong)):
                 wrong += '오답'
         if grading:
-            if kind in ('number', 'radical') and any('@' in form for form in forms):
+            units = dict.fromkeys(form.split('@', 1)[1] for form in forms if '@' in form) if kind in ('number', 'radical') else {}
+            if units:
                 attrs['data-check-unit'] = '1'
+                attrs['data-check-units'] = ' '.join(units)
             attrs['data-check-hash'] = ','.join(dict.fromkeys(check_hash(salt, kind, form) for form in forms))
         descriptor.update(right=answer, wrong=wrong)
     if kind != 'open' or mode != 'auto' or accept:
@@ -406,7 +415,7 @@ class Renderer:
             self.reveal_data['slots'][slot] = {'answer_html': answer_html}
         if kind == 'writing':
             attrs.update(_text_slot_attrs(slot, right, self.salt, self.grading, mode=mode, accept=accept,
-                                         unit=unit, blank=blank, rendered=answer_html))
+                                         unit=unit, blank=blank, rendered=answer_html, assessment=self.kind == '평가'))
             return _attrs_text(attrs)
         if kind in ('draw', 'self', 'name'):
             return _attrs_text(attrs)
@@ -1317,11 +1326,12 @@ class Renderer:
                 blank_hook.reset(token)
             attrs = ' data-break="1"' if item.get('break') else ''
             if self.interactive:
-                explicit = item.get('fraction_form')
-                form = explicit or fraction_requirement(_fraction_prompt_texts(item['blocks']))
-                attrs += _attrs_text({'data-fraction-form': form})
-                if explicit:
-                    attrs += ' data-fraction-form-explicit="1"'
+                texts = list(_fraction_prompt_texts(item['blocks']))
+                for prefix, requirement in (('fraction', fraction_requirement), ('radical', radical_requirement)):
+                    explicit = item.get(f'{prefix}_form')
+                    attrs += _attrs_text({f'data-{prefix}-form': explicit or requirement(texts)})
+                    if explicit:
+                        attrs += f' data-{prefix}-form-explicit="1"'
             items.append(section(id_, parts, attrs, screen_only=all(solve_only(b) for b in item['blocks'])))
         return '\n'.join(items)
 
@@ -1532,7 +1542,7 @@ class StudentFilter(HTMLParser):
             self.title_start = maybe_end
         forbidden = {'data-src', 'data-check'}
         if not self.grading:
-            forbidden |= {'data-check-hash', 'data-check-unit'}
+            forbidden |= {'data-check-hash', 'data-check-unit', 'data-check-units'}
         if tag == 'html':
             forbidden |= {'data-answers', 'data-sheet-edit', 'data-sheet-preparing'}
         if tag == 'html' or forbidden.intersection(values) or 'ws-key-choice' in classes:
@@ -1727,7 +1737,8 @@ def _table_unit(el, tail=''):
     return inferred_unit(tail, column, row_label, table.attrs.get('data-table-unit') if table.has('ws-data') else '')
 
 
-_TEXT_ATTRS = ('data-check-kind', 'data-check-hash', 'data-check-unit', 'data-check', 'data-input-mode', 'data-writing-shape')
+_TEXT_ATTRS = ('data-check-kind', 'data-check-hash', 'data-check-unit', 'data-check-units', 'data-check',
+               'data-input-mode', 'data-writing-shape')
 
 
 def _fraction_field(el):
@@ -1741,6 +1752,7 @@ def _refresh_grading(doc, salt, grading):
     """Read editable sources, keeping the DOM positions and their saved slot names."""
     public = doc.lookup('id', 'sheet-src')
     patches, displays, seen, paired = [], {}, set(), set()
+    assessment = doc.lookup('data-sheet', '1').attrs.get('data-kind') == '평가'
 
     def update(el, values, clear):
         attrs = {key: value for key, value in el.attrs.items() if key not in clear}
@@ -1754,16 +1766,21 @@ def _refresh_grading(doc, salt, grading):
         item = section.attrs.get('data-id') or '(이름 없는 문항)'
         elements = list(section.walk(public=True))
         if item != 'head':
-            form = section.attrs.get('data-fraction-form')
-            if section.attrs.get('data-fraction-form-explicit') == '1':
-                if form not in ('기약분수', '분수', '자유'):
-                    raise ValueError(f'{item}: fraction-form: 문항의 분수 요구 꼴이 올바르지 않습니다.')
-            else:
-                fields = [el for el in elements if _fraction_field(el)]
-                form = fraction_requirement(plain(inspect_markup(el.attrs['data-src']).public_source) for el in fields)
-                if not fields and section.attrs.get('data-reduced-fractions') == '1':
+            texts = [plain(inspect_markup(el.attrs['data-src']).public_source) for el in elements if _fraction_field(el)]
+            attrs = {}
+            for prefix, forms, requirement in (('fraction', FRACTION_FORMS, fraction_requirement),
+                                                ('radical', RADICAL_FORMS, radical_requirement)):
+                key = f'data-{prefix}-form'
+                if section.attrs.get(f'{key}-explicit') == '1':
+                    form = section.attrs.get(key)
+                    if form not in forms:
+                        raise ValueError(f'{item}: {prefix}-form: 문항의 답 요구 꼴이 올바르지 않습니다.')
+                elif prefix == 'fraction' and not texts and section.attrs.get('data-reduced-fractions') == '1':
                     form = '기약분수'
-            update(section, {'data-fraction-form': form}, ('data-reduced-fractions',))
+                else:
+                    form = requirement(texts)
+                attrs[key] = form
+            update(section, attrs, ('data-reduced-fractions',))
         index = 0
         for el in elements:
             if 'data-slot' not in el.attrs and not (el.has('ws-blank') or el.has('ws-ans')):
@@ -1804,7 +1821,8 @@ def _refresh_grading(doc, salt, grading):
                     name = node.attrs['data-slot']
                     paired.add(node.start)
                     update(node, _text_slot_attrs(name, answers[0], salt, grading, accept=answers[1:],
-                                                  unit=_table_unit(el, tail), blank=True, rendered=rendered), _TEXT_ATTRS)
+                                                  unit=_table_unit(el, tail), blank=True, rendered=rendered,
+                                                  assessment=assessment), _TEXT_ATTRS)
                     displays[name] = {'answer_html': rendered}
             if el.has('ws-blank'):
                 if el.start not in paired:
@@ -1827,7 +1845,7 @@ def _refresh_grading(doc, salt, grading):
                         raise ValueError('답 칸의 정답이 비어 있습니다.')
                     rendered = render_markup(source)
                     update(el, _text_slot_attrs(name, source, salt, grading, mode=mode, accept=accept,
-                                                unit=_table_unit(el), rendered=rendered), _TEXT_ATTRS)
+                                                unit=_table_unit(el), rendered=rendered, assessment=assessment), _TEXT_ATTRS)
                     displays[name] = {'answer_html': rendered}
                 elif kind not in _NON_GRADING:
                     saved = json.loads(el.attrs['data-check'])

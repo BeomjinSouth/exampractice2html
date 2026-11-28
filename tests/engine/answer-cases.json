@@ -49,7 +49,40 @@
   [["기약분수로 나타내지 않아도 되지만 분수로 쓰세요."], "분수"],
   [["삼각비를 기약분수로 구해 봅시다."], "기약분수"],
   [["각각 분수로 나타냅니다."], "분수"],
-  [["기약분수의 뜻을 생각하세요."], "자유"]
+  [["기약분수의 뜻을 생각하세요."], "자유"],
+  [["소수 또는 분수로 나타내시오."], "자유"],
+  [["분수로 쓰거나 소수로 쓰시오."], "자유"],
+  [["기약분수로 나타내고 그림은 그리지 않아도 된다."], "기약분수"],
+  [["기약분수가 되도록 나타내시오."], "기약분수"]
+ ],
+ "radical_requirement": [
+  [["분모를 유리화하여 나타내시오."], "유리화"],
+  [["분모의 유리화를 하시오."], "유리화"],
+  [["분모를 유리화해 쓰고 그림은 그리지 않아도 된다."], "유리화"],
+  [["분모를 유리화하지 않아도 됩니다."], "자유"],
+  [["분모를 유리화하거나 그대로 쓰시오."], "자유"],
+  [["그대로 또는 분모를 유리화하여 쓰시오."], "자유"],
+  [["분모의 유리화가 필요한 까닭을 설명하시오."], "자유"]
+ ],
+ "assembled_writing": [
+  {"id":"coefficient", "blank":"(1/2)√3", "kind":"radical", "cases":[["√3/2",[true,""]],["루트3/2",[true,""]],["(1/2)√3",[true,""]],["1/(2√3)",[false,""]]]},
+  {"id":"range", "blank":"3 이상", "kind":"text", "cases":[["3",[true,""]],["3 이상",[true,""]],["3 이하",[false,""]]]},
+  {"id":"ordinal", "blank":"5번째", "kind":"text", "cases":[["5",[true,""]],["5번째",[true,""]]]},
+  {"id":"approx", "blank":"2개쯤", "kind":"text", "cases":[["2",[true,""]],["2개쯤",[true,""]],["2개",[false,""]]]},
+  {"id":"unknown", "blank":"3사과", "kind":"text", "cases":[["3사과",[true,""]],["3",["review",""]]]},
+  {"id":"exponent", "blank":"23", "kind":"number", "cases":[["２３",[true,""]],["23",[true,""]],["2³",[false,""]],["x²",[false,""]],["23뭉탱이",["review","unit"]]]},
+  {"id":"choice", "prompt":"소수 또는 분수로 나타내시오.", "blank":"$\\frac{1}{2}$", "kind":"number", "cases":[["0.5",[true,""]],["2/4",[true,"reduce"]]]},
+  {"id":"negative", "prompt":"기약분수로 나타내고 그림은 그리지 않아도 된다.", "blank":"$\\frac{1}{2}$", "kind":"number", "cases":[["2/4",[false,"reduced"]]]},
+  {"id":"target", "prompt":"기약분수가 되도록 나타내시오.", "blank":"$\\frac{1}{2}$", "kind":"number", "cases":[["2/4",[false,"reduced"]]]},
+  {"id":"written", "prompt":"기약분수로 쓰시오.", "blank":"$\\frac{1}{6}$;;$\\frac{6}{36}$", "tail":" cm", "kind":"number", "cases":[["(6/36)",[true,""]],["6/36 cm",[true,""]],["(6/36)cm",[true,""]],["2/12 cm",[false,"reduced"]],["6/36 mm",[false,"wrong-unit"]]]},
+  {"id":"root-free", "blank":"$\\frac{\\sqrt{2}}{2}$", "kind":"radical", "cases":[["1/√2",[true,"rationalize-tip"]]]},
+  {"id":"root-required", "situation":"분모를 유리화하여 나타내시오.", "blank":"$\\frac{\\sqrt{2}}{2}$", "kind":"radical", "cases":[["1/√2",[false,"rationalize"]],["√8/4",["review","radical"]]]},
+  {"id":"root-override", "prompt":"분모를 유리화하여 나타내시오.", "radical_form":"자유", "blank":"$\\frac{\\sqrt{2}}{2}$", "kind":"radical", "cases":[["1/√2",[true,"rationalize-tip"]]]}
+ ],
+ "writing_shapes": [
+  ["루트3", "radical", "√", "√"],
+  ["풀이: $\\frac{\\pi}{2}$와 루트3", "open", "π √ fraction", ""],
+  ["계산: 1/√2", "open", "√ fraction", ""]
  ],
  "inferred_unit": [
   [["가지입니다.", "", ""], "가지"], [["켤레를", "", ""], "켤레"],
@@ -66,22 +99,24 @@
   [["분 동안", "", ""], "분"], [["점이다", "", ""], "점"]
  ],
  "writing_results": [
-  {"kind":"number", "answer":"$4\\pi$", "unit":"cm", "cases":[["4π",[true,""]],["4 π",[true,""]],["4pi",[true,""]],["4파이",[true,""]],["4π cm",[true,""]],["4πcm",[true,""]],["4×π",[true,""]],["4π mm",[false,""]],["4π kg",[false,""]],["4",[false,""]],["4π+0",[false,""]],["4π²",[false,""]],["",[null,""]]]},
+  {"kind":"number", "answer":"$4\\pi$", "unit":"cm", "cases":[["4π",[true,""]],["4 π",[true,""]],["4pi",[true,""]],["4파이",[true,""]],["4π cm",[true,""]],["4πcm",[true,""]],["4×π",[true,""]],["4π mm",[false,"wrong-unit"]],["4π kg",[false,"wrong-unit"]],["4",[false,""]],["4π+0",[false,""]],["4π²",[false,""]],["",[null,""]]]},
   {"kind":"number", "answer":"$\\pi$", "cases":[["pi",[true,""]],["+π",[true,""]],["1.0π",[true,""]],["-π",[false,""]],["×π",[false,""]],["π칸",["review","unit"]]]},
   {"kind":"number", "answer":"$\\frac{3}{2}\\pi$", "cases":[["3π/2",[true,""]],["6/4π",[true,"reduce"]],["6π/4",[true,"reduce"]],["1.50π",[true,""]],["3/0π",[false,""]],["3/2",[false,""]]]},
   {"kind":"number", "answer":"$\\dfrac{3\\pi}{2}$", "form":"기약분수", "cases":[["3/2 π",[true,""]],["6π/4",[false,"reduced"]],["1.5π",[false,"reduced"]]]},
-  {"kind":"number", "answer":"$\\frac{3} {5}$", "unit":"cm", "cases":[["6/10",[true,"reduce"]],["6/10cm",[true,"reduce"]],["6/10mm",[false,""]],["3/5",[true,""]],["0.6",[true,""]],["0.60",[true,""]],["35",[false,""]],["7/10",[false,""]]]},
+  {"kind":"number", "answer":"$\\frac{3} {5}$", "unit":"cm", "cases":[["6/10",[true,"reduce"]],["6/10cm",[true,"reduce"]],["6/10mm",[false,"wrong-unit"]],["3/5",[true,""]],["0.6",[true,""]],["0.60",[true,""]],["35",[false,""]],["7/10",[false,""]]]},
   {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"기약분수", "cases":[["6/10",[false,"reduced"]],["0.60",[false,"reduced"]],["3/5",[true,""]],["⅗",[true,""]],["7/10",[false,""]]]},
   {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"분수", "cases":[["6/10",[true,"reduce"]],["0.6",["review","fraction"]],["3/5",[true,""]],["0.7",[false,""]]]},
   {"kind":"number", "answer":"$0.6$", "cases":[["6/10",[true,"reduce"]]]},
   {"kind":"number", "answer":"$\\frac{1}{6}$", "accept":["$\\frac{6}{36}$"], "form":"기약분수", "cases":[[" 6 / 36 ",[true,""]],["2/12",[false,"reduced"]],["1/6cm",["review","unit"]]]},
-  {"kind":"number", "answer":"$36$", "unit":"가지", "cases":[["36가지",[true,""]],["36명",[false,""]],["36뭉탱이",[false,""]]]},
+  {"kind":"number", "answer":"$36$", "unit":"가지", "cases":[["36가지",[true,""]],["36명",[false,"wrong-unit"]],["36뭉탱이",[false,"wrong-unit"]]]},
   {"kind":"number", "answer":"$36$", "cases":[["36명",["review","unit"]],["36뭉탱이",["review","unit"]],["35명",[false,""]]]},
-  {"kind":"radical", "answer":"$2\\sqrt{3}$", "unit":"cm", "cases":[["2√3",[true,""]],["2√(3)",[true,""]],["2루트3",[true,""]],["2√3cm",[true,""]],["2√3 cm",[true,""]],["2√3 mm",[false,""]],["√12cm",["review","radical"]],["√12mm",[false,""]],["√(12)",["review","radical"]],["-√12",[false,""]],["√13",[false,""]],["2√3+0",[false,""]]]},
+  {"kind":"radical", "answer":"$2\\sqrt{3}$", "unit":"cm", "cases":[["2√3",[true,""]],["2√(3)",[true,""]],["2루트3",[true,""]],["2√3cm",[true,""]],["2√3 cm",[true,""]],["2√3 mm",[false,"wrong-unit"]],["√12cm",["review","radical"]],["√12mm",[false,"wrong-unit"]],["√(12)",["review","radical"]],["-√12",[false,""]],["√13",[false,""]],["2√3+0",[false,""]]]},
   {"kind":"radical", "answer":"$-\\sqrt{12}$", "cases":[["-√12",[true,""]],["-2√3",["review","radical"]],["2√3",[false,""]]]},
   {"kind":"radical", "answer":"$\\frac{\\sqrt{3}}{2}$", "cases":[["√3/2",[true,""]],["√32",[false,""]],["루트3/2",[true,""]],["√12/4",["review","radical"]],["√3/2mL",["review","unit"]],["-√3/2",[false,""]],["√3/0",[false,""]]]},
-  {"kind":"radical", "answer":"$\\frac{2\\sqrt{3}}{3}$", "cases":[["2√3/3",[true,""]],["√12/3",["review","radical"]],["2/√3",["review","radical"]],["1/√3",[false,""]]]},
-  {"kind":"radical", "answer":"$\\frac{\\sqrt{3}}{3}$", "cases":[["1/√3",["review","radical"]],["2/(2√3)",["review","radical"]]]}
+  {"kind":"radical", "answer":"$\\frac{2\\sqrt{3}}{3}$", "cases":[["2√3/3",[true,""]],["(2/3)√3",[true,""]],["√12/3",["review","radical"]],["2/√3",[true,"rationalize-tip"]],["1/√3",[false,""]]]},
+  {"kind":"radical", "answer":"$\\frac{\\sqrt{3}}{3}$", "cases":[["1/√3",[true,"rationalize-tip"]],["2/(2√3)",[true,"rationalize-tip"]]]},
+  {"kind":"radical", "answer":"$\\frac{2\\sqrt{5}}{15}$", "form":"유리화", "cases":[["2/(3√5)",[false,"rationalize"]],["(2/15)루트5",[true,""]],["2/(3√6)",[false,""]]]},
+  {"kind":"text", "answer":"$x^2$", "cases":[["x²",[true,""]],["x2",["review",""]]]}
  ],
  "number_forms": [
   [[["11"], "일"], ["11", "11@일"]], [[["11권"], "일"], ["11", "11@권"]],

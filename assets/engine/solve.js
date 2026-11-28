@@ -422,6 +422,11 @@
       (multiline ? '답 쓰기' : `빈칸 ${el.querySelector('.ws-blank-mark')?.textContent || row.slot}`));
     input.autocomplete = 'off';
     if (kind === 'number') input.spellcheck = false;
+    if (el.matches('.ws-name-slot') && !el.querySelector(':scope > .ws-name-space')) {
+      const placeholder = make('span', 'ws-name-space');
+      placeholder.append(...el.childNodes);
+      el.append(placeholder);
+    }
     if (el.matches('.ws-blank') && el.style.minWidth) {
       const style = make('span');
       style.setAttribute('style', el.getAttribute('style'));
@@ -725,7 +730,15 @@
       const p = point(event), erasing = selected === 'erase';
       let strokes = clone(drawing()?.strokes ?? []);
       if (erasing) strokes = eraseAt(strokes,[p,p]); else strokes.push([p]);
-      gesture = { id:event.pointerId, strokes, erasing, last:p };
+      const listeners = new AbortController();
+      gesture = { id:event.pointerId, strokes, erasing, last:p, listeners };
+      // Chrome can lose capture while the pointer is still down. Keep tracking this
+      // pointer through release, even if the next event targets another element.
+      const options = { capture: true, signal: listeners.signal };
+      window.addEventListener('pointermove', move, options);
+      window.addEventListener('pointerup', finish, options);
+      window.addEventListener('pointercancel', finish, options);
+      window.addEventListener('blur', finish, { signal: listeners.signal });
       if (event.isTrusted) canvas.setPointerCapture(event.pointerId);
       paint(gesture);
     });
@@ -741,14 +754,19 @@
       }
       paint(gesture);
     }
-    canvas.addEventListener('pointermove', move);
-    for (const type of ['pointerup','pointercancel','lostpointercapture']) canvas.addEventListener(type, event => {
-      if (gesture?.id !== event.pointerId) return;
-      if (type === 'pointerup') move(event);
-      const { strokes } = gesture; gesture = undefined; setDrawing(strokes);
-    });
+    function stopTracking() {
+      gesture?.listeners.abort();
+      gesture = undefined;
+    }
+    function finish(event) {
+      if (!gesture || (event.type !== 'blur' && gesture.id !== event.pointerId)) return;
+      if (event.type === 'pointerup') move(event);
+      const { strokes } = gesture;
+      stopTracking();
+      setDrawing(strokes);
+    }
     return { paint: value => paint(alongsidePlot && usable() ? row.penValue : value), resize: true,
-      reset() { gesture = undefined; tool(alongsidePlot ? 'plot' : 'ink'); } };
+      reset() { stopTracking(); tool(alongsidePlot ? 'plot' : 'ink'); } };
   }
   function installControl(row) {
     if (row.control) return;
@@ -1045,8 +1063,10 @@
         if (!seek(-1)) input.disabled = true;
       }
       scope[p.name] = input.disabled ? p.value : input.valueAsNumber;
-      const name = p.label || p.name;
-      input.setAttribute('aria-label', name);
+      const name = make('span');
+      try { name.innerHTML = core.renderMarkup(p.label || `$${p.name}$의 값`); }
+      catch { name.textContent = p.label || p.name; }
+      input.setAttribute('aria-label', name.textContent);
       out.value = nfmt(scope[p.name]);
       input.addEventListener('input', () => {
         if (input.disabled) return;
@@ -1054,7 +1074,7 @@
         if (!seek(input.valueAsNumber >= previous ? 1 : -1)) input.value = previous;
         scope[p.name] = input.valueAsNumber; out.value = nfmt(scope[p.name]); render();
       });
-      label.append(make('span', '', name), input, out); tool.append(label);
+      label.append(name, input, out); tool.append(label);
     }
     const prompt = block.querySelector('.ws-explore-prompt');
     if (prompt) prompt.after(tool); else block.prepend(tool);
@@ -1236,7 +1256,12 @@
       }));
     }
     core.addToolbar(scoreLabel);
-    window.addEventListener('beforeprint', () => { printing ??= mode; changeView('a4'); });
+    window.addEventListener('beforeprint', () => {
+      printing ??= mode;
+      // An inline answer entered in A4 view may have wrapped since its last layout.
+      if (mode === 'a4') core.layout();
+      else changeView('a4');
+    });
     window.addEventListener('afterprint', restorePrint);
     const initial = !teacher && !(wideScreen() && store('getItem', `${storageKey}:view`) === 'a4') ? 'solve' : 'a4';
     syncToolbar();

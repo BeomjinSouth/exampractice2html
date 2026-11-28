@@ -165,18 +165,43 @@
     }
   }
 
+  function joinInlineParts(parts) {
+    const rendered = [], word = [];
+    let bold = false;
+    function setBold(active) {
+      if (active === bold) return;
+      rendered.push(active ? '<strong>' : '</strong>');
+      bold = active;
+    }
+    function emit([markup, , , strong]) { setBold(strong); rendered.push(markup); }
+    function flush() {
+      const grouped = word.length > 1 && word.some(part => part[2] === 'math');
+      if (grouped) { setBold(false); rendered.push('<span class="ws-math-word"><span>'); }
+      for (const part of word) emit(part);
+      if (grouped) { setBold(false); rendered.push('</span></span>'); }
+      word.length = 0;
+    }
+    for (const part of parts) {
+      if (part[2] === 'boundary') { flush(); emit(part); }
+      else word.push(part);
+    }
+    flush();
+    setBold(false);
+    return [rendered.join(''), parts.map(part => part[1]).join('')];
+  }
+
   function renderMarkup(source, onBlank) {
     if (/[\r\n\p{Zl}\p{Zp}]/u.test(source)) throw new Error('한 필드에는 줄을 바꾸지 마세요.');
     let pos = 0;
     const at = token => source.startsWith(token, pos);
     const fail = (token, start) => { throw new Error(`${start + 1}번째 글자: 닫는 ${token}가 없습니다.`); };
-    function sequence(stops = [], inBlank = false) {
+    function sequence(stops = [], inBlank = false, bold = false) {
       const parts = [];
       while (pos < source.length && !stops.some(at)) {
         const start = pos, c = source[pos++];
         const next = source[pos];
         if (c === '\\' && next && '$\\{'.includes(next)) {
-          pos++; parts.push([escapeHTML(next), next]);
+          pos++; parts.push([escapeHTML(next), next, 'text', bold]);
         } else if (c === '$') {
           const begin = pos;
           while (pos < source.length && !at('$')) {
@@ -184,28 +209,31 @@
             pos++;
           }
           if (!at('$')) fail('$', start);
-          parts.push(new MathParser(source.slice(begin, pos++)).parse());
+          parts.push([...new MathParser(source.slice(begin, pos++)).parse(), 'math', bold]);
         } else if (c === '*' && at('*')) {
           pos++;
-          const [html, text] = sequence(['**', ...stops], inBlank);
+          for (const part of sequence(['**', ...stops], inBlank, true)) parts.push(part);
           if (!at('**')) fail('**', start);
           pos += 2;
-          parts.push([`<strong>${html}</strong>`, text]);
         } else if (c === '{' && at('{') && !inBlank) {
           pos++;
           const begin = pos;
           while (pos < source.length && !at('|') && !at('}}')) pos++;
           const mark = source.slice(begin, pos).trim();
-          let html = '', text = '', width, answer = '', accept = [];
+          let html = '', text = '', width, answer = '';
+          const accept = [], lengths = [];
           if (at('|')) {
             const answerStart = ++pos;
-            [html, text] = sequence(['|', '}}', ';;'], true);
+            [html, text] = joinInlineParts(sequence(['|', '}}', ';;'], true));
             answer = source.slice(answerStart, pos);
+            lengths.push(Array.from(text.trim()).length);
             while (at(';;')) {
               const begin = pos += 2;
-              sequence(['|', '}}', ';;'], true);
+              const [, alternative] = joinInlineParts(sequence(['|', '}}', ';;'], true));
+              lengths.push(Array.from(alternative.trim()).length);
               accept.push(source.slice(begin, pos));
             }
+            if ([answer, ...accept].some(v => !v.trim())) throw new Error('빈칸의 대안 정답을 비워 둘 수 없습니다.');
             if (at('|')) {
               const end = source.indexOf('}}', ++pos);
               if (end < 0) fail('}}', start);
@@ -220,20 +248,20 @@
           if (!at('}}')) fail('}}', start);
           if (!mark && !text.trim()) throw new Error('빈칸에 기호나 정답을 쓰세요.');
           pos += 2;
-          if (width == null && !mark) width = Math.max(18, Array.from(text.trim()).length * 4.5);
+          if (width == null && lengths.length) width = Math.max(mark ? 9 : 18, Math.max(...lengths) * 4.5);
           const markAttr = mark ? ` data-mark="${escapeHTML(mark)}"` : '';
-          const widthAttr = width == null ? '' : ` style="min-width:${width}mm"`;
+          const widthAttr = width == null ? '' : ` style="--ws-blank-min:${width}mm"`;
           const markNode = mark ? `<span class="ws-blank-mark">${escapeHTML(mark)}</span>` : '';
           const key = text.trim() ? `<span class="ws-key">${html}</span>` : '';
           onBlank?.({ answer, accept, html });
-          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, text || mark]);
+          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, text || mark, 'boundary', bold]);
         } else {
-          parts.push([escapeHTML(c), c]);
+          parts.push([escapeHTML(c), c, /[\p{White_Space}\x1c-\x1f]/u.test(c) ? 'boundary' : 'text', bold]);
         }
       }
-      return joinParts(parts);
+      return parts;
     }
-    return sequence()[0];
+    return joinInlineParts(sequence())[0];
   }
 
   const root = document.documentElement;

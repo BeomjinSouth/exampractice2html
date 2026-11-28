@@ -106,7 +106,9 @@ html:not([data-answers="on"]) :is(.ws-key, .ws-teacher-only, .ws-paper:has(> .ws
 .ws-sit-title { font-weight: 700; }
 .ws-sit-note { text-align: right; }
 .ws-q { color: #202020; font: calc(9.5pt * var(--sheet-question-scale))/1.14 var(--sheet-question-font); }
-.ws-qn { white-space: nowrap; }
+.ws-q:has(> .ws-qn) { display: flex; align-items: baseline; column-gap: .27em; }
+.ws-qn { flex: none; white-space: nowrap; }
+.ws-q-text { min-width: 0; }
 .ws-lab, .ws-step-n, :is(.ws-data, .ws-steps) thead th {
   font-size: calc(9.5pt * var(--sheet-body-scale));
   color: var(--ws-label);
@@ -128,14 +130,15 @@ svg .ws-key { stroke: var(--ws-key-color); }
   display: inline-block;
   box-sizing: border-box;
   max-width: 100%;
-  min-width: 2.4em;
+  min-width: min(100%, var(--ws-blank-min, 2.4em));
   padding-inline: 0.35em;
   border-bottom: var(--ws-rule);
   text-align: center;
   white-space: nowrap;
 }
 :root[data-answers="on"] .ws-blank:has(> .ws-key) > .ws-blank-mark { display: none; }
-.ws-fill > .ws-blank { border-bottom: 0; min-width: 0; }
+.ws-fill > .ws-blank { border-bottom: 0; min-width: min(100%, var(--ws-blank-min, 0px)); }
+.ws-data .ws-blank > .ws-key { white-space: normal; overflow-wrap: anywhere; }
 .ws-choices {
   display: grid;
   grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
@@ -166,6 +169,9 @@ svg .ws-key { stroke: var(--ws-key-color); }
 .ws-fig > :is(img, svg) { display: block; margin-inline: auto; }
 .ws-item math { margin-inline: 0.2mm; }
 .ws-item math .seg { text-decoration: overline; }
+/* Move the whole word to the next line; only words wider than their container can wrap inside. */
+.ws-math-word { display: inline-block; max-width: 100%; white-space: nowrap; }
+.ws-math-word > span { white-space: normal; word-break: keep-all; overflow-wrap: anywhere; }
 .ws-t-h, .ws-t-q { font: 700 12pt/1.2 var(--sheet-head-font); }
 .ws-t-list, .ws-t-steps { padding-inline-start: 6mm; }
 .ws-t-ans > b, .ws-t-rubric > b, .ws-t-alt > b, .ws-t-mis > b { color: var(--ws-label); }
@@ -307,8 +313,8 @@ svg .ws-key { stroke: var(--ws-key-color); }
   outline: .3mm solid #161616; outline-offset: .2mm; border-radius: 50%;
 }
 .ws-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 1.5mm; }
-.ws-flow-node { padding: 1mm 2mm; border: var(--ws-rule); }
-.ws-flow-arrow { flex: none; display: grid; min-width: 7mm; text-align: center; font-size: 8pt; line-height: 1.1; }
+.ws-flow-node { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 1mm 2mm; border: var(--ws-rule); }
+.ws-flow-arrow { flex: none; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 7mm; max-width: 100%; text-align: center; font-size: 8pt; line-height: 1.1; }
 .ws-flow-arrow::after { content: '⟶'; font-size: 13pt; }
 .ws-explore figure, .ws-explore .ws-data { margin-block: 0 1.5mm; }
 .ws-explore-note { font-size: 9pt; }
@@ -322,14 +328,14 @@ svg .ws-key { stroke: var(--ws-key-color); }
 .ws-video-qr { margin-block-start: 2mm; }
 .ws-video :is(iframe, video) { width: 100%; max-width: 100%; aspect-ratio: 16/9; border: 0; }
 
-/* The A4 overlay does not add a single line to the sheet's layout. */
+/* Only filled inline fields reserve new space on the A4 page. */
 :root:not([data-view="solve"]) .ws-solve-only,
 :root[data-view="solve"] .ws-print-only,
 :root[data-role="teacher"]:not([data-sheet-preview]) :is(.ws-in, .ws-pen, .ws-check-bar, .ws-solution, .ws-reveal, .ws-verdict) { display: none !important; }
 [data-sheet-runtime][hidden], .ws-hint[hidden], #sheet-toolbar [hidden] { display: none !important; }
 :root[data-sheet-preview] #sheet-toolbar > :not(.ws-score, [data-sheet-action="print"], [data-sheet-action="return-teacher"]) { display: none; }
 .ws-name-slot, .ws-answer-live:is(.ws-blank, .ws-ans, figure) { position: relative; }
-.ws-name-slot { display: inline-block; min-width: 2em; }
+.ws-name-slot { display: inline-block; min-width: 2em; max-width: 100%; }
 .ws-name-slot[data-slot$="이름"] { min-width: 5em; }
 .ws-in, .ws-ink {
   box-sizing: border-box; position: absolute; inset: 0; width: 100%; height: 100%;
@@ -339,9 +345,21 @@ svg .ws-key { stroke: var(--ws-key-color); }
 .ws-in:focus-visible, .ws-answer-live [tabindex]:focus-visible { outline: 2px solid #555; outline-offset: 1px; }
 .ws-in:focus { overflow: auto; }
 .ws-ans > :is(.ws-in,.ws-ink) { padding: 0.5mm 1.8mm; resize: none; text-align: start; line-height: 5.64mm; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The shortest writing box is 10.18 mm; two printed lines and padding must fit. */
+.ws-ans[data-lines="2"] > .ws-ink { line-height: min(5.64mm, 1.25em); }
 .ws-in:not(:focus) { text-overflow: ellipsis; }
 .ws-ink { display: none; pointer-events: none; white-space: nowrap; }
 .ws-blank.ws-filled > .ws-blank-mark { visibility: hidden; }
+#sheet-pages .ws-filled > :is(.ws-blank-mark, .ws-name-space) { display: none; }
+#sheet-pages .ws-filled > .ws-ink { display: block; }
+#sheet-pages :is(.ws-blank, .ws-name-slot) > .ws-ink {
+  position: static; width: auto; height: auto; overflow: visible;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: keep-all;
+}
+@media screen {
+  #sheet-pages .ws-in:not(:focus) { color: transparent; }
+  #sheet-pages .ws-in:focus + .ws-ink { visibility: hidden; }
+}
 .ws-pen { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
 .ws-pen-pass-through { pointer-events: none; }
 .ws-pen-tools { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-block-start: 4px; }
@@ -353,8 +371,10 @@ svg .ws-key { stroke: var(--ws-key-color); }
 /* The screen view uses the same content, with no paper breaks and no print-only notes. */
 #sheet-flow {
   box-sizing: border-box; max-width: 852px; margin: 0 auto; padding: 18px 16px 32px;
-  font: calc(10pt * var(--sheet-body-scale))/1.6 var(--sheet-body-font); overflow-wrap: anywhere;
+  font: calc(10pt * var(--sheet-body-scale))/1.6 var(--sheet-body-font);
+  word-break: keep-all; overflow-wrap: anywhere;
 }
+#sheet-flow :is(.ws-head, .ws-band, .ws-lab, .ws-step-n, .ws-data thead th, .ws-steps thead th) { word-break: inherit; }
 :root[data-view="solve"] body { background: #f4f4f4; }
 #sheet-flow .ws-item {
   min-width: 0; margin: 0; padding: 16px; box-sizing: border-box;
@@ -366,7 +386,6 @@ svg .ws-key { stroke: var(--ws-key-color); }
 #sheet-flow :is(svg, img, video, iframe, canvas) { max-width: 100%; }
 #sheet-flow :is(.ws-fig, .ws-figs, .ws-sit-fig) svg { height: auto; }
 #sheet-flow .ws-blank { min-width: min(100%, var(--ws-blank-min, 2.6em)) !important; }
-#sheet-flow .ws-name-slot { max-width: 100%; }
 #sheet-flow .ws-name-slot[data-slot$="이름"] { min-width: min(100%, 6em); }
 #sheet-flow .ws-fill > .ws-blank { width: 100%; }
 #sheet-flow .ws-fill > :is(.ws-verdict, .ws-reveal) { display: block; margin-inline: 0; }
@@ -420,8 +439,6 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 }
 @media print {
   .ws-solve-only, .ws-in, .ws-verdict, .ws-check-bar, .ws-reveal, .ws-solution { display: none !important; }
-  :root:not([data-view="solve"]) .ws-ink { display: block; }
-  :root[data-role="teacher"]:not([data-sheet-preview]) .ws-ink { display: none; }
   .ws-pen, .ws-match-lines { print-color-adjust: exact; }
 }
 

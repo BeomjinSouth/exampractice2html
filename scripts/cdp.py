@@ -10,6 +10,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -244,4 +245,13 @@ class Browser:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     self.process.wait(timeout=5)
         if self.temp:
-            self.temp.cleanup()
+            # Chrome 자식 프로세스가 브라우저 본체보다 늦게 프로필 잠금을 풀 수 있다.
+            for attempt in range(5):
+                try:
+                    self.temp.cleanup()
+                    break
+                except OSError as error:
+                    if attempt == 4:
+                        print(f"경고: Chrome 임시 프로필을 정리하지 못했습니다: {self.temp.name} · {error}", file=sys.stderr)
+                    else:
+                        time.sleep(0.1 * (attempt + 1))

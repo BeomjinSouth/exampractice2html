@@ -16,12 +16,13 @@ TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT / 'tests' / '_out' / '검
 sys.path.insert(0, str(ROOT / 'scripts'))
 import sheet_build
 import sheet_check
+from sheet_common import engine_script
 
 
 def fixture_html():
     source = (ROOT / 'tests/engine/fixture-assessment.html').read_text(encoding='utf-8')
     css = (ROOT / 'assets/engine/sheet.css').read_text(encoding='utf-8')
-    script = (ROOT / 'assets/engine/sheet.js').read_text(encoding='utf-8')
+    script = engine_script()
     if re.search(r'</script', script, re.I):
         raise AssertionError('엔진을 script 요소에 그대로 내장할 수 없습니다.')
     source, css_count = re.subn(r'<link id="sheet-css"[^>]*>', lambda _: '<style id="sheet-css">' + css + '</style>', source)
@@ -99,6 +100,34 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertTrue((folder / '검사/모아보기-흑백.png').is_file())
         self.assertEqual((folder / '검사/_이전/교사-99.png').read_bytes(), b'old page kept')
         self.assertFalse(old.exists())
+
+    def test_foreign_code_is_reported_in_both_files_without_opening_browser(self):
+        teacher = self.teacher_text.replace('</body>', '<script id="extra">/* 수업용 표시 */</script></body>')
+        student = self.student_text.replace('</body>', '<button onclick="">보기</button></body>')
+        folder = self.make_case('스킬 밖 코드', teacher=teacher, student=student)
+        with patch.object(sheet_check, 'sheet_browser', side_effect=AssertionError('브라우저를 열지 않아야 합니다.')):
+            self.assertIn('foreign-code', self.inspect(folder, 1))
+        report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+        messages = [issue['msg'] for issue in report['problems'] if issue['code'] == 'foreign-code']
+        self.assertTrue(any('교사용' in msg and '스크립트' in msg for msg in messages), messages)
+        self.assertTrue(any('학생용' in msg and 'onclick' in msg for msg in messages), messages)
+
+    def test_foreign_code_rejects_active_tags_and_mislabelled_scripts(self):
+        for fragment, marker in (
+                ('<iframe></iframe>', '<iframe>'),
+                ('<object></object>', '<object>'),
+                ('<embed>', '<embed>'),
+                ('<link rel="stylesheet" href="style.css">', '<link>'),
+                ('<a href=" Javascript:void(0)">보기</a>', 'javascript:'),
+                ('<script id="sheet-reveal">/* 자료 아님 */</script>', 'sheet-reveal'),
+                ('<script id="sheet-js" src="extra.js"></script>', 'sheet-js')):
+            with self.subTest(marker=marker):
+                student = self.student_text.replace('</body>', fragment + '</body>')
+                folder = self.make_case('스킬 밖 요소', student=student)
+                self.assertIn('foreign-code', self.inspect(folder, 1))
+                report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+                self.assertTrue(any(marker in issue['msg'] for issue in report['problems']
+                                    if issue['code'] == 'foreign-code'), report['problems'])
 
     def test_check_uses_new_quartile_after_derive(self):
         folder = self.run_root / '사분위수-편집'
@@ -179,7 +208,9 @@ class CheckIntegrationTest(unittest.TestCase):
                 ]}]}
         # Known transparent print layer: the detector must work without relying on engine CSS.
         # Simulate the same test stroke as SVG on print, leaving the actual canvas for screen input.
-        fixture = '''<script>sheet.ready.then(() => {
+        fixture = '''document.addEventListener('DOMContentLoaded', async () => {
+          if (document.documentElement.dataset.role !== 'student') return;
+          await sheet.ready;
           for (const el of document.querySelectorAll('figure[data-pen], .ws-ans[data-kind="draw"]')) {
             el.insertAdjacentHTML('beforeend', '<svg class="test-ink ws-pen-ink" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M15 25L50 75L85 35" fill="none" stroke="black" stroke-width="2"/></svg>');
           }
@@ -189,7 +220,15 @@ class CheckIntegrationTest(unittest.TestCase):
               ink.classList.toggle('test-stroked', !!values[ink.parentElement.dataset.slot]?.strokes?.length);
             }
           });
-        });</script>'''
+        });'''
+        regular_browser = sheet_check.sheet_browser
+
+        @contextlib.contextmanager
+        def browser_with_pen_fixture():
+            # The instrumentation belongs to the test browser, not the distributed HTML.
+            with regular_browser() as browser:
+                browser.cdp.call('Page.addScriptToEvaluateOnNewDocument', {'source': fixture})
+                yield browser
         css = '''.test-ink {display:none!important}
         @media print {
           #sheet-pages canvas.ws-pen {display:none!important}
@@ -207,10 +246,10 @@ class CheckIntegrationTest(unittest.TestCase):
                 folder.mkdir()
                 teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
                 student = sheet_build.strip_teacher(teacher).replace('</head>', f'<style>{css}{injected}</style></head>')
-                student = student.replace('</body>', fixture + '</body>')
                 self.make_case(name, teacher, student)
                 sheet_build.update_answer_table(folder, sheet_build.answer_table_from_html(teacher))
-                codes = self.inspect(folder, expected)
+                with patch.object(sheet_check, 'sheet_browser', browser_with_pen_fixture):
+                    codes = self.inspect(folder, expected)
                 self.assertEqual('pen-covers-content' in codes, name == '흰색')
                 self.assertEqual('pen-print-missing' in codes, name == '획누락')
                 report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
@@ -686,7 +725,8 @@ class DeliveryGateTest(unittest.TestCase):
         meta = html.escape(json.dumps({'engine_sha256': digest or self.digest}), quote=True)
         root = ' data-interactive="1"' if interactive else ''
         sync_meta = '<meta name="sheet-sync" content="PRIVATE-CONFIG">' if sync else ''
-        answer = '<span data-check-hash="abc"></span><script id="sheet-reveal">encoded</script>' if interactive else ''
+        answer = ('<span data-check-hash="abc"></span>'
+                  '<script id="sheet-reveal" type="application/octet-stream">e30=</script>') if interactive else ''
         path.write_text(f'<html{root}><head><meta name="sheet-build" content="{meta}">{sync_meta}</head><body>{answer}</body></html>', encoding='utf-8')
 
     def write_build(self):

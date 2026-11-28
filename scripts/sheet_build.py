@@ -17,7 +17,8 @@ from xml.etree import ElementTree as ET
 
 from sheet_common import (BUILD_FILE, CHECK_DIR, LABEL_MM, PICTURE_CELL_PADDING_MM, RASTER_MIMES, ROOT,
                           TEACHER_SUFFIX, TOOL, VERSION, atomic_write, box_five, box_tick_values, content_width_mm,
-                          figure_width_mm, html_paths, image_path, json_bytes, sha256, situation_cell_mm, split_widths_mm)
+                          figure_width_mm, html_paths, image_path, json_bytes, sha256, situation_cell_mm, split_widths_mm,
+                          FOREIGN_CODE_FIX, engine_script, find_usable_python, foreign_code_issues, python_sheet_command)
 from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
 from sheet_plan import (SVG_URL, answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
@@ -1337,7 +1338,14 @@ def font_styles(data, warnings):
         from fontTools.ttLib import TTFont
         from fontTools.varLib.instancer import instantiateVariableFont
     except ImportError:
-        warnings.append('fontTools가 없어 글꼴을 내장하지 않았습니다. 대체 글꼴을 사용합니다.')
+        doctor = python_sheet_command('python', 'doctor')
+        message = ('fontTools를 불러올 수 없어 글꼴을 내장하지 않았습니다. 대체 글꼴을 사용합니다. '
+                   f'파이썬 환경을 확인하려면 {doctor}를 실행하세요.')
+        alternate = find_usable_python()
+        if alternate:
+            command = python_sheet_command(alternate, 'build "<활동지 폴더>"')
+            message += f' 필요한 모듈을 갖춘 다른 파이썬으로 다시 조립할 수 있습니다: {command}'
+        warnings.append(message)
         return '', 0
     base = os.environ.get('LOCALAPPDATA') or (Path.home() / '.cache')
     cache = Path(base) / TOOL / 'fonts'
@@ -1837,13 +1845,8 @@ def plan_warning_counts(issues):
 
 def document_html(renderer, build_meta, fonts):
     css = (ROOT / 'assets/engine/sheet.css').read_text(encoding='utf-8')
-    js = (ROOT / 'assets/engine/sheet.js').read_text(encoding='utf-8')
-    solve = ROOT / 'assets/engine/solve.js'
-    if solve.is_file():
-        js += '\n' + solve.read_text(encoding='utf-8')
+    js = engine_script(ROOT)
     sync_script = ROOT / 'assets/engine/sync.js'
-    if sync_script.is_file():
-        js += '\n' + sync_script.read_text(encoding='utf-8')
     sync_tag = ''
     if renderer.interactive and renderer.meta.get('sync', True):
         from sheet_sync import load_config
@@ -2024,8 +2027,10 @@ def cmd_build(folder: Path, force=False) -> int:
     if max(len(teacher_data), len(student_data)) > 4_000_000:
         warnings.append('HTML이 목표 크기 4 MB를 넘었습니다. 그림 크기와 개수를 확인하세요.')
     warnings = list(dict.fromkeys(warnings))
+    script = next(el for el in teacher_doc.root.walk() if el.tag == 'script' and el.attrs.get('id') == 'sheet-js')
+    script_hash = sha256(teacher_doc.inner(script).encode('utf-8'))
     record = {**metadata, 'teacher': file_record(teacher, teacher_data), 'student': file_record(student, student_data),
-              'fonts': {'embedded': bool(font_bytes), 'bytes': font_bytes},
+              'sheet_js_sha256': script_hash, 'fonts': {'embedded': bool(font_bytes), 'bytes': font_bytes},
               'plan_warnings': plan_warning_counts(issues),
               'warnings': [f'{i.path}: {i.message}' for i in issues if i.level == 'warning'] + warnings}
     record_path = manifest_path(folder)
@@ -2107,6 +2112,16 @@ def cmd_derive(teacher: Path) -> int:
     folder = teacher.parent
     student = folder / (teacher.name.removesuffix(suffix) + '.html')
     source = teacher.read_text(encoding='utf-8-sig')
+    record = load_manifest(folder)
+    teacher_entry = record.get('teacher')
+    recorded = isinstance(teacher_entry, dict) and teacher_entry.get('file') == teacher.name
+    script_hash = record.get('sheet_js_sha256') if recorded else None
+    problems = foreign_code_issues(source, script_hash)
+    if problems:
+        for problem in problems:
+            print(f'오류 · foreign-code · 교사용 HTML: {problem}')
+        print(f'다음: {FOREIGN_CODE_FIX}')
+        return 1
     try:
         try:
             previous_student = student.read_text(encoding='utf-8-sig')
@@ -2119,14 +2134,12 @@ def cmd_derive(teacher: Path) -> int:
         print(f'오류: {error}')
         print('다음: 저장한 교사용 HTML에서 derive를 실행하세요.')
         return 1
-    record = load_manifest(folder)
-    teacher_entry = record.get('teacher')
     if refreshed != source:
         atomic_write(teacher, refreshed.encode('utf-8'))
     atomic_write(student, payload)
     update_answer_table(folder, answers)
-    if isinstance(teacher_entry, dict) and teacher_entry.get('file') == teacher.name:
-        # Keep the original teacher hash so a later build still protects the edit.
+    if recorded:
+        # Keep the original teacher and script hashes so a later build still protects the edit.
         record['student'] = file_record(student, payload)
         if edition is not None:
             record['edition'] = edition

@@ -1,10 +1,15 @@
 """Shared names and paths for the worksheet CLI."""
 from fractions import Fraction
 import hashlib
+from html.parser import HTMLParser
 import json
+import os
 from statistics import median
 from pathlib import Path, PureWindowsPath
 import re
+import shutil
+import subprocess
+import sys
 from tempfile import NamedTemporaryFile
 from urllib.parse import parse_qs, urlsplit
 
@@ -95,6 +100,164 @@ def html_paths(folder: Path, title: str):
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+PYTHON_MODULES = (('fonttools', 'fontTools'), ('pillow', 'PIL'), ('pymupdf', 'pymupdf'))
+_PYTHON_TIMEOUT = 5
+
+
+def _python_candidates():
+    windows = sys.platform == 'win32'
+    launcher = shutil.which('py.exe') if windows else None
+    if launcher:
+        try:
+            listing = subprocess.run([launcher, '-0p'], cwd=ROOT, capture_output=True, timeout=_PYTHON_TIMEOUT)
+            if listing.returncode == 0:
+                try:
+                    text = listing.stdout.decode('utf-8')
+                except UnicodeDecodeError:
+                    text = listing.stdout.decode('mbcs', errors='replace')
+                for line in text.splitlines():
+                    match = re.fullmatch(r'\s*-\S+\s+(?:\*\s+)?(.+?\.exe)\s*', line, re.I)
+                    if match:
+                        yield Path(match[1])
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    names = ('python.exe', 'python3.exe') if windows else ('python3',)
+    for entry in os.get_exec_path():
+        directory = Path(entry.strip('"') if windows else entry)
+        if not directory.is_absolute() or (windows and directory.name.lower() == 'windowsapps'):
+            continue  # Do not run a current-folder executable or a Microsoft Store shortcut.
+        for name in names:
+            yield directory / name
+    if windows:
+        for env, pattern in (('APPDATA', 'uv/python/*/python.exe'),
+                             ('LOCALAPPDATA', 'Programs/Python/*/python.exe')):
+            root = os.environ.get(env)
+            if root:
+                yield from sorted(Path(root).glob(pattern))
+    else:
+        yield Path('/opt/homebrew/bin/python3')
+        yield Path('/usr/local/bin/python3')
+        yield from sorted(Path.home().glob('.local/share/uv/python/*/bin/python3'))
+
+
+def find_usable_python():
+    """Find the first other local Python that can import all optional modules."""
+    seen = {Path(sys.executable).resolve()}
+    imports = ', '.join(module for _, module in PYTHON_MODULES)
+    probe = f'import sys; assert sys.version_info >= (3, 9); import {imports}'
+    for path in _python_candidates():
+        try:
+            if not path.is_absolute() or not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            # Ignore PYTHONPATH and avoid the worksheet folder; keep the user site available.
+            result = subprocess.run([str(path), '-E', '-B', '-c', probe], cwd=ROOT,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_PYTHON_TIMEOUT)
+            if result.returncode == 0:
+                return path
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def python_sheet_command(executable, command):
+    return f'"{executable}" -X utf8 "{ROOT / "scripts/sheet.py"}" {command}'
+
+
+def engine_script(root=ROOT):
+    directory = root / 'assets/engine'
+    parts = [(directory / 'sheet.js').read_text(encoding='utf-8')]
+    for name in ('solve.js', 'sync.js'):
+        path = directory / name
+        if path.is_file():
+            parts.append(path.read_text(encoding='utf-8'))
+    return '\n'.join(parts)
+
+
+FOREIGN_CODE_FIX = '조립된 HTML을 손으로 고치지 말고 구성.json을 고쳐 다시 조립하세요.'
+_URL_ATTRS = frozenset('href xlink:href src action formaction data poster background cite'.split())
+_URL_LEADING = ''.join(map(chr, range(33)))
+_REVEAL_DATA = re.compile(r'[A-Za-z0-9+/]+={0,2}')
+
+
+class ForeignCodeAudit(HTMLParser):
+    """Inspect tags and script bodies without opening the worksheet in a browser."""
+    def __init__(self):
+        super().__init__()
+        self.problems = []
+        self.engine_hash = None
+        self.seen = set()
+        self.script = None
+        self.body = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag in ('iframe', 'object', 'embed'):
+            self.problems.append(f'엔진이 만들지 않은 <{tag}>가 있습니다.')
+        for name, value in attrs:
+            if tag == 'link' and name == 'href' and value and value.strip() and not value.lstrip().startswith('#'):
+                self.problems.append('HTML 밖의 자원을 가리키는 <link>가 있습니다.')
+            if name.startswith('on') and value is not None:
+                self.problems.append(f'<{tag}>에 동작을 실행하는 {name} 속성이 있습니다.')
+            if (name in _URL_ATTRS and value and
+                    re.sub(r'[\t\r\n]', '', value).lstrip(_URL_LEADING).lower().startswith('javascript:')):
+                self.problems.append(f'<{tag}>의 {name}에 javascript: 주소가 있습니다.')
+        if tag != 'script':
+            return
+        ident = values.get('id') or ''
+        if ((ident == 'sheet-js' and attrs == [('id', 'sheet-js')]) or
+                (ident == 'sheet-reveal' and len(attrs) == 2 and
+                 values == {'id': 'sheet-reveal', 'type': 'application/octet-stream'})) and ident not in self.seen:
+            self.script, self.body = ident, []
+            self.seen.add(ident)
+        else:
+            label = f' ({ident})' if re.fullmatch(r'[\w.-]{1,80}', ident) else ''
+            self.problems.append(f'엔진이 만들지 않은 스크립트{label}가 있습니다.')
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == 'script':
+            self.problems.append('닫는 태그가 없는 스크립트가 있습니다.')
+        else:
+            self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data):
+        if self.script:
+            self.body.append(data)
+
+    def handle_endtag(self, tag):
+        if tag != 'script' or not self.script:
+            return
+        body = ''.join(self.body)
+        if self.script == 'sheet-js':
+            self.engine_hash = sha256(body.encode('utf-8'))
+        elif not _REVEAL_DATA.fullmatch(body):
+            self.problems.append('sheet-reveal에 올바른 정답 자료 형식이 아닌 내용이 있습니다.')
+        self.script, self.body = None, []
+
+    def issues(self, recorded_hash=None):
+        problems = list(self.problems)
+        if self.script:
+            problems.append(f'{self.script} 스크립트가 닫히지 않았습니다.')
+        if self.engine_hash is not None:
+            # Older manifests had no script hash. Trust the installed code, never the HTML.
+            expected = recorded_hash if recorded_hash is not None else sha256(engine_script().encode('utf-8'))
+            if self.engine_hash != expected:
+                problems.append('sheet-js 스크립트 내용이 조립 때와 다릅니다.')
+        elif recorded_hash is not None and 'sheet-js' not in self.seen:
+            problems.append('조립 때 넣은 sheet-js 스크립트가 없습니다.')
+        return list(dict.fromkeys(problems))
+
+
+def foreign_code_issues(source, recorded_hash=None):
+    parser = ForeignCodeAudit()
+    parser.feed(source)
+    parser.close()
+    return parser.issues(recorded_hash)
 
 
 def json_bytes(value) -> bytes:

@@ -77,6 +77,34 @@ class StatusTest(unittest.TestCase):
         for path in (self.student, self.teacher, self.student.with_suffix('.pdf'), self.teacher.with_suffix('.pdf')):
             self.assertIn(str(path), output)
 
+    def test_foreign_code_blocks_gate_three_even_with_an_old_successful_report(self):
+        source = self.student.read_text(encoding='utf-8')
+        self.student.write_text(source.replace('</html>', '<script>/* 추가 코드 */</script></html>'), encoding='utf-8')
+        self.stamp(self.student, 1)
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('✗ 3 검사 · foreign-code', output)
+        self.assertNotIn('전달 문안 초안', output)
+
+    def test_fallback_fonts_do_not_block_delivery_but_add_caution(self):
+        build = json.loads(self.build.read_text(encoding='utf-8'))
+        for embedded in (False, True):
+            with self.subTest(embedded=embedded):
+                build['fonts'] = {'embedded': embedded, 'bytes': 100 if embedded else 0}
+                self.build.write_text(json.dumps(build), encoding='utf-8')
+                result, output = self.status()
+                self.assertEqual(result, 0, output)
+                self.assertIn('✓ 5 전달', output)
+                self.assertEqual('기기마다 줄바꿈과 쪽 나눔이 달라질 수 있습니다' in output, not embedded)
+        del build['fonts']
+        self.build.write_text(json.dumps(build), encoding='utf-8')
+        self.data['student']['fonts'] = {'Sheet Sans': False}
+        self.write_report()
+        self.stamp(self.report, 2)
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        self.assertIn('기기마다 줄바꿈과 쪽 나눔이 달라질 수 있습니다', output)
+
     def test_interactive_review_requires_screen_section(self):
         self.data['student']['interactive'] = True
         self.write_report()

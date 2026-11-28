@@ -1,7 +1,6 @@
 """A4 활동지 원고와 HTML을 관리하는 명령줄 도구."""
 import argparse
 import importlib
-import importlib.util
 import json
 import os
 import shutil
@@ -9,7 +8,7 @@ from pathlib import Path
 import sys
 from uuid import uuid4
 
-from sheet_common import KINDS, ROOT, SOURCE, json_bytes
+from sheet_common import KINDS, ROOT, SOURCE, PYTHON_MODULES, find_usable_python, json_bytes, python_sheet_command
 
 
 class Parser(argparse.ArgumentParser):
@@ -98,10 +97,24 @@ def cmd_doctor():
     print('| --- | --- |')
     print(f'| Python | {sys.version.split()[0]} |')
     print(f'| Chrome/Edge | {browser or "찾지 못함"} |')
-    for name, module in (('fonttools', 'fontTools'), ('pillow', 'PIL'), ('pymupdf', 'pymupdf')):
-        print(f'| {name} | {"설치됨" if importlib.util.find_spec(module) else "설치되지 않음"} |')
+    missing = []
+    for name, module in PYTHON_MODULES:
+        try:
+            importlib.import_module(module)
+        except (ImportError, OSError):
+            missing.append(name)
+        print(f'| {name} | {"불러올 수 없음" if name in missing else "설치됨"} |')
     print(f'| 학생 기록 설정 파일 | {"있음" if config_path().is_file() else "없음"} |')
-    print('다음: 빠진 항목을 확인하고 필요한 모듈을 설치하세요.')
+    if missing:
+        alternate = find_usable_python()
+        if alternate:
+            command = python_sheet_command(alternate, 'build "<활동지 폴더>"')
+            print(f'다음: 필요한 모듈을 모두 갖춘 파이썬을 찾았습니다. 이 파이썬으로 실행하세요: {command}')
+        else:
+            print('다음: 필요한 모듈을 모두 갖춘 다른 파이썬을 찾지 못했습니다. 설치할 수 있다면 '
+                  'python -m pip install fonttools pillow pymupdf 를 실행하세요.')
+    else:
+        print('다음: 필요한 파이썬 모듈을 모두 불러올 수 있습니다.')
     return 0
 
 

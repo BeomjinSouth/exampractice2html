@@ -319,8 +319,7 @@
       const strokes = value && !Array.isArray(value) && Array.isArray(value.strokes) ? value.strokes : null;
       const point = p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite);
       if (strokes) {
-        if (!strokes.length || !strokes.every(path => Array.isArray(path) && path.length &&
-            path.every(p => point(p) && p.every(n => n >= 0 && n <= 1)))) return null;
+        if (!strokes.length || !core.validPenStrokes(strokes)) return null;
         let width = 1, height = 1;
         if (sameBuild) {
           const anchor = el?.matches('figure') ? el.querySelector('svg, img') : el;
@@ -328,7 +327,9 @@
           if (bounds?.width > 0 && bounds?.height > 0) { width = bounds.width; height = bounds.height; }
         }
         const paths = strokes.map(path => path.map(([x, y]) => [x * width, y * height]));
-        const svg = fittedPicture(paths.flat(), sameBuild ? [0, 0, width, height] : null, '학생이 그린 답');
+        const clipped = strokes.some(path => path.some(p => p.some(n => n < 0 || n > 1)));
+        const svg = fittedPicture(paths.flat(), sameBuild || clipped ? [0, 0, width, height] : null, '학생이 그린 답');
+        svg.style.overflow = 'hidden';
         const weight = Math.max(width, height) * .008;
         for (const path of paths) {
           if (path.length === 1) svg.append(svgNode('circle', { cx: path[0][0], cy: path[0][1], r: weight / 2, fill: '#164b86' }));

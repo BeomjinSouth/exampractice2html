@@ -236,6 +236,7 @@
   let initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
   let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton, saveStatus;
+  let oldStorageKeys = [];
   let lockedMedia = [];
   const store = (op, ...args) => {
     try {
@@ -253,10 +254,9 @@
   function saveValues() {
     if (!storageKey || pendingRestore) return;
     const pens = Object.fromEntries([...records.values()].filter(r => r.penValue !== undefined).map(r => [r.slot, r.penValue]));
-    const saved = store('setItem', storageKey, JSON.stringify(values())) && (Object.keys(pens).length
-      ? store('setItem', `${storageKey}:pen`, JSON.stringify(pens))
-      : store('removeItem', `${storageKey}:pen`));
-    if (saved && !teacher) store('setItem', `${storageKey}:saved-at`, String(Date.now()));
+    // A failed setItem leaves the last complete snapshot intact.
+    const saved = store('setItem', storageKey, JSON.stringify({ v: 1, answers: values(), pens, savedAt: Date.now() }));
+    if (saved) oldStorageKeys = oldStorageKeys.filter(key => !store('removeItem', key));
     showSaveFailure(!saved);
   }
   function attr(el, name, value) {
@@ -325,6 +325,10 @@
     if (normalized == null && ['match','line','bars'].includes(kind)) return null;
     return normalized != null && matches(normalized);
   }
+  // A radius measured across a long, thin drawing can span several frame heights.
+  const penReach = 64;
+  const validPenStrokes = strokes => Array.isArray(strokes) && strokes.every(path => Array.isArray(path) && path.length &&
+    path.every(p => Array.isArray(p) && p.length === 2 && p.every(n => Number.isFinite(n) && n >= -penReach && n <= 1 + penReach)));
   function sanitizedValue(record, value) {
     const { el, kind } = record;
     if (el.matches('.ws-blank,.ws-name-slot,.ws-ans:not([data-kind="draw"])')) {
@@ -334,8 +338,7 @@
     if (kind === 'ox') return value === '' ? '' : normalize(kind, value, el)?.toUpperCase();
     if (kind === 'draw') {
       const strokes = value?.strokes;
-      if (!Array.isArray(strokes) || !strokes.every(path => Array.isArray(path) && path.length && path.every(p =>
-        Array.isArray(p) && p.length === 2 && p.every(n => Number.isFinite(n) && n >= 0 && n <= 1)))) return undefined;
+      if (!validPenStrokes(strokes)) return undefined;
       return { strokes: clone(strokes) };
     }
     if (kind === 'match') {
@@ -365,21 +368,31 @@
     }
     return undefined;
   }
-  function readSnapshot(fromFile) {
-    const answers = fromFile ? null : json(store('getItem', storageKey), {});
-    const pens = fromFile ? null : json(store('getItem', `${storageKey}:pen`), {});
+  function readDeviceStorage() {
+    const stored = json(store('getItem', storageKey), {});
+    const penKey = `${storageKey}:pen`, timeKey = `${storageKey}:saved-at`;
+    const oldPens = store('getItem', penKey), oldTime = store('getItem', timeKey);
+    oldStorageKeys = [oldPens != null && penKey, oldTime != null && timeKey].filter(Boolean);
+    // Never supplement a new snapshot with stale values from the previous format.
+    return stored.v === 1 ? stored : { answers: stored, pens: json(oldPens, {}), savedAt: Number(oldTime) };
+  }
+  function readSnapshot(device) {
     const snapshot = new Map();
     for (const row of records.values()) {
       const { el, kind, slot } = row;
-      const value = sanitizedValue(row, fromFile ? json(el.dataset.value, undefined) : answers[slot]);
+      const value = sanitizedValue(row, device ? device.answers?.[slot] : json(el.dataset.value, undefined));
       const penValue = el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)
-        ? sanitizedValue({ el, kind: 'draw' }, fromFile ? json(el.dataset.penValue, undefined) : pens[slot]) : undefined;
+        ? sanitizedValue({ el, kind: 'draw' }, device ? device.pens?.[slot] : json(el.dataset.penValue, undefined)) : undefined;
       if (value !== undefined || penValue !== undefined) snapshot.set(row, { value, penValue });
     }
     return snapshot;
   }
   function restoreSnapshot(snapshot) {
-    for (const [row, state] of snapshot) Object.assign(row, state);
+    for (const [row, state] of snapshot) {
+      Object.assign(row, state);
+      const drawing = row.kind === 'draw' ? state.value : state.penValue;
+      row.restoredDrawing = !!drawing?.strokes.length;
+    }
   }
   function indexSlots() {
     records.clear();
@@ -869,17 +882,70 @@
     const status = solveOnly('div', 'ws-pen-status');
     status.setAttribute('aria-live', 'polite');
     const initialTool = alongsidePlot ? 'plot' : 'ink';
-    let selected, gesture, radius = 0;
+    let selected, gesture, radius = 0, restoreFrame;
+    let enlarged = false, panGesture;
+    const viewport = runtime(make('div', 'ws-pen-viewport'));
+    const stage = runtime(make('div', 'ws-pen-stage'));
+    viewport.append(stage);
+    viewport.tabIndex = 0;
+    viewport.setAttribute('role', 'region');
+    viewport.setAttribute('aria-label', '크게 보는 그림');
+    const zoomButton = uiButton('크게', 'pen-zoom', () => {
+      if (mode !== 'solve' || !narrowScreen.matches) return;
+      enlarged = !enlarged;
+      zoomButton.setAttribute('aria-pressed', String(enlarged));
+      paint(drawing());
+    }, { pressed: false });
+    zoomButton.classList.add('ws-pen-zoom');
     const modes = [];
+    function clearStatus() {
+      if (restoreFrame) {
+        cancelAnimationFrame(restoreFrame);
+        restoreFrame = undefined;
+        row.restoredDrawing = false;
+      }
+      status.textContent = '';
+    }
     function tool(which) {
       stopTracking();
+      panGesture = undefined;
       selected = which;
       row.penPanning = which === 'pan';
+      viewport.classList.toggle('ws-pen-pan', row.penPanning);
       canvas.classList.toggle('ws-pen-pass-through', which === 'plot' || row.penPanning);
       for (const [key, button] of modes) button.setAttribute('aria-pressed', String(key === which));
-      status.textContent = '';
+      clearStatus();
       paintCanvas(drawing());
     }
+    function syncView() {
+      const zoom = enlarged && mode === 'solve' && narrowScreen.matches && usable();
+      if (zoom === !!viewport.parentElement) return;
+      stopTracking();
+      panGesture = undefined;
+      if (zoom) {
+        anchor.before(viewport);
+        stage.append(anchor);
+        if (figure) stage.append(canvas);
+        viewport.scrollLeft = viewport.scrollTop = 0;
+      } else {
+        viewport.replaceWith(anchor);
+        if (figure) ink.before(canvas);
+      }
+    }
+    viewport.addEventListener('pointerdown', event => {
+      if (!usable() || selected !== 'pan' || event.button !== 0 || panGesture || !stage.contains(event.target)) return;
+      event.preventDefault();
+      panGesture = { id: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
+      if (event.isTrusted) viewport.setPointerCapture(event.pointerId);
+    });
+    viewport.addEventListener('pointermove', event => {
+      if (panGesture?.id !== event.pointerId) return;
+      viewport.scrollLeft = panGesture.left + panGesture.x - event.clientX;
+      viewport.scrollTop = panGesture.top + panGesture.y - event.clientY;
+    });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) viewport.addEventListener(type, event => {
+      if (panGesture?.id === event.pointerId) panGesture = undefined;
+    });
     function addMode(key, label, action) {
       const button = uiButton(label, action, () => tool(key), { pressed: key === initialTool });
       tools.append(button);
@@ -899,19 +965,30 @@
       if (drawing()?.strokes.length) commit([]);
     }));
     addMode('pan', '화면 이동', 'pen-pan');
+    tools.prepend(zoomButton);
     el.append(tools, status);
     let printedStrokes;
     function paint(value) {
-      // Print can hide the canvas before layout; size both layers from the figure, not the canvas.
+      syncView();
+      // Screen and print both follow the underlay; the enlarged canvas lives inside the scrolling stage.
       if (figure) {
-        const f = el.getBoundingClientRect(), r = anchor.getBoundingClientRect();
+        const parent = viewport.parentElement ? stage : el;
+        const f = parent.getBoundingClientRect(), r = anchor.getBoundingClientRect();
         if (r.width && r.height) {
-          const box = { left: `${r.left-f.left-el.clientLeft}px`, top: `${r.top-f.top-el.clientTop}px`,
+          const box = { left: `${r.left-f.left-parent.clientLeft}px`, top: `${r.top-f.top-parent.clientTop}px`,
             width: `${r.width}px`, height: `${r.height}px` };
           Object.assign(canvas.style, box);
-          Object.assign(ink.style, box);
+          if (parent === el) Object.assign(ink.style, box);
         }
       } else anchor.style.setProperty('--ws-draw-ratio', String(core.drawRatio(el)));
+      if (row.restoredDrawing && mode === 'solve' && usable() && !restoreFrame) {
+        restoreFrame = requestAnimationFrame(() => {
+          restoreFrame = undefined;
+          if (!row.restoredDrawing || mode !== 'solve' || !usable()) return;
+          row.restoredDrawing = false;
+          status.textContent = alongsidePlot ? '그림을 다시 불러왔어요.' : '그림을 다시 불러왔어요. 컴퍼스는 다시 벌려 주세요.';
+        });
+      }
       const strokes = value?.strokes;
       if (strokes !== printedStrokes) {
         printedStrokes = strokes;
@@ -943,33 +1020,27 @@
       if (previewGesture?.which === 'line') trace([previewGesture.start, previewGesture.last]);
       if (previewGesture?.which === 'compass' && previewGesture.dragged) {
         const [x,y] = previewGesture.start;
-        const r = distancePx(previewGesture.start, previewGesture.last, width, height);
+        const r = opening(previewGesture.start, previewGesture.last, width, height);
         ctx.save();
         ctx.setLineDash([4*ratio, 4*ratio]); ctx.beginPath();
         ctx.ellipse(x*w, y*h, r*w/width, r*h/height, 0, 0, 2*Math.PI);
         ctx.stroke(); ctx.restore();
       }
     }
-    const rounded = p => p.map(v => Number(clamp(v, 0, 1).toFixed(5)));
-    const point = (event, r) => rounded([(event.clientX-r.left)/r.width, (event.clientY-r.top)/r.height]);
+    const rounded = n => Number(n.toFixed(5));
+    const point = (event, r) => [(event.clientX-r.left)/r.width, (event.clientY-r.top)/r.height]
+      .map(v => rounded(clamp(v, 0, 1)));
     const distancePx = (a, b, w, h) => Math.hypot((a[0]-b[0])*w, (a[1]-b[1])*h);
+    const opening = (a, b, w, h) => Math.min(distancePx(a, b, w, h), penReach * Math.min(w, h));
     const unitBox = { x0: 0, x1: 1, y0: 0, y1: 1, x: v => v, y: v => v };
-    function circlePaths([x,y], ry) {
-      const points = Array.from({ length: 73 }, (_, i) => {
+    const inFrame = p => p.every(n => n >= 0 && n <= 1);
+    function circlePath([x,y], aspect) {
+      // Even if the frame cuts the circle into visible arcs, store just one closed stroke.
+      if (radius > Math.hypot(Math.max(x, 1-x), Math.max(y, 1-y) / aspect)) return null;
+      return Array.from({ length: 73 }, (_, i) => {
         const theta = i * Math.PI / 36;
-        return [x + radius * Math.cos(theta), y + ry * Math.sin(theta)];
+        return [rounded(x + radius * Math.cos(theta)), rounded(y + radius * aspect * Math.sin(theta))];
       });
-      // Keep the visible arcs without flattening out-of-bounds points onto the frame edge.
-      const paths = [];
-      for (let i = 1; i < points.length; i++) {
-        const segment = clipSegment(points[i-1], points[i], unitBox);
-        if (!segment) continue;
-        const [a,b] = segment.map(rounded);
-        const last = paths.at(-1);
-        if (last && same(last.at(-1), a)) last.push(b);
-        else paths.push([a,b]);
-      }
-      return paths;
     }
     function eraseAt(strokes, points) {
       const { width:w, height:h } = canvas.getBoundingClientRect();
@@ -981,9 +1052,12 @@
       };
       const count = Math.max(1, Math.ceil(Math.hypot(q[0]-p[0], q[1]-p[1])/6));
       const samples = Array.from({length:count+1}, (_,i) => [p[0]+(q[0]-p[0])*i/count,p[1]+(q[1]-p[1])*i/count]);
-      return strokes.filter(path => !path.some(([x,y],i) => {
-        const [a,b] = path[i-1] || path[i];
-        return samples.some(sample => distance(sample,[a*w,b*h],[x*w,y*h]) < 9);
+      return strokes.filter(path => !path.some((b,i) => {
+        const a = path[i-1] || b;
+        const segment = inFrame(a) && inFrame(b) ? [a,b] : clipSegment(a,b,unitBox);
+        if (!segment) return false;
+        const [[x1,y1],[x2,y2]] = segment;
+        return samples.some(sample => distance(sample,[x1*w,y1*h],[x2*w,y2*h]) < 9);
       }));
     }
     canvas.addEventListener('pointerdown', event => {
@@ -994,7 +1068,7 @@
       const p = point(event, rect), before = drawing()?.strokes ?? [];
       const strokes = selected === 'erase' ? eraseAt(before,[p,p]) : selected === 'ink' ? [...before, [p]] : before;
       const listeners = new AbortController();
-      status.textContent = '';
+      clearStatus();
       gesture = { id:event.pointerId, which:selected, strokes, start:p, last:p, listeners };
       // Chrome can lose capture while the pointer is still down. Keep tracking this
       // pointer through release, even if the next event targets another element.
@@ -1038,20 +1112,20 @@
         if (which === 'line' && !same(start, last)) { commit([...strokes, [start, last]]); return; }
         if (which === 'compass') {
           if (dragged) {
-            const distance = distancePx(start, last, width, height);
+            const distance = opening(start, last, width, height);
             if (distance >= 5) radius = distance / width;
           } else if (!radius) status.textContent = '먼저 끌어서 컴퍼스를 벌리세요';
           else {
-            const paths = circlePaths(start, radius * width / height);
-            if (paths.length) { commit([...strokes, ...paths]); return; }
+            const path = circlePath(start, width / height);
+            if (path) { commit([...strokes, path]); return; }
           }
         }
       }
       paintCanvas(drawing());
     }
     tool(initialTool);
-    return { paint: value => paint(alongsidePlot && usable() ? row.penValue : value), resize: true,
-      reset() { history.length = 0; radius = 0; tool(initialTool); } };
+    return { paint: value => paint(alongsidePlot && usable() ? row.penValue : value), resize: true, syncView,
+      reset() { history.length = 0; radius = 0; row.restoredDrawing = false; tool(initialTool); } };
   }
   function installControl(row) {
     if (row.control) return;
@@ -1063,7 +1137,7 @@
       if (Object.hasOwn(controls, kind)) row.control = controls[kind](row);
       if (row.control && ['line','points'].includes(kind) && el.matches('figure[data-pen="1"]')) {
         const plot = row.control, sketch = pen(row, true);
-        if (sketch) row.control = { resize: true, reset: sketch.reset,
+        if (sketch) row.control = { resize: true, reset: sketch.reset, syncView: sketch.syncView,
           paint(value) { plot.paint(value); sketch.paint(); } };
       }
     }
@@ -1426,6 +1500,8 @@
       adjustColumns(item);
       for (const row of slotsIn(item).map(el => recordByNode.get(el))) {
         if (row?.kind === 'order') row.control?.paint(usable() ? row.value : undefined);
+        // Put the underlay back before measuring the A4 page.
+        row?.control?.syncView?.();
       }
       for (const block of all(item, '.ws-explore')) exploreOriginal.get(block)?.render();
     }
@@ -1435,6 +1511,11 @@
     renderExisting(items);
     if (mode !== 'solve') return false;
     main.id = 'sheet-flow';
+    // Standalone page bands do not leave a blank card. Mixed items keep their other blocks.
+    const flowItems = list => list.filter(item => {
+      const blocks = [...item.children].filter(block => !block.hasAttribute('data-sheet-runtime'));
+      return !blocks.length || blocks.some(block => !block.matches('.ws-band'));
+    });
     if (root.dataset.columns === '2') {
       const columns = make('div', 'ws-flow-cols');
       // Each partition retains document order; the breakpoint only changes its presentation.
@@ -1442,11 +1523,12 @@
       const explicit = ordinary.findIndex((item, i) => i > 0 && item.dataset.break === '1');
       const boundary = explicit > 0 ? explicit : Math.ceil(ordinary.length / 2);
       for (const partition of [ordinary.slice(0,boundary), ordinary.slice(boundary)]) {
-        if (!partition.length) continue;
-        const col = make('div', 'ws-flow-col'); col.append(...partition); columns.append(col);
+        const visible = flowItems(partition);
+        if (!visible.length) continue;
+        const col = make('div', 'ws-flow-col'); col.append(...visible); columns.append(col);
       }
-      main.append(...items.filter(item => item.dataset.span === 'all'), columns);
-    } else main.append(...items);
+      main.append(...flowItems(items.filter(item => item.dataset.span === 'all')), columns);
+    } else main.append(...flowItems(items));
     return true;
   }
   function afterLayout() {
@@ -1480,9 +1562,9 @@
     }
     updateScore();
   }
-  const narrowTableScreen = window.matchMedia('screen and (max-width: 719.98px)');
+  const narrowScreen = window.matchMedia('screen and (max-width: 719.98px)');
   function updateTableOverflow(scope) {
-    const narrow = mode === 'solve' && narrowTableScreen.matches;
+    const narrow = mode === 'solve' && narrowScreen.matches;
     for (const table of all(scope, 'table.ws-input-table')) {
       const overflow = narrow && table.clientWidth > 0 && table.scrollWidth > table.clientWidth + 1;
       if (table.classList.contains('ws-table-overflow') !== overflow) toggle(table, 'ws-table-overflow', overflow);
@@ -1550,8 +1632,8 @@
     }
     if (teacher) bindTeacherSolutions();
     indexSlots();
-    const device = readSnapshot(false), file = readSnapshot(true);
-    const when = Number(store('getItem', `${storageKey}:saved-at`));
+    const saved = readDeviceStorage(), device = readSnapshot(saved), file = readSnapshot();
+    const when = saved.savedAt;
     const hasDevice = [...device].some(([row, { value, penValue }]) =>
       hasResponse({ kind: row.kind, value }) || !!penValue?.strokes.length);
     // An explicitly emptied device snapshot can still differ from a filled answer file.
@@ -1588,7 +1670,7 @@
       saveStatus.setAttribute('aria-live', 'polite');
       core.addToolbar(saveStatus);
     }
-    narrowTableScreen.addEventListener('change', schedulePaint);
+    narrowScreen.addEventListener('change', schedulePaint);
     window.addEventListener('beforeprint', () => {
       printing ??= mode;
       // An inline answer entered in A4 view may have wrapped since its last layout.
@@ -1818,6 +1900,8 @@
       }
     }
     for (const space of all(copy, '.ws-name-space')) space.replaceWith(...space.childNodes);
+    // Keep the authored underlay when the enlarged view's runtime wrapper is stripped.
+    for (const viewport of all(copy, '.ws-pen-viewport')) viewport.replaceWith(...viewport.firstElementChild.childNodes);
     // Explore owns only the live path and the computed y cells; preserve the author-supplied start.
     for (let i = 0; i < nodes.length; i++) {
       const data = exploreOriginal.get(nodes[i]);
@@ -1860,6 +1944,7 @@
   core.attach({ init, layoutFlow, afterLayout, studentPreview: () => preview, beforePrintButton, report,
     editMarkup, editTableUnit, copiedItem, cleanItem, cleanDocument, revealData });
   core.restorePending = () => !!pendingRestore;
+  core.validPenStrokes = validPenStrokes;
   core.verdicts = () => Object.fromEntries([...records.values()].filter(r => r.auto).map(r => [r.slot, r.result]));
   Object.assign(window.sheet, { view, slots, answer, values, score, clearAnswers });
 })();

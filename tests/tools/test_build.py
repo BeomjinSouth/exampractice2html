@@ -37,9 +37,9 @@ class BuildTest(unittest.TestCase):
         self.source = self.folder / '구성.json'
         self.cli('new', self.folder, '--title', self.title, '--kind', '평가')
 
-    def cli(self, *args, status=0):
+    def cli(self, *args, status=0, salt='00112233445566778899aabbccddeeff'):
         result = subprocess.run([sys.executable, '-B', '-X', 'utf8', str(ROOT / 'scripts/sheet.py'), *map(str, args)],
-                                env={**os.environ, 'SHEET_FONT_DIR': self.temp.name, 'SHEET_SYNC_CONFIG': str(Path(self.temp.name) / 'sync.json'), 'SHEET_TEST_SALT': '00112233445566778899aabbccddeeff'}, capture_output=True, encoding='utf-8')
+                                env={**os.environ, 'SHEET_FONT_DIR': self.temp.name, 'SHEET_SYNC_CONFIG': str(Path(self.temp.name) / 'sync.json'), 'SHEET_TEST_SALT': salt}, capture_output=True, encoding='utf-8')
         self.assertEqual(result.returncode, status, (result.stdout + result.stderr)[:600])
         self.assertIn('다음:', result.stdout)
         return result.stdout
@@ -218,6 +218,54 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(len(payload['items']), 1)
         self.assertIn('모범 풀이', payload['items']['q1']['solution_html'])
         self.assertEqual(payload['items']['q1']['video']['yt'], 'abcdefghijk')
+
+    def edition(self, path):
+        return next(json.loads(a['content'])['edition'] for _, a in Tags(path.read_text(encoding='utf-8')).tags
+                    if a.get('name') == 'sheet-build')
+
+    def public_data(self):
+        import re
+        student = self.student.read_text(encoding='utf-8')
+        salt = next(a['content'] for _, a in Tags(student).tags if a.get('name') == 'sheet-salt')
+        encrypted = re.search(r'<script type="application/octet-stream" id="sheet-reveal">([^<]+)</script>', student).group(1)
+        key = hashlib.sha256((salt + '|reveal').encode()).digest()
+        return json.loads(bytes(v ^ key[i % len(key)] for i, v in enumerate(base64.b64decode(encrypted))))
+
+    def test_derive_refreshes_public_solution_and_keeps_edition_if_unchanged(self):
+        self.interactive_fixture()
+        self.cli('build', self.folder)
+        old_edition, old_public = self.edition(self.student), self.public_data()
+        self.cli('derive', self.teacher)
+        self.assertEqual((self.edition(self.student), self.public_data()), (old_edition, old_public))
+        edited = self.teacher.read_text(encoding='utf-8').replace('직접 계산한다.', '다른 식으로 계산한다.')
+        self.teacher.write_text(edited.replace('계산 확인', '대입 확인'), encoding='utf-8')
+        self.cli('derive', self.teacher)
+        updated = self.public_data()
+        self.assertIn('다른 식으로 계산한다.', updated['items']['q1']['solution_html'])
+        self.assertNotIn('직접 계산한다.', updated['items']['q1']['solution_html'])
+        self.assertEqual(updated['items']['q1']['rubric'], ['대입 확인'])
+        self.assertEqual(updated['items']['q1']['video'], old_public['items']['q1']['video'])
+        self.assertEqual(updated['slots'], old_public['slots'])
+        new_edition = self.edition(self.student)
+        self.assertNotEqual(new_edition, old_edition)
+        self.assertEqual(self.edition(self.teacher), new_edition)
+        self.cli('derive', self.teacher)
+        self.assertEqual(self.edition(self.student), new_edition)
+
+    def test_edition_tracks_embedded_image_bytes_not_random_salt(self):
+        self.interactive_fixture()
+        data = json.loads(self.source.read_text(encoding='utf-8'))
+        data['items'][0]['blocks'].append({'type': 'figure', 'src': '그림/도형.svg', 'width_mm': 25, 'alt': '도형'})
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        image = self.folder / '그림/도형.svg'
+        image.write_text('<svg viewBox="0 0 5 5"><path d="M0 0L5 5"/></svg>', encoding='utf-8')
+        self.cli('build', self.folder)
+        before = self.edition(self.student)
+        self.cli('build', self.folder, salt='abcdefabcdefabcdefabcdefabcdefab')
+        self.assertEqual(self.edition(self.student), before)
+        image.write_text('<svg viewBox="0 0 5 5"><path d="M0 5L5 0"/></svg>', encoding='utf-8')
+        self.cli('build', self.folder)
+        self.assertNotEqual(self.edition(self.student), before)
 
     def test_order_print_note_matches_worksheet_kind(self):
         from sheet_build import font_chars

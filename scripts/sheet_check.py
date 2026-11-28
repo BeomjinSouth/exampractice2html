@@ -441,6 +441,88 @@ def _audit_graph_labels(pdf, regions, role, problems):
     return measured
 
 
+_PEN_REGIONS_JS = """(() => {
+  const pages = [...document.querySelectorAll('#sheet-pages .ws-page')];
+  return [...document.querySelectorAll('#sheet-pages :is(figure[data-pen="1"], .ws-ans[data-kind="draw"][data-slot])')]
+    .map(el => {
+      const anchor = el.matches('figure') ? el.querySelector('img, svg:not(.ws-pen-ink)') : el;
+      if (!anchor) return null;
+      const r = anchor.getBoundingClientRect(), paper = el.closest('.ws-page'), p = paper.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const inset = el === anchor ? 1 : 0; // Ignore the draw cell's border.
+      return {page: pages.indexOf(paper) + 1, item: el.closest('.ws-item')?.dataset.id,
+        slot: el.dataset.slot, bbox: [(r.left-p.left)*.75+inset, (r.top-p.top)*.75+inset,
+          (r.right-p.left)*.75-inset, (r.bottom-p.top)*.75-inset]};
+    }).filter(Boolean);
+})()"""
+
+
+def _print_pdf(protocol):
+    return base64.b64decode(protocol.call('Page.printToPDF', {
+        'preferCSSPageSize': True, 'printBackground': True, 'displayHeaderFooter': False
+    })['data'], validate=True)
+
+
+def _audit_pen_print(protocol, pdf, problems, *, drawn=None):
+    """Compare the same A4 state with and without the absolute-positioned pen layers."""
+    regions = protocol.evaluate(_PEN_REGIONS_JS) or []
+    if not regions:
+        return []
+    try:
+        import pymupdf
+    except ImportError:
+        _problem(problems, 'warning', 'pen-print-unmeasured', None, None,
+                 'PyMuPDF가 없어 펜 자리의 인쇄를 측정하지 못했습니다.', 'PyMuPDF를 설치하고 다시 검사하세요.')
+        return 'skipped-no-pymupdf'
+    protocol.evaluate("""(() => {
+      const style = document.createElement('style');
+      style.id = 'sheet-check-hide-pen';
+      style.textContent = '@media print {html[data-sheet] #sheet-pages :is(canvas.ws-pen, .ws-pen-ink) {display:none!important}}';
+      document.head.append(style);
+    })()""")
+    try:
+        bare_pdf = _print_pdf(protocol)
+    finally:
+        protocol.evaluate("document.getElementById('sheet-check-hide-pen')?.remove()")
+    mode = '빈 인쇄' if drawn is None else '채움 인쇄'
+    measured = []
+    with pymupdf.open(stream=pdf, filetype='pdf') as actual, \
+            pymupdf.open(stream=bare_pdf, filetype='pdf') as bare:
+        if len(actual) != len(bare):
+            _problem(problems, 'error', 'pen-print-unmeasured', None, None,
+                     f'{mode}: 펜 층을 숨기면 PDF 쪽 수가 달라집니다.', '펜 층이 쪽 배치를 바꾸지 않는지 확인하세요.')
+            return measured
+        for region in regions:
+            page, item, slot = region['page'], region.get('item'), region.get('slot')
+            if not 1 <= page <= min(len(actual), len(bare)):
+                _problem(problems, 'error', 'pen-print-unmeasured', page, item,
+                         f'{mode}: {slot} 펜 자리의 비교 쪽이 없습니다.', '인쇄 쪽 나눔을 확인하세요.')
+                continue
+            clip = pymupdf.Rect(region['bbox'])
+            shown, hidden = (doc[page - 1].get_pixmap(dpi=150, colorspace=pymupdf.csGRAY, clip=clip).samples
+                             for doc in (actual, bare))
+            if not hidden or len(shown) != len(hidden):
+                _problem(problems, 'error', 'pen-print-unmeasured', page, item,
+                         f'{mode}: {slot} 펜 자리 영역이 맞지 않습니다.', 'A4 인쇄 영역을 확인하세요.')
+                continue
+            # Count loss and gain separately: a dark stroke must not mask a lost underlay in the total.
+            baseline = lost = added = 0
+            for visible, reference in zip(shown, hidden):
+                if reference <= 225:
+                    baseline += 1
+                    lost += visible - reference >= 24
+                added += visible <= 225 and reference - visible >= 24
+            measured.append({**region, 'underlay_pixels': baseline, 'lost_pixels': lost, 'added_pixels': added})
+            if lost >= max(24, baseline * .15):
+                _problem(problems, 'error', 'pen-covers-content', page, item,
+                         f'{mode}: {slot} 펜 층이 밑그림 잉크를 가립니다 ({lost}/{baseline}픽셀).',
+                         '펜 층을 숨긴 결과와 학생 PDF를 비교하고, 인쇄 펜 층이 밑그림을 가리지 않게 하세요.')
+            if drawn is not None and slot in drawn and added < 16:
+                _problem(problems, 'error', 'pen-print-missing', page, item,
+                         f'{mode}: {slot}에 넣은 펜 획이 PDF에 보이지 않습니다.', '펜 획의 저장과 인쇄를 확인하세요.')
+    return measured
+
+
 def _audit_filled_text(info, pdf, problems):
     """서술 칸에 넣은 두 줄 답이 채움 인쇄 PDF에 두 줄 모두 남았는지 센다."""
     boxes = (info.get("filled_inputs") or {}).get("open_box", 0)
@@ -481,25 +563,48 @@ _FILL_JS = """(async()=>{
     else continue;
     sheet.answer(s.slot, value);
   }
-  return {kinds, values: sheet.values()};
+  // A plot with a pen stores the pen separately; draw through its normal pointer path.
+  const extraPens = [];
+  for (const el of nodes.filter(n => n.matches('figure[data-pen="1"]:not([data-check-kind="draw"])'))) {
+    const canvas = el.querySelector('canvas.ws-pen');
+    const pen = el.querySelector('[data-sheet-action="pen"]');
+    if (!canvas || !pen) continue;
+    const r = canvas.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    pen.click();
+    const fire = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, {bubbles:true, button:0,
+      pointerId:1, clientX:r.left+x*r.width, clientY:r.top+y*r.height}));
+    fire('pointerdown', .15, .25); fire('pointermove', .5, .75); fire('pointerup', .85, .35);
+    extraPens.push(el.dataset.slot);
+  }
+  kinds.draw += extraPens.length;
+  return {kinds, values: sheet.values(), extraPens};
 })()"""
 _FILL_LINES = ("검사 서술 첫째 줄", "검사 서술 둘째 줄")
 _FILLED_SCREEN_JS = """(async function filledScreenInspection(){
   await sheet.view('solve');
   const items = [...document.querySelectorAll('#sheet-flow .ws-item')];
-  let checked_items = 0, revealed_items = 0;
+  let checked_items = 0, revealed_items = 0, solution_items = 0, compare_items = 0;
   for (const item of items) {
     const check = item.querySelector('[data-sheet-action="check"]');
     if (check && !check.disabled) { check.click(); checked_items++; }
-    const reveal = item.querySelector('[data-sheet-action="reveal-answer"]');
-    if (reveal && !reveal.disabled) { reveal.click(); revealed_items++; }
+    const open = action => {
+      const button = item.querySelector(`[data-sheet-action="${action}"]`);
+      if (!button || button.disabled) return 0;
+      if (button.getAttribute('aria-pressed') !== 'true') button.click();
+      return Number(button.getAttribute('aria-pressed') === 'true');
+    };
+    revealed_items += open('reveal-answer');
+    solution_items += open('reveal-solution');
+    compare_items += open('compare');
   }
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  const clipped = [...document.querySelectorAll('#sheet-flow td, #sheet-flow th, #sheet-flow .ws-flow-node, #sheet-flow .ws-in')]
-    .filter(el => el.getClientRects().length && el.scrollWidth > el.clientWidth + 1)
+  const clipped = [...document.querySelectorAll('#sheet-flow :is(td, th, .ws-flow-node, .ws-in, .ws-solution, .ws-reveal)')]
+    .filter(el => el.getClientRects().length && el.clientWidth && (el.scrollWidth > el.clientWidth + 1 ||
+      (el.matches('.ws-solution, .ws-reveal') && el.scrollHeight > el.clientHeight + 1)))
     .map(el => el.closest('[data-slot]')?.dataset.slot || el.closest('.ws-item')?.dataset.id || el.tagName.toLowerCase());
   return { view: sheet.view(), overflow_x: sheet.report().overflow_x,
-    clipped: [...new Set(clipped)].sort(), checked_items, revealed_items };
+    clipped: [...new Set(clipped)].sort(), checked_items, revealed_items, solution_items, compare_items };
 })()"""
 _RESTORED_JS = """(async()=>{
   await sheet.view('a4');
@@ -560,16 +665,14 @@ def _navigate(browser, path, teacher):
     report = result["report"]
     if report.get("role") != expected or not isinstance(report.get("pages"), list) or not result.get("count"):
         raise CheckError(f"활동지 역할이나 쪽 수가 올바르지 않습니다: {path.name}")
-    pdf = base64.b64decode(protocol.call("Page.printToPDF", {
-        "preferCSSPageSize": True, "printBackground": True, "displayHeaderFooter": False
-    })["data"], validate=True)
+    pdf = _print_pdf(protocol)
     report['graph_regions'] = result.get('graph_regions', [])
     return report, result["count"], result.get("keys", []), pdf, result.get("public", "")
 
 
 def _interactive_check(protocol, out, table, problems):
     """빈 화면 두 크기, 정답 판별, 답을 채운 인쇄를 차례로 검사한다."""
-    info = {"screens": [], "grading": "not-run", "auto_slots": None, "answer_slots": None}
+    info = {"screens": [], "grading": "not-run", "auto_slots": None, "answer_slots": None, "grading_tested": 0}
     files, filled_pdf = [], None
     capabilities = protocol.evaluate("""(() => ({
       available: ['view','slots','answer','values','clearAnswers'].every(k => typeof sheet[k] === 'function'),
@@ -637,6 +740,7 @@ def _interactive_check(protocol, out, table, problems):
                 }))()""" % data)
                 if not isinstance(results, list):
                     raise CheckError("자리별 판별 결과를 읽을 수 없습니다.")
+                info['grading_tested'] = len(results)
                 before = len(problems)
                 _audit_answers(table, slots, results, problems)
                 info["grading"] = "failed" if len(problems) > before else "passed"
@@ -644,7 +748,8 @@ def _interactive_check(protocol, out, table, problems):
             entered = protocol.evaluate(_FILL_JS % (data, *_FILL_LINES), True)
             if not isinstance(entered, dict) or not isinstance(entered.get("values"), dict):
                 raise CheckError("채움 인쇄에 쓸 입력을 넣지 못했습니다.")
-            info["filled_inputs"] = {"auto": len(rows), **(entered.get("kinds") or {})}
+            info['filled_inputs'] = {'from_answer_table': sum(row['slot'] in entered['values'] for row in rows),
+                                     **(entered.get('kinds') or {})}
             protocol.call('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844,
                                                                   'deviceScaleFactor': 1, 'mobile': False})
             screen = protocol.evaluate(_FILLED_SCREEN_JS, True)
@@ -662,7 +767,7 @@ def _interactive_check(protocol, out, table, problems):
             if screen['clipped']:
                 _problem(problems, 'warning', 'filled-screen-clipped', None, None,
                          '답을 채운 폰 화면에서 잘릴 수 있는 곳: ' + ', '.join(screen['clipped']),
-                         '해당 입력 칸·표·흐름 상자의 실제 표시를 확인하세요.')
+                         '해당 입력 칸·표·흐름 상자·정답과 풀이 패널의 실제 표시를 확인하세요.')
             size = protocol.call('Page.getLayoutMetrics').get('cssContentSize', {})
             height = max(844, math.ceil(size.get('height', 844)))
             data = protocol.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': True,
@@ -673,6 +778,7 @@ def _interactive_check(protocol, out, table, problems):
             path.write_bytes(base64.b64decode(data, validate=True))
             files.append(path)
             # 자동 저장 → 다시 열기 → 인쇄 순서로, 학생이 쓴 답이 실제로 남아 인쇄되는지 본다.
+            protocol.call('Emulation.clearDeviceMetricsOverride')
             _reload_keeping_answers(protocol)
             filled = protocol.evaluate(_RESTORED_JS, True)
             if not isinstance(filled, dict) or filled.get("view") != "a4":
@@ -703,9 +809,11 @@ def _interactive_check(protocol, out, table, problems):
                 _problem(problems, "error", "filled-print-clipped", None, None,
                          "A4 보기에서 채운 답이 잘리는 자리: " + ", ".join(clipped),
                          "빈칸·이름 칸의 너비와 서술 칸의 높이를 확인하세요.")
-            filled_pdf = base64.b64decode(protocol.call("Page.printToPDF", {
-                "preferCSSPageSize": True, "printBackground": True, "displayHeaderFooter": False
-            })["data"], validate=True)
+            filled_pdf = _print_pdf(protocol)
+            drawn = {slot for slot, value in entered['values'].items()
+                     if isinstance(value, dict) and value.get('strokes')}
+            drawn.update(entered.get('extraPens', []))
+            info['filled_print_pen'] = _audit_pen_print(protocol, filled_pdf, problems, drawn=drawn)
     finally:
         protocol.evaluate("""(async()=>{
           if (typeof sheet.clearAnswers === 'function') sheet.clearAnswers();
@@ -844,6 +952,7 @@ def cmd_check(folder: Path) -> int:
                                                                   "downloadThroughput": -1, "uploadThroughput": -1})
             teacher_report, teacher_count, keys, teacher_pdf, teacher_public = _navigate(browser, teacher, True)
             student_report, student_count, _, student_pdf, _ = _navigate(browser, student, False)
+            student_report['print_pen'] = _audit_pen_print(protocol, student_pdf, problems)
             interactive_info, screen_files, filled_pdf, table = None, [], None, None
             if student_report.get("interactive"):
                 table = _load_answer_table(out, problems)
@@ -968,7 +1077,7 @@ def _page_images_missing(out, report):
             if not (out / f'{prefix}-{page["n"]:02d}.png').is_file()]
 
 
-def _review_errors(text, report):
+def _review_errors(text, report, plan_warnings=()):
     lines = text.splitlines()
     errors = []
     if not lines or lines[0].strip() != "판정: 통과":
@@ -979,6 +1088,16 @@ def _review_errors(text, report):
         errors.append("내용 검산 절이 없습니다")
     if report.get("student", {}).get("interactive") and not re.search(r"(?m)^##\s+화면 확인\s*$", text):
         errors.append("화면 확인 절이 없습니다")
+    if plan_warnings:
+        heading = re.search(r'(?m)^##[ \t]+원고 경고[ \t]*$', text)
+        if heading is None:
+            errors.append('원고 경고 절이 없습니다')
+        else:
+            section = re.split(r'(?m)^#{1,2}[ \t]+', text[heading.end():], maxsplit=1)[0]
+            for code in plan_warnings:
+                if not re.search(rf'(?m)^[ \t]*[-*][ \t]+`?{re.escape(code)}`?[ \t]*:[ \t]*'
+                                 r'(?:고침|그대로 둠)[ \t]+[—–-][ \t]+\S', section):
+                    errors.append(f'원고 경고 {code}의 판단과 까닭이 없습니다')
     student_text = re.sub(r"교사용\s+\d+\s*쪽", "", text)
     for page in report.get("student", {}).get("pages", []):
         n = page.get("n")
@@ -991,7 +1110,7 @@ def _review_errors(text, report):
     return errors
 
 
-def _plan_status(folder):
+def _plan_status(folder, *, warnings=None):
     if not (folder / "구성.json").is_file():
         return True, "구성.json이 없어 plan 확인 불가"
     try:
@@ -1000,19 +1119,29 @@ def _plan_status(folder):
         return True, "plan 확인 불가 (검증 도구 없음)"
     try:
         _, _, issues = load_plan(folder)
-        errors = sum(issue.level == "error" for issue in issues)
-        return errors == 0, f"plan 오류 {errors}개"
+        from sheet_build import plan_warning_counts
+        counts = plan_warning_counts(issues)
+        if warnings is not None:
+            warnings.update(counts)
+        errors = sum(issue.level == 'error' for issue in issues)
+        return errors == 0, f'plan 오류 {errors}개'
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         return True, f"plan 확인 불가 ({exc})"
 
 
-def _delivery_draft(student, teacher, report, metadata):
+def _plan_warning_note(warnings):
+    return '원고 경고: ' + (', '.join(f'{code} {count}건' for code, count in warnings.items()) or '0건')
+
+
+def _delivery_draft(student, teacher, report, metadata, plan_warnings=None):
     print('\n전달 문안 초안 (경로·확인 범위는 다듬어도 되지만 맨 끝 ⭐ 줄은 답의 마지막 줄에 글자 그대로 붙이세요.)')
     print(f'학생용 HTML: {student}')
     print(f'학생용 PDF: {student.with_suffix(".pdf")}')
     print(f'교사용 HTML: {teacher}')
     print(f'교사용 PDF: {teacher.with_suffix(".pdf")}')
     print(f'확인한 것: 학생 {len(report["student"]["pages"])}쪽, 교사 {len(report["teacher"]["pages"])}쪽의 검사와 검토.')
+    if plan_warnings is not None:
+        print(_plan_warning_note(plan_warnings))
     info = report.get('interactive_check')
     if metadata.interactive or report['student'].get('interactive'):
         info = info if isinstance(info, dict) else {}
@@ -1021,17 +1150,19 @@ def _delivery_draft(student, teacher, report, metadata):
                  if isinstance(s, dict) and type(s.get('width')) is int and type(s.get('height')) is int]
         print('화면 크기 검사: ' + (', '.join(sizes) if sizes else '기록 없음'))
         grading = info.get('grading')
-        count = info.get('answer_slots')
+        count = info.get('grading_tested', info.get('answer_slots'))
         if grading == 'passed' and type(count) is int:
             print(f'자동 판별 자체 시험: {count}곳 통과.')
         else:
-            reason = '정답 공개 없음으로 생략' if grading == 'skipped-reveal-none' else '기록 없음 또는 미완료'
+            reason = '입력 전용(reveal: 없음)으로 생략' if grading == 'skipped-reveal-none' else '기록 없음 또는 미완료'
             print(f'자동 판별 자체 시험: {reason}.')
         filled = info.get('filled_inputs')
         if isinstance(filled, dict) and info.get('filled_restored') is True:
+            # Legacy reports called this field auto even when grading was skipped.
+            filled = dict(filled, from_answer_table=filled.get('from_answer_table', filled.get('auto')))
             counts = ', '.join(f'{label} {filled[key]}곳' for key, label in
-                               (('auto', '자동 판별'), ('open_box', '서술 칸'), ('open_blank', '빈칸'),
-                                ('draw', '그리기'), ('name', '이름')) if type(filled.get(key)) is int)
+                               (('from_answer_table', '정답표 값으로 채운 자리'), ('open_box', '서술 칸'),
+                                ('open_blank', '빈칸'), ('draw', '그리기'), ('name', '이름')) if type(filled.get(key)) is int)
             print(f'채움 인쇄 검사: {counts or "입력 수 기록 없음"}; 다시 열기 복원 확인.')
             if info.get('filled_text') == 'skipped-no-pymupdf':
                 print('채운 서술의 PDF 글자 확인은 생략했습니다.')
@@ -1086,10 +1217,20 @@ def cmd_status(folder: Path) -> int:
             edited = saved and isinstance(recorded_hash, str) and bool(re.fullmatch(r"[0-9a-fA-F]{64}", recorded_hash)) and recorded_hash.lower() != _sha(teacher)
         except (OSError, UnicodeError):
             pass
+    plan_warnings = {}
     if edited:
-        plan_ok, plan_note = True, "편집본이 원본"
+        plan_ok, plan_note = True, '편집본이 원본'
+        # 원고가 그 뒤에 바뀌어도, 편집본을 만들 때 나온 경고까지 사라지지는 않는다.
+        recorded = build.get('plan_warnings')
+        if isinstance(recorded, dict):
+            plan_warnings.update(sorted((code, count) for code, count in recorded.items()
+                                        if type(count) is int and count > 0))
+        elif source.is_file() and build.get('source_sha256') == _sha(source):
+            _plan_status(folder, warnings=plan_warnings)
     else:
-        plan_ok, plan_note = _plan_status(folder)
+        plan_ok, plan_note = _plan_status(folder, warnings=plan_warnings)
+    if plan_warnings or (not edited and plan_note.startswith('plan 오류')):
+        plan_note += ' · ' + _plan_warning_note(plan_warnings)
     build_ok = False
     if files_ok:
         if edited:
@@ -1147,7 +1288,7 @@ def cmd_status(folder: Path) -> int:
             interactive = bool(root and re.search(r"(?<![\w:-])data-interactive(?=[\s=/>])", root.group(), re.I))
             student_review = dict(report["student"], interactive=interactive or bool(report["student"].get("interactive")))
             review_report = dict(report, student=student_review)
-            errors = _review_errors(review_path.read_text(encoding="utf-8-sig"), review_report)
+            errors = _review_errors(review_path.read_text(encoding='utf-8-sig'), review_report, plan_warnings)
             if review_path.stat().st_mtime_ns <= report_path.stat().st_mtime_ns:
                 errors.insert(0, "검사 뒤에 검토하지 않았습니다")
             review_ok = not errors
@@ -1177,7 +1318,8 @@ def cmd_status(folder: Path) -> int:
         for path in (student, teacher, *pdfs):
             print(f"전달: {path}")
         print("다음 할 일: 전달할 파일을 확인하세요.")
-        _delivery_draft(student, teacher, report, student_meta)
+        _delivery_draft(student, teacher, report, student_meta,
+                        plan_warnings if '원고 경고:' in plan_note else None)
     else:
         action = next(label for label, ok, _ in gates if not ok)
         print(f"다음 할 일: {action} 관문을 확인하세요.")

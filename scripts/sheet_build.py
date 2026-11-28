@@ -1,5 +1,7 @@
 """Assemble offline worksheet HTML and remove teacher data for distribution."""
 import base64
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 from html import escape
@@ -62,6 +64,18 @@ def solve_only(block):
     if block['type'] == 'checklist':
         return not block.get('print', False)
     return block['type'] == 'split' and all(solve_only(b) for side in ('left', 'right') for b in block[side])
+
+
+def solution_public(answer, steps, rubric, video=None):
+    markup = '<p><b>예시 답안</b> ' + render_markup(answer) + '</p>'
+    if steps:
+        markup += '<ol>' + ''.join('<li>' + render_markup(step) + '</li>' for step in steps) + '</ol>'
+    info = {'solution_html': markup}
+    if rubric:
+        info['rubric'] = rubric
+    if video:
+        info['video'] = video
+    return info
 
 
 def section(id_, body, extra='', *, screen_only=False):
@@ -142,7 +156,7 @@ class Renderer:
         self.meta = data['meta']
         self.kind = self.meta.get('kind', '수업')
         self.columns = self.meta.get('columns', 1)
-        self.content_mm = 188 if self.columns == 1 else 93.8  # 190 / 2 - 1.2
+        self.content_mm = 188 if self.columns == 1 else 90.8  # (190 − 6) / 2 − 1.2
         self.label_mm = LABEL_MM[self.kind]
         self.title = self.meta['title']
         self.number = 0
@@ -870,7 +884,7 @@ class Renderer:
             lines = ''.join(editable('p', line) for line in block['lines'])
             return table('ws-box ws-notice', (self.label_mm, self.content_mm - self.label_mm), tr(f'{label}<td>{lines}</td>'))
         if kind == 'nameband':
-            return table('ws-band', (60, 128), tr(editable('td', block['label']) + f'<td class="ws-head-name">{self.name_line()}</td>'))
+            return table('ws-band', (60, self.content_mm - 60), tr(editable('td', block['label']) + f'<td class="ws-head-name">{self.name_line()}</td>'))
         if kind == 'situation':
             return self.situation(block)
         if kind == 'question':
@@ -907,7 +921,7 @@ class Renderer:
         if kind == 'table':
             header = block['header']
             widths = block.get('widths_mm', [self.content_mm / len(header)] * len(header))
-            if self.columns == 1 and self.content_mm != 188 and sum(widths) > self.content_mm:
+            if self.content_mm != 188 and sum(widths) > self.content_mm + 1e-9:
                 widths = [width * self.content_mm / sum(widths) for width in widths]
             widest = max((blank.width_mm for row in (header, *block['rows']) for text in row
                           for blank in inspect_markup(text).blanks if blank.width_mm is not None), default=None)
@@ -1030,16 +1044,10 @@ class Renderer:
         for solution in teacher.get('solutions', []):
             item = solution['item']
             if self.interactive and self.reveal_policy in ('시도 후', '바로'):
-                answer_html = '<p><b>예시 답안</b> ' + render_markup(solution['answer']) + '</p>'
-                if solution.get('steps'):
-                    answer_html += '<ol>' + ''.join('<li>' + render_markup(step) + '</li>' for step in solution['steps']) + '</ol>'
-                info = {'solution_html': answer_html}
-                if solution.get('rubric'):
-                    info['rubric'] = solution['rubric']
-                if solution.get('video'):
-                    video = solution['video']
-                    info['video'] = {'yt': youtube_id(video['url']), 'start': video.get('start', 0)}
-                self.reveal_data['items'][item] = info
+                video = solution.get('video')
+                self.reveal_data['items'][item] = solution_public(
+                    solution['answer'], solution.get('steps', []), solution.get('rubric', []),
+                    {'yt': youtube_id(video['url']), 'start': video.get('start', 0)} if video else None)
             label = str(self.first_number[item]) + '번' if item in self.first_number else item + ' 풀이'
             parts = [f'<h3 class="ws-t-q">{label}</h3>',
                      f'<p class="ws-t-ans"><b>예시 답안</b> {editable("span", solution["answer"])}</p>']
@@ -1050,7 +1058,7 @@ class Renderer:
                                       ('misconceptions', 'ws-t-mis', '예상 오개념')):
                 for text in solution.get(key, []):
                     parts.append(f'<p class="{cls}"><b>{heading}</b> {editable("span", text)}</p>')
-            items.append(section(private_id('t-' + item), '\n'.join(parts)))
+            items.append(section(private_id('t-' + item), '\n'.join(parts), f' data-solution-for="{escape(item)}"'))
         return '\n'.join(items)
 
 
@@ -1263,6 +1271,184 @@ def strip_teacher(source):
     return StudentFilter(source).student()
 
 
+@dataclass
+class _Element:
+    tag: str
+    attrs: dict
+    start: int
+    body: int
+    end: int
+    children: list = field(default_factory=list)
+
+    def has(self, cls):
+        return cls in (self.attrs.get('class') or '').split()
+
+    def walk(self):
+        for child in self.children:
+            if isinstance(child, _Element):
+                yield child
+                yield from child.walk()
+
+
+class _Document(HTMLParser):
+    """Read the explicit, balanced DOM written by build or the browser editor."""
+    def __init__(self, source):
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        self.lines = [0, *(m.end() for m in re.finditer('\n', source))]
+        self.root = _Element('', {}, 0, 0, len(source))
+        self.stack = [self.root]
+        self.feed(source)
+        self.close()
+
+    def position(self):
+        line, column = self.getpos()
+        return self.lines[line - 1] + column
+
+    def _open(self, tag, attrs, single):
+        start = self.position()
+        end = start + len(self.get_starttag_text())
+        el = _Element(tag, dict(attrs), start, end, end)
+        self.stack[-1].children.append(el)
+        if not single and tag not in VOID:
+            self.stack.append(el)
+
+    def handle_starttag(self, tag, attrs):
+        self._open(tag, attrs, False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._open(tag, attrs, True)
+
+    def handle_endtag(self, tag):
+        if len(self.stack) > 1 and self.stack[-1].tag == tag:
+            self.stack.pop().end = self.position()
+
+    def handle_data(self, data):
+        children = self.stack[-1].children
+        if children and isinstance(children[-1], str):
+            children[-1] += data
+        else:
+            children.append(data)
+
+    def lookup(self, attr, value):
+        return next((el for el in self.root.walk() if el.attrs.get(attr) == value), None)
+
+    def inner(self, el):
+        return self.source[el.body:el.end]
+
+    def metadata(self, name):
+        el = self.lookup('name', name)
+        return el.attrs.get('content') if el is not None else None
+
+
+def _reveal_tag(salt, payload):
+    return f'<script type="application/octet-stream" id="sheet-reveal">{reveal(salt, payload)}</script>'
+
+
+def _read_reveal(doc, salt):
+    script = doc.lookup('id', 'sheet-reveal')
+    if script is None:
+        return {'slots': {}, 'items': {}}
+    try:
+        raw = base64.b64decode(doc.inner(script).strip(), validate=True)
+        key = hashlib.sha256((salt + '|reveal').encode()).digest()
+        payload = json.loads(bytes(byte ^ key[i % len(key)] for i, byte in enumerate(raw)))
+        if all(isinstance(payload[name], dict) for name in ('slots', 'items')):
+            return payload
+    except (TypeError, ValueError, KeyError):
+        pass
+    raise ValueError('교사용 공개 자료의 형식을 읽을 수 없습니다.')
+
+
+def _rebuild_reveal(doc, previous):
+    public = doc.lookup('id', 'sheet-src')
+    slots = {}
+    for el in public.walk():
+        slot, kind = el.attrs.get('data-slot'), el.attrs.get('data-check-kind')
+        if not slot:
+            continue
+        key = next((child for child in el.walk() if child.has('ws-key')), None)
+        if kind in ('open', 'number', 'text') and key is not None:
+            source = key.attrs.get('data-src')
+            answer = render_markup(source) if source is not None else doc.inner(key)
+            if answer:
+                slots[slot] = {'answer_html': answer}
+        elif slot in previous['slots']:
+            # Non-text controls can have display forms not in their DOM (e.g. a line's source equation).
+            slots[slot] = previous['slots'][slot]
+    items = {}
+    teacher = doc.lookup('id', 'sheet-teacher')
+    if teacher is None:
+        return {'slots': slots, 'items': items}
+    ids = {el.attrs['data-id'] for el in public.walk() if el.has('ws-item') and 'data-id' in el.attrs}
+    sections = [el for el in teacher.children if isinstance(el, _Element) and el.has('ws-item')]
+    # Older files have only a collision-safe private ID; resolve it in the assembler's original order.
+    reserved = ids | {el.attrs.get('data-id') for el in sections if any(c.has('ws-t-list') for c in el.walk())}
+    legacy = {}
+    for item in previous['items']:
+        candidate = 't-' + item
+        while candidate in reserved:
+            candidate = 't-' + candidate
+        reserved.add(candidate)
+        legacy[candidate] = item
+    for section in sections:
+        item = section.attrs.get('data-solution-for') or legacy.get(section.attrs.get('data-id'))
+        if item not in ids:
+            continue
+        fields = [el for el in section.children if isinstance(el, _Element)]
+        answer = next((child.attrs['data-src'] for el in fields if el.has('ws-t-ans')
+                       for child in el.walk() if 'data-src' in child.attrs), None)
+        if answer is None:
+            continue
+        steps = [child.attrs['data-src'] for el in fields if el.has('ws-t-steps')
+                 for child in el.walk() if child.tag == 'li' and 'data-src' in child.attrs]
+        rubric = [child.attrs['data-src'] for el in fields if el.has('ws-t-rubric')
+                  for child in el.walk() if (child.attrs.get('data-src') or '').strip()]
+        items[item] = solution_public(answer, steps, rubric, previous['items'].get(item, {}).get('video'))
+    return {'slots': slots, 'items': items}
+
+
+def _edition_body(doc, *, with_hashes=False):
+    # Compare rendered content, not HTML quoting/attribute order or inter-item formatting.
+    def shape(el):
+        attrs = {k: v for k, v in el.attrs.items() if k != 'data-check-hash' or with_hashes}
+        return [el.tag, attrs, [shape(child) if isinstance(child, _Element) else child for child in el.children]]
+
+    root = next(el for el in doc.root.children if isinstance(el, _Element) and el.tag == 'html')
+    public = doc.lookup('id', 'sheet-src')
+    user_style = doc.lookup('id', 'sheet-user')
+    return [doc.inner(user_style) if user_style else '',
+            {k: v for k, v in root.attrs.items() if k in ('data-kind', 'data-columns', 'data-interactive', 'data-reveal', 'data-theme', 'data-accent')},
+            [shape(el) for el in public.children if isinstance(el, _Element)]]
+
+
+def _edition(source, student_doc, public):
+    # Hash the unsalted grading inputs, not the randomly salted verifier or the test's wrong examples.
+    answers = []
+    for el in source.lookup('id', 'sheet-src').walk():
+        if el.attrs.get('data-check-hash') and el.attrs.get('data-check'):
+            row = json.loads(el.attrs['data-check'])
+            answers.append((el.attrs.get('data-slot'), row.get('right'), row.get('accept', [])))
+    value = json.dumps([_edition_body(student_doc), answers, public], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return 'e-' + sha256(value.encode('utf-8'))[:32]
+
+
+def _replace_metadata(doc, metadata):
+    el = doc.lookup('name', 'sheet-build')
+    content = escape(json.dumps(metadata, ensure_ascii=False, separators=(',', ':')))
+    tag = f'<meta name="sheet-build" content="{content}">'
+    if el:
+        return doc.source[:el.start] + tag + doc.source[el.end:]
+    head = next((el for el in doc.root.walk() if el.tag == 'head'), None)
+    if head is None:
+        raise ValueError('조립 기록을 넣을 head 요소가 없습니다.')
+    return doc.source[:head.end] + tag + doc.source[head.end:]
+
+
+def plan_warning_counts(issues):
+    return dict(sorted(Counter(issue.code or 'uncoded' for issue in issues if issue.level == 'warning').items()))
+
+
 def document_html(renderer, build_meta, fonts):
     css = (ROOT / 'assets/engine/sheet.css').read_text(encoding='utf-8')
     js = (ROOT / 'assets/engine/sheet.js').read_text(encoding='utf-8')
@@ -1300,7 +1486,7 @@ def document_html(renderer, build_meta, fonts):
     private = renderer.render_teacher()
     interactive = f' data-interactive="1" data-reveal="{escape(renderer.reveal_policy)}"' if renderer.interactive else ''
     salt = f'<meta name="sheet-salt" content="{escape(renderer.salt)}">\n' if renderer.interactive else ''
-    reveal_tag = (f'<script type="application/octet-stream" id="sheet-reveal">{reveal(renderer.salt, renderer.reveal_data)}</script>\n'
+    reveal_tag = (_reveal_tag(renderer.salt, renderer.reveal_data) + '\n'
                   if renderer.interactive and renderer.reveal_policy in ('시도 후', '바로') else '')
     return (f'<!doctype html>\n<html lang="ko" data-sheet="1" data-role="teacher" data-kind="{renderer.kind}" '
             f'data-columns="{renderer.columns}" data-answers="on"{interactive} data-theme="{escape(renderer.theme)}" '
@@ -1439,8 +1625,11 @@ def cmd_build(folder: Path, force=False) -> int:
     renderer = Renderer(data, folder, warnings)
     try:
         teacher_text = document_html(renderer, metadata, font_css)
-        teacher_data = teacher_text.encode('utf-8')
-        student_data = strip_teacher(teacher_text).encode('utf-8')
+        teacher_doc = _Document(teacher_text)
+        student_doc = _Document(strip_teacher(teacher_text))
+        metadata['edition'] = _edition(teacher_doc, student_doc, renderer.reveal_data if renderer.interactive else None)
+        teacher_data = _replace_metadata(teacher_doc, metadata).encode('utf-8')
+        student_data = _replace_metadata(student_doc, metadata).encode('utf-8')
         answers = answer_table_from_html(teacher_text)
     except ValueError as error:
         print(f'조립 오류: {error}')
@@ -1451,6 +1640,7 @@ def cmd_build(folder: Path, force=False) -> int:
     warnings = list(dict.fromkeys(warnings))
     record = {**metadata, 'teacher': file_record(teacher, teacher_data), 'student': file_record(student, student_data),
               'fonts': {'embedded': bool(font_bytes), 'bytes': font_bytes},
+              'plan_warnings': plan_warning_counts(issues),
               'warnings': [f'{i.path}: {i.message}' for i in issues if i.level == 'warning'] + warnings}
     record_path = manifest_path(folder)
     record_path.parent.mkdir(exist_ok=True)
@@ -1467,6 +1657,58 @@ def cmd_build(folder: Path, force=False) -> int:
     return 0
 
 
+def _derive_documents(source, previous_student):
+    # Validate the saved teacher DOM before interpreting any of its metadata.
+    student = strip_teacher(source)
+    doc = _Document(source)
+    root = next(el for el in doc.root.walk() if el.tag == 'html')
+    published = 'data-interactive' in root.attrs and root.attrs.get('data-reveal', '시도 후') in ('시도 후', '바로')
+    salt = doc.metadata('sheet-salt')
+    public = None
+    old = doc.lookup('id', 'sheet-reveal')
+    if published:
+        if not salt:
+            raise ValueError('공개 자료를 만들 salt가 없습니다.')
+        public = _rebuild_reveal(doc, _read_reveal(doc, salt))
+        if old is not None:
+            source = source[:old.body] + reveal(salt, public) + source[old.end:]
+        else:
+            script = doc.lookup('id', 'sheet-js')
+            if script is None:
+                raise ValueError('활동지 엔진 요소를 찾을 수 없습니다.')
+            source = source[:script.start] + _reveal_tag(salt, public) + '\n' + source[script.start:]
+    elif old is not None:
+        source = source[:old.start] + source[source.index('>', old.end) + 1:]
+    if source != doc.source:
+        doc = _Document(source)
+        student = strip_teacher(source)
+    student_doc = _Document(student)
+    metadata = json.loads(doc.metadata('sheet-build') or '{}')
+    if not isinstance(metadata, dict):
+        raise ValueError('조립 메타데이터가 올바르지 않습니다.')
+    edition = _edition(doc, student_doc, public)
+    if previous_student is not None:
+        prior = _Document(previous_student)
+        # Browser-generated editions and legacy source IDs remain valid for unchanged content.
+        try:
+            prior_meta = json.loads(prior.metadata('sheet-build') or '{}')
+            same = (prior.lookup('id', 'sheet-src') is not None and
+                    _edition_body(prior, with_hashes=True) == _edition_body(student_doc, with_hashes=True) and
+                    (not published or _read_reveal(prior, prior.metadata('sheet-salt')) == public))
+            if same and isinstance(prior_meta, dict):
+                if isinstance(prior_meta.get('edition'), str) and prior_meta['edition']:
+                    edition = prior_meta['edition']
+                elif metadata.get('source_sha256') and prior_meta.get('source_sha256') == metadata['source_sha256']:
+                    edition = None  # Keep the legacy edition fallback for this unchanged pair.
+        except (ValueError, StopIteration):
+            pass  # An invalid previous student copy is replaced, never used as authority.
+    if edition:
+        metadata['edition'] = edition
+    else:
+        metadata.pop('edition', None)
+    return _replace_metadata(doc, metadata), _replace_metadata(student_doc, metadata), edition
+
+
 def cmd_derive(teacher: Path) -> int:
     suffix = TEACHER_SUFFIX + '.html'
     if not teacher.name.endswith(suffix) or not teacher.name.removesuffix(suffix):
@@ -1477,7 +1719,12 @@ def cmd_derive(teacher: Path) -> int:
     student = folder / (teacher.name.removesuffix(suffix) + '.html')
     source = teacher.read_text(encoding='utf-8-sig')
     try:
-        payload = strip_teacher(source).encode('utf-8')
+        try:
+            previous_student = student.read_text(encoding='utf-8-sig')
+        except (FileNotFoundError, UnicodeError):
+            previous_student = None
+        refreshed, derived, edition = _derive_documents(source, previous_student)
+        payload = derived.encode('utf-8')
         answers = answer_table_from_html(source)
     except ValueError as error:
         print(f'오류: {error}')
@@ -1485,11 +1732,17 @@ def cmd_derive(teacher: Path) -> int:
         return 1
     record = load_manifest(folder)
     teacher_entry = record.get('teacher')
+    if refreshed != source:
+        atomic_write(teacher, refreshed.encode('utf-8'))
     atomic_write(student, payload)
     update_answer_table(folder, answers)
     if isinstance(teacher_entry, dict) and teacher_entry.get('file') == teacher.name:
         # Keep the original teacher hash so a later build still protects the edit.
         record['student'] = file_record(student, payload)
+        if edition is not None:
+            record['edition'] = edition
+        else:
+            record.pop('edition', None)
         atomic_write(manifest_path(folder), json_bytes(record))
     else:
         print('경고: 일치하는 build.json이 없어 조립 기록은 갱신하지 않았습니다.')

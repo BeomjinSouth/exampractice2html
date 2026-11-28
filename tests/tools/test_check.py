@@ -105,13 +105,17 @@ class CheckIntegrationTest(unittest.TestCase):
         folder.mkdir(parents=True, exist_ok=True)
         data = {'meta': {'title': '채움 검사', 'kind': '수업', 'interactive': True, 'reveal': '바로', 'sync': False},
                 'items': [{'id': 'q1', 'blocks': [{'type': 'flow',
-                           'nodes': ['입력', '{{|$12345678901234567890$}}', '결과']}]}]}
+                           'nodes': ['입력', '{{|$12345678901234567890$}}', '결과']},
+                           {'type': 'answer', 'rows': [{'label': '까닭', 'answer': '두 식을 비교한 예시', 'lines': 3}]}]}],
+                'teacher': {'solutions': [{'item': 'q1', 'answer': '풀이의 답', 'steps': ['표에서 값을 읽는다.'],
+                                           'rubric': ['근거를 썼는가?']}]}}
         renderer = sheet_build.Renderer(data, folder, [])
         teacher = sheet_build.document_html(renderer, {}, '')
         table = sheet_build.answer_table_from_html(teacher)
         student = sheet_build.strip_teacher(teacher).replace(
             '<style id="sheet-user"></style>',
-            '<style id="sheet-user">#sheet-flow .ws-flow-node {width:40px;overflow:hidden;white-space:nowrap}</style>')
+            '<style id="sheet-user">#sheet-flow .ws-flow-node {width:40px;overflow:hidden;white-space:nowrap}'
+            '#sheet-flow .ws-solution {max-height:12px;overflow:hidden}</style>')
         path = folder / '학생.html'
         path.write_text(student, encoding='utf-8')
         out = folder / '검사'
@@ -125,8 +129,61 @@ class CheckIntegrationTest(unittest.TestCase):
             self.assertEqual(browser.cdp.evaluate('sheet.values()'), {})
         self.assertGreater(info['filled_screen']['checked_items'], 0)
         self.assertGreater(info['filled_screen']['revealed_items'], 0)
-        self.assertTrue(info['filled_screen']['clipped'])
+        self.assertEqual(info['filled_screen']['solution_items'], 1)
+        self.assertEqual(info['filled_screen']['compare_items'], 1)
+        self.assertIn('q1', info['filled_screen']['clipped'])
         self.assertIn('filled-screen-clipped', [problem['code'] for problem in problems])
+
+    def test_pen_print_detects_opaque_layers_and_missing_ink(self):
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            self.skipTest('PyMuPDF 없음')
+        data = {'meta': {'title': '펜 인쇄 검사', 'kind': '수업', 'reveal': '없음', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [
+                    {'type': 'figure', 'width_mm': 35, 'pen': True,
+                     'svg': '<svg viewBox="0 0 30 20"><path d="M3 3H27V17H3Z" fill="none" stroke="black"/></svg>'},
+                    {'type': 'grid', 'mode': 'square', 'cols': 5, 'rows': 5, 'unit_mm': 5, 'pen': True},
+                    {'type': 'answer', 'rows': [{'label': '그림', 'answer': '예시', 'kind': 'draw', 'height_mm': 25}]},
+                ]}]}
+        # Known transparent print layer: the detector must work without relying on engine CSS.
+        # Simulate the same test stroke as SVG on print, leaving the actual canvas for screen input.
+        fixture = '''<script>sheet.ready.then(() => {
+          for (const el of document.querySelectorAll('figure[data-pen], .ws-ans[data-kind="draw"]')) {
+            el.insertAdjacentHTML('beforeend', '<svg class="test-ink ws-pen-ink" viewBox="0 0 100 100" preserveAspectRatio="none"><path d="M15 25L50 75L85 35" fill="none" stroke="black" stroke-width="2"/></svg>');
+          }
+          window.addEventListener('beforeprint', () => {
+            const values = sheet.values();
+            for (const ink of document.querySelectorAll('.test-ink')) {
+              ink.classList.toggle('test-stroked', !!values[ink.parentElement.dataset.slot]?.strokes?.length);
+            }
+          });
+        });</script>'''
+        css = '''.test-ink {display:none!important}
+        @media print {
+          #sheet-pages canvas.ws-pen, #sheet-pages .ws-pen-ink:not(.test-ink) {display:none!important}
+          #sheet-pages .test-ink {position:absolute;inset:0;width:100%;height:100%}
+          #sheet-pages .test-ink {display:block!important}
+          #sheet-pages .test-ink:not(.test-stroked) path {visibility:hidden}
+        }'''
+        for name, injected, expected in (
+                ('투명', '', 0),
+                ('흰색', '@media print {#sheet-pages .test-ink {background:white}}', 1),
+                ('획누락', '@media print {#sheet-pages .test-ink path {visibility:hidden!important}}', 1)):
+            with self.subTest(name=name):
+                folder = self.run_root / name
+                folder.mkdir()
+                teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+                student = sheet_build.strip_teacher(teacher).replace('</head>', f'<style>{css}{injected}</style></head>')
+                student = student.replace('</body>', fixture + '</body>')
+                self.make_case(name, teacher, student)
+                sheet_build.update_answer_table(folder, sheet_build.answer_table_from_html(teacher))
+                codes = self.inspect(folder, expected)
+                self.assertEqual('pen-covers-content' in codes, name == '흰색')
+                self.assertEqual('pen-print-missing' in codes, name == '획누락')
+                report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+                self.assertEqual(len(report['student']['print_pen']), 3)
+                self.assertEqual(len(report['interactive_check']['filled_print_pen']), 3)
 
     def test_snapshot_tick_labels_are_at_least_six_points_in_pdf(self):
         try:
@@ -344,6 +401,8 @@ class CheckBoundaryTest(unittest.TestCase):
         protocol, problems = FakeInteractiveProtocol(reveal='없음', overflow=1), []
         info, files, pdf = sheet_check._interactive_check(protocol, out, table, problems)
         self.assertEqual(info['grading'], 'skipped-reveal-none')
+        self.assertEqual(info['grading_tested'], 0)
+        self.assertEqual(info['filled_inputs']['from_answer_table'], 1)
         self.assertFalse(any('.map(row =>' in e for e in protocol.expressions))
         self.assertTrue(any('for (const row of' in e for e in protocol.expressions))
         self.assertEqual(len(files), 3)
@@ -382,7 +441,8 @@ class CheckBoundaryTest(unittest.TestCase):
         table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
         protocol, problems = FakeInteractiveProtocol(), []
         info, _, _ = sheet_check._interactive_check(protocol, out, table, problems)
-        self.assertEqual(info['filled_inputs'], {'auto': 1, 'open_box': 1, 'open_blank': 0, 'draw': 1, 'name': 1})
+        self.assertEqual(info['filled_inputs'], {'from_answer_table': 1, 'open_box': 1, 'open_blank': 0, 'draw': 1, 'name': 1})
+        self.assertEqual(info['grading_tested'], 1)
         self.assertTrue(info['filled_restored'])
         self.assertIn(('Page.reload', {'ignoreCache': False}), protocol.calls)
         fill = next(e for e in protocol.expressions if 'for (const row of' in e)
@@ -592,6 +652,30 @@ class DeliveryGateTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn('설치된 스킬과 다른 엔진으로 조립됐습니다', output)
         self.assertNotIn('전달 문안 초안', output)
+
+    def test_plan_warnings_block_delivery_until_each_code_has_a_reason(self):
+        from sheet_plan import Issue
+        warnings = [Issue('warning', '$', '문구 확인', '', code)
+                    for code in ('textbook-expression', 'textbook-expression', 'term-beyond-grade')]
+
+        def status():
+            with patch('sheet_plan.load_plan', return_value=({}, b'{}', warnings)), contextlib.redirect_stdout(io.StringIO()) as output:
+                result = sheet_check.cmd_status(self.folder)
+            return result, output.getvalue()
+
+        result, output = status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('원고 경고 절이 없습니다', output)
+        original = self.review.read_text(encoding='utf-8')
+        review = original + '## 원고 경고\n- `textbook-expression`: 그대로 둠 — 수업에서 정의한 표현이다.\n'
+        self.review.write_text(review + '- `term-beyond-grade`: 고침 —\n', encoding='utf-8')
+        result, output = status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('term-beyond-grade의 판단과 까닭이 없습니다', output)
+        self.review.write_text(review + '- `term-beyond-grade`: 고침 — 그림에서만 쓰도록 바꿨다.\n', encoding='utf-8')
+        result, output = status()
+        self.assertEqual(result, 0, output)
+        self.assertEqual(output.count('원고 경고: term-beyond-grade 1건, textbook-expression 2건'), 2)
 
     def test_delivery_disclosure_follows_policy_and_actual_markup(self):
         for policy, reveal, hashes, expected in (

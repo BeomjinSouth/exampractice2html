@@ -1384,7 +1384,9 @@ def engine_sha256():
     """조립에 영향을 주는 설치본의 경로와 파일 내용을 함께 지문으로 만든다."""
     paths = [path for directory in ('assets/engine', 'assets/templates')
              for path in (ROOT / directory).rglob('*') if path.is_file()]
-    paths += [ROOT / name for name in ('assets/kit/blocks.json', 'scripts/sheet_build.py',
+    # plan 규칙과 그 자료(학년 용어·교과서 표현)가 바뀌어도 예전 검사를 그대로 믿지 않게 함께 넣는다.
+    paths += [ROOT / name for name in ('assets/kit/blocks.json', 'assets/kit/terms.json',
+              'assets/kit/expressions.json', 'scripts/sheet_build.py',
               'scripts/sheet_markup.py', 'scripts/sheet_answer.py', 'scripts/sheet_plan.py',
               'scripts/sheet_common.py', 'scripts/sheet_sync.py')]
     digest = hashlib.sha256()

@@ -34,9 +34,28 @@ def wrap_row(parts):
     return (rendered if len(parts) == 1 else f'<mrow>{rendered}</mrow>', plain)
 
 
+def fraction_term(text, *, denominator=False):
+    """Group a term if it has an operator outside an already grouped atom."""
+    text = text.strip()
+    # A denominator product must not look like a factor after the fraction.
+    if denominator and re.match(r'[+−-]?[0-9.]+\s*[π√]', text):
+        return f'({text})'
+    depth = 0
+    for i, char in enumerate(text):
+        if char in '([':
+            depth += 1
+        elif char in ')]':
+            depth -= 1
+        elif depth == 0 and (char in '/×÷⋅·*=<>≤≥≠±,∽≈≡' or (i and char in '+−-')):
+            if char == ',' and re.fullmatch(r'[+−-]?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?', text):
+                continue
+            return f'({text})'
+    return text
+
+
 class MathParser:
-    def __init__(self, source):
-        self.source, self.pos = source, 0
+    def __init__(self, source, *, answer=False):
+        self.source, self.pos, self.answer = source, 0, answer
 
     @property
     def next(self):
@@ -47,8 +66,13 @@ class MathParser:
         raise MarkupError(f'수식 ${self.source}$ · {index + 1}번째 글자: {message}')
 
     def spaces(self):
-        while self.next.isspace():
-            self.pos += 1
+        while self.next:
+            if self.next.isspace():
+                self.pos += 1
+            elif match := re.match(r'\\(?:left(?=\s*[(|])|right(?=\s*[)|]))', self.source[self.pos:]):
+                self.pos += match.end()
+            else:
+                break
 
     def group(self, opening='{', close='}'):
         self.spaces()
@@ -81,6 +105,9 @@ class MathParser:
         return self.prefix_sign(part[1]) if part[0] in ('<mo>+</mo>', '<mo>−</mo>') else part
 
     def command(self, start):
+        if self.next in (',', ' '):
+            self.pos += 1
+            return '<mspace width="0.1667em"></mspace>', ''
         match = LETTERS.match(self.source, self.pos)
         if not match:
             self.fail('명령 이름이 필요합니다', start)
@@ -125,19 +152,29 @@ class MathParser:
                     + ''.join(rows) + '</mtable></mrow>', '{' + '; '.join(texts))
         if name in ('frac', 'dfrac'):
             a, b = self.group(), self.group()
-            return f'<mfrac>{a[0]}{b[0]}</mfrac>', f'({a[1]})/({b[1]})'
+            plain = (f'{fraction_term(a[1])}/{fraction_term(b[1], denominator=True)}'
+                     if self.answer else f'({a[1]})/({b[1]})')
+            return f'<mfrac>{a[0]}{b[0]}</mfrac>', plain
         if name == 'sqrt':
             self.spaces()
             index = self.group('[', ']') if self.next == '[' else None
             rendered, plain = self.group()
             if index:
                 return f'<mroot>{rendered}{index[0]}</mroot>', f'√[{index[1]}]({plain})'
-            return f'<msqrt>{rendered}</msqrt>', '√' + (plain if len(plain) == 1 else f'({plain})')
+            if self.answer:
+                plain = plain.strip()
+                simple = re.fullmatch(r'[0-9]+', plain)
+            else:
+                simple = len(plain) == 1
+            return f'<msqrt>{rendered}</msqrt>', '√' + (plain if simple else f'({plain})')
+        if name == 'mathrm':
+            rendered, plain = self.group()
+            return f'<mstyle mathvariant="normal">{rendered}</mstyle>', plain
         if name in ('overline', 'overarc', 'overgroup'):
             rendered, plain = self.group()
             if name == 'overline':
-                return f'<mrow class="seg">{rendered}</mrow>', plain + '̅'
-            return f'<mover>{rendered}<mo stretchy="true">⏜</mo></mover>', plain + '⌒'
+                return f'<mrow class="seg">{rendered}</mrow>', plain if self.answer else plain + '̅'
+            return f'<mover>{rendered}<mo stretchy="true">⏜</mo></mover>', plain if self.answer else plain + '⌒'
         if name in ('text', 'mathit'):
             self.spaces()
             if self.next != '{':
@@ -233,8 +270,24 @@ class MathParser:
                     if op in scripts:
                         markup, text = scripts[op]
                         rendered += markup
-                        plain += text.translate(translation) if all(ord(c) in translation for c in text) else f'{op}({text})'
+                        if self.answer:
+                            if op == '^' and text == '°':
+                                plain += text
+                            else:
+                                part = fraction_term(text)
+                                plain += op + part
+                        else:
+                            plain += text.translate(translation) if all(ord(c) in translation for c in text) else f'{op}({text})'
                 base = f'<{tag}>{rendered}</{tag}>', plain
+            if self.answer and result:
+                # Adjacent factors must not turn into digits of a denominator or radicand.
+                html_before, before = result[-1]
+                html_now, now = base
+                if (html_before.startswith('<mfrac>') and re.match(r'[0-9√]', now)
+                        or html_before.startswith('<msqrt>') and re.match(r'[0-9]', now)):
+                    result[-1] = html_before, f'({before})'
+                elif html_now.startswith('<mfrac>') and re.search(r'[0-9π)]$', before):
+                    base = html_now, f'({now})'
             result.append(base)
 
     def parse(self):
@@ -310,7 +363,7 @@ def join_inline_parts(parts):
     return ''.join(rendered), ''.join(part[1] for part in parts)
 
 
-def inspect_markup(source, *, interactive=False, table_blank_mm=None):
+def inspect_markup(source, *, interactive=False, table_blank_mm=None, answer=False):
     """Parse once; return rendered markup and the facts plan needs to check."""
     if NEWLINE.search(source):
         raise MarkupError('한 필드에는 줄을 바꾸지 마세요.')
@@ -343,7 +396,7 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
                     pos += 2 if at('\\$') or at('\\\\') else 1
                 if not at('$'):
                     fail('$', start)
-                parts.append((*MathParser(source[begin:pos]).parse(), 'math', bold))
+                parts.append((*MathParser(source[begin:pos], answer=answer).parse(), 'math', bold))
                 pos += 1
                 outside_math.append(' ')
             elif c == '*' and at('*'):

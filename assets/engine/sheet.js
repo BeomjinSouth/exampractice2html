@@ -16,13 +16,36 @@
     const [markup, plain] = joinParts(parts);
     return [parts.length === 1 ? markup : `<mrow>${markup}</mrow>`, plain];
   }
+  function fractionTerm(text, denominator = false) {
+    text = text.trim();
+    if (denominator && /^[+−-]?[0-9.]+\s*[π√]/u.test(text)) return `(${text})`;
+    let depth = 0;
+    for (const [i, c] of Array.from(text).entries()) {
+      if ('(['.includes(c)) depth++;
+      else if (')]'.includes(c)) depth--;
+      else if (depth === 0 && ('/×÷⋅·*=<>≤≥≠±,∽≈≡'.includes(c) || (i && '+−-'.includes(c)))) {
+        if (c === ',' && /^[+−-]?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?$/.test(text)) continue;
+        return `(${text})`;
+      }
+    }
+    return text;
+  }
   class MathParser {
-    constructor(source) { this.source = Array.from(source); this.pos = 0; }
+    constructor(source, answer = false) { this.source = Array.from(source); this.pos = 0; this.answer = answer; }
     get next() { return this.source[this.pos] ?? ''; }
     fail(message, at = this.pos) {
       throw new Error(`수식 $${this.source.join('')}$ · ${at + 1}번째 글자: ${message}`);
     }
-    spaces() { while (/[\p{White_Space}\x1c-\x1f]/u.test(this.next)) this.pos++; }
+    spaces() {
+      while (this.next) {
+        if (/[\p{White_Space}\x1c-\x1f]/u.test(this.next)) this.pos++;
+        else if (this.next === '\\') {
+          const match = /^\\(?:left(?=\s*[(|])|right(?=\s*[)|]))/.exec(this.source.slice(this.pos).join(''));
+          if (!match) break;
+          this.pos += match[0].length;
+        } else break;
+      }
+    }
     group(open = '{', close = '}') {
       this.spaces();
       if (this.next !== open) this.fail(`${open}가 필요합니다`);
@@ -51,6 +74,10 @@
       const start = this.pos;
       const c = this.source[this.pos++];
       if (c === '\\') {
+        if (this.next === ',' || this.next === ' ') {
+          this.pos++;
+          return ['<mspace width="0.1667em"></mspace>', ''];
+        }
         const begin = this.pos;
         while (/[A-Za-z]/.test(this.next)) this.pos++;
         const name = this.source.slice(begin, this.pos).join('');
@@ -89,19 +116,26 @@
         }
         if (name === 'frac' || name === 'dfrac') {
           const a = this.group(), b = this.group();
-          return [`<mfrac>${a[0]}${b[0]}</mfrac>`, `(${a[1]})/(${b[1]})`];
+          const plain = this.answer ? `${fractionTerm(a[1])}/${fractionTerm(b[1], true)}` : `(${a[1]})/(${b[1]})`;
+          return [`<mfrac>${a[0]}${b[0]}</mfrac>`, plain];
         }
         if (name === 'sqrt') {
           this.spaces();
           const index = this.next === '[' ? this.group('[', ']') : null;
           const value = this.group();
-          return index ? [`<mroot>${value[0]}${index[0]}</mroot>`, `√[${index[1]}](${value[1]})`]
-            : [`<msqrt>${value[0]}</msqrt>`, `√${Array.from(value[1]).length === 1 ? value[1] : `(${value[1]})`}`];
+          if (index) return [`<mroot>${value[0]}${index[0]}</mroot>`, `√[${index[1]}](${value[1]})`];
+          const body = this.answer ? value[1].trim() : value[1];
+          const simple = this.answer ? /^[0-9]+$/.test(body) : Array.from(body).length === 1;
+          return [`<msqrt>${value[0]}</msqrt>`, `√${simple ? body : `(${body})`}`];
+        }
+        if (name === 'mathrm') {
+          const [markup, plain] = this.group();
+          return [`<mstyle mathvariant="normal">${markup}</mstyle>`, plain];
         }
         if (['overline', 'overarc', 'overgroup'].includes(name)) {
           const [markup, plain] = this.group();
-          return name === 'overline' ? [`<mrow class="seg">${markup}</mrow>`, plain + '̅']
-            : [`<mover>${markup}<mo stretchy="true">⏜</mo></mover>`, plain + '⌒'];
+          return name === 'overline' ? [`<mrow class="seg">${markup}</mrow>`, this.answer ? plain : plain + '̅']
+            : [`<mover>${markup}<mo stretchy="true">⏜</mo></mover>`, this.answer ? plain : plain + '⌒'];
         }
         if (name === 'text' || name === 'mathit') {
           this.spaces();
@@ -179,10 +213,21 @@
             : sup ? `<msup>${base[0]}${sup[0]}</msup>` : `<msub>${base[0]}${sub[0]}</msub>`;
           let plain = base[1];
           for (const [arg, table, prefix] of [[sub, subs, '_'], [sup, supers, '^']]) {
-            if (arg) plain += Array.from(arg[1]).every(c => Object.hasOwn(table, c))
+            if (!arg) continue;
+            if (this.answer) plain += prefix === '^' && arg[1] === '°' ? '°' : prefix + fractionTerm(arg[1]);
+            else plain += Array.from(arg[1]).every(c => Object.hasOwn(table, c))
               ? Array.from(arg[1], c => table[c]).join('') : `${prefix}(${arg[1]})`;
           }
           base = [markup, plain];
+        }
+        if (this.answer && result.length) {
+          const [htmlBefore, before] = result.at(-1), [htmlNow, now] = base;
+          if ((htmlBefore.startsWith('<mfrac>') && /^[0-9√]/u.test(now)) ||
+              (htmlBefore.startsWith('<msqrt>') && /^[0-9]/.test(now))) {
+            result[result.length - 1] = [htmlBefore, `(${before})`];
+          } else if (htmlNow.startsWith('<mfrac>') && /[0-9π)]$/u.test(before)) {
+            base = [htmlNow, `(${now})`];
+          }
         }
         result.push(base);
       }
@@ -221,7 +266,7 @@
     return [rendered.join(''), parts.map(part => part[1]).join('')];
   }
 
-  function renderMarkup(source, onBlank) {
+  function parseMarkup(source, onBlank, answer = false) {
     if (/[\r\n\p{Zl}\p{Zp}]/u.test(source)) throw new Error('한 필드에는 줄을 바꾸지 마세요.');
     let pos = 0;
     const at = token => source.startsWith(token, pos);
@@ -240,7 +285,7 @@
             pos++;
           }
           if (!at('$')) fail('$', start);
-          parts.push([...new MathParser(source.slice(begin, pos++)).parse(), 'math', bold]);
+          parts.push([...new MathParser(source.slice(begin, pos++), answer).parse(), 'math', bold]);
         } else if (c === '*' && at('*')) {
           pos++;
           for (const part of sequence(['**', ...stops], inBlank, true)) parts.push(part);
@@ -293,8 +338,10 @@
       }
       return parts;
     }
-    return joinInlineParts(sequence())[0];
+    return joinInlineParts(sequence());
   }
+  const renderMarkup = (source, onBlank) => parseMarkup(source, onBlank)[0];
+  const answerMarkup = source => parseMarkup(source, undefined, true);
 
   const root = document.documentElement;
   const teacher = root.dataset.role === 'teacher';
@@ -1184,7 +1231,7 @@
   if (root.dataset.interactive === '1') window.__sheetCore = {
     attach(extension) { solve = extension; root.dataset.view = 'a4'; },
     items: () => studentItems, teacherItems: () => teacherItems, buildMeta,
-    layout, refreshFontLayout, renderMarkup, serialize, download, fileName, drawRatio,
+    layout, refreshFontLayout, renderMarkup, answerMarkup, serialize, download, fileName, drawRatio,
     addToolbar(...nodes) { toolbar.append(...nodes); }, button, commitDraft,
     stopEditing() { if (edit) setEdit(false); },
     syncAnswerButton() { answerButton?.setAttribute('aria-pressed', String(answersOn())); },

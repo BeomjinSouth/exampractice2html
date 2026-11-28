@@ -20,7 +20,23 @@
   const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
   const clone = value => structuredClone(value);
   const textValue = v => typeof v === 'string' || Number.isFinite(v);
-  const units = 'cm2 km2 cm3 마리 개월 시간 그루 송이 cm mm km kg ml m2 m3 원 개 명 권 장 쪽 번 회 배 살 세 점 일 년 분 초 시 도 칸 줄 대 m g l ° %'.split(' ');
+  const units = 'cm2 km2 cm3 마리 개월 시간 그루 송이 cm mm km kg ml m2 m3 원 개 명 권 장 쪽 번 회 배 살 세 점 일 년 분 초 시 도 칸 줄 대 m g l ° % 가지 쌍 켤레 자루 벌 조각 묶음 상자 봉지 바퀴 층 곳 군데 dl'.split(' ');
+  const unitSuffix = new RegExp(`(${[...units].sort((a,b) => b.length - a.length).join('|')}|[가-힣]{1,3})$`, 'u');
+  const fractionForms = ['기약분수', '분수', '자유'];
+  const fractionRequest = /(기약분수|분수)\s*로|약분\s*하/gu;
+  const formOptional = /지\s*(?:않|말)|(?:이|가)?\s*아니어도|안\s*(?:해도|하여도|써도|나타내도)|필요\s*없/u;
+  function fraction_requirement(texts) {
+    const forms = new Set();
+    for (const text of texts) for (const clause of text.split(/[.!?。;\n]/u)) {
+      const requests = [...clause.matchAll(fractionRequest)];
+      requests.forEach((request, i) => {
+        if (!formOptional.test(clause.slice(request.index + request[0].length, requests[i+1]?.index))) {
+          forms.add(request[1] || '기약분수');
+        }
+      });
+    }
+    return fractionForms.find(form => forms.has(form)) ?? '자유';
+  }
   const norm = s => String(s).normalize('NFKC').replace(/[−‒–—―]/g, '-').replace(/⁄/g, '/')
     .replace(/[\p{White_Space}\x1c-\x1f]/gu, '').toLowerCase().replace(/[.。]+$/u, '');
   const abs = n => n < 0n ? -n : n;
@@ -39,13 +55,20 @@
     if (left && right && !rest.length && !/[<>≤≥≠]/u.test(text)) return [...new Set([text, `${right}=${left}`])];
     return text ? [text] : [];
   }
-  function numericDetails(s) {
-    if (!textValue(s)) return null;
-    let t = norm(s).replace(/^[a-z]=/, '');
-    const unit = units.find(u => t.length > u.length && t.endsWith(u)) ?? '';
-    if (unit) t = t.slice(0, -unit.length);
-    if (t.startsWith('(') && t.endsWith(')')) t = t.slice(1, -1);
-    t = t.replace(/^\+/, '').replace(/pi|파이/g, 'π');
+  function withUnit(value, parse) {
+    if (!textValue(value)) return null;
+    let text = norm(value).replace(/^[a-z]=/, '').replace(/^\+/, '');
+    if (parse === numberDetail) text = text.replaceAll('파이', 'π');
+    const bare = parse(text);
+    if (bare) return [...bare, ''];
+    const match = unitSuffix.exec(text);
+    if (!match || ['파이', '루트'].includes(match[0])) return null;
+    const parts = parse(text.slice(0, match.index));
+    return parts && [...parts, match[0] === '도' ? '°' : match[0]];
+  }
+  function numberDetail(t) {
+    if (t.startsWith('(') && t.endsWith(')')) t = t.slice(1, -1).replace(/^\+/, '');
+    t = t.replaceAll('pi', 'π');
     let pi = '';
     if (t.endsWith('π')) {
       pi = 'π'; t = t.slice(0, -1);
@@ -65,7 +88,11 @@
       n = fraction(p, q);
       form = gcd(p, q) === 1n ? 'reduced' : 'unreduced';
     }
-    return n == null ? null : [n + pi, unit === '도' ? '°' : unit, form];
+    return n == null ? null : [n + pi, form];
+  }
+  function numericDetails(value) {
+    const parts = withUnit(value, numberDetail);
+    return parts && [parts[0], parts[2], parts[1]];
   }
   function number_parts(s) { return numericDetails(s)?.slice(0, 2) ?? null; }
   const num = s => number_parts(s)?.[0] ?? null;
@@ -85,7 +112,8 @@
     const particles = '(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?';
     for (const unit of [...units].sort((a, b) => b.length - a.length)) {
       if (unit === '도' || (unit === '일' && /^일\s*(?:때|경우|수(?:\s|$)|지|까|것(?:\s|$))/u.test(text)) ||
-          (unit === '분' && /^분\s*의/u.test(text)) || (unit === '점' && /^점\s*에서\s*(?:만나|만난|만날|만났)/u.test(text))) continue;
+          (unit === '분' && /^분\s*의/u.test(text)) || (unit === '점' && /^점\s*에서\s*(?:만나|만난|만날|만났)/u.test(text)) ||
+          (unit === '가지' && /^가지\s*(?:말|않|못)/u.test(text))) continue;
       if (new RegExp(`^${unit}${particles}(?![\\p{L}\\p{N}_])`, 'u').test(text)) return unit;
     }
     return '';
@@ -96,89 +124,71 @@
     const inferred = parts.some(([, u]) => u) ? '' : unit;
     return [...new Set([...parts.map(([n]) => n), ...parts.filter(([, u]) => u || inferred).map(([n, u]) => `${n}@${u || inferred}`)])];
   }
-  function radicalParts(value) {
-    const match = /^(-?)([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))$/.exec(norm(value).replaceAll('루트', '√'));
-    if (!match) return null;
-    const [, sign, coefficient, radicand, grouped] = match, body = radicand || grouped;
-    const square = BigInt(coefficient || '1') ** 2n * BigInt(body);
-    return [`${sign}${coefficient}√${body}`, `square:${sign ? -square : square}`];
+  const rootPattern = String.raw`([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))`;
+  const rootNumerator = new RegExp(`^(-?)${rootPattern}(?:/([0-9]{1,128}))?$`);
+  const rootDenominator = new RegExp(String.raw`^(-?)([0-9]{1,128})/(?:${rootPattern}|\(${rootPattern}\))$`);
+  function radicalDetail(text) {
+    text = text.replaceAll('루트', '√');
+    const direct = rootNumerator.exec(text);
+    let sign, shape, top, bottom;
+    if (direct) {
+      const [, s, coefficient, bare, grouped, denominator] = direct, body = bare || grouped;
+      sign = s;
+      top = BigInt(coefficient || '1') ** 2n * BigInt(body);
+      bottom = BigInt(denominator || '1') ** 2n;
+      shape = `${sign}${coefficient}√${body}${denominator ? '/' + denominator : ''}`;
+    } else {
+      const inverse = rootDenominator.exec(text);
+      if (!inverse) return null;
+      const [, s, numerator, c1, r1, g1, c2, r2, g2] = inverse;
+      const coefficient = c1 || c2 || '', body = r1 || g1 || r2 || g2;
+      sign = s;
+      top = BigInt(numerator) ** 2n;
+      bottom = BigInt(coefficient || '1') ** 2n * BigInt(body);
+      shape = `${sign}${numerator}/${coefficient}√${body}`;
+    }
+    return bottom ? [shape, `square:${fraction(sign ? -top : top, bottom)}`] : null;
   }
+  const radicalParts = value => withUnit(value, radicalDetail);
   function writing_forms(kind, values, unit = '') {
-    if (kind === 'number') return number_forms(values, unit);
-    if (kind === 'radical') return values.flatMap(radicalParts);
+    if (kind === 'number') {
+      const forms = number_forms(values, unit);
+      return forms.length ? [...forms, ...values.map(v => `written:${norm(v)}`)] : [];
+    }
+    if (kind === 'radical') {
+      const parts = values.map(radicalParts);
+      if (parts.some(p => !p)) return [];
+      const inferred = parts.some(([, , u]) => u) ? '' : unit;
+      return [...new Set(parts.flatMap(([shape, square, u]) =>
+        [shape, square].flatMap(key => u || inferred ? [key, `${key}@${u || inferred}`] : [key])))];
+    }
     return values.map(norm);
   }
-  function writing_result(kind, value, matches, form = '', strict = false, checkUnit = false) {
-    if (value == null || value === '') return null;
-    if (kind === 'text') return !String(value).trim() ? null : text_candidates(value).some(matches) || 'review';
-    if (kind === 'radical') {
-      const parts = radicalParts(value);
-      return !!parts && (matches(parts[0]) || (matches(parts[1]) ? 'review' : false));
-    }
-    if (kind === 'number') {
-      const parts = numericDetails(value);
-      if (!parts) return false;
-      const [n, unit, written] = parts;
-      if (!matches(checkUnit && unit ? `${n}@${unit}` : n)) return false;
-      if (form === 'fraction') {
-        if (strict) return written === 'reduced';
-        if (written === 'unreduced') return 'review';
-      }
-      return true;
-    }
-    return null;
+  function writing_result(kind, value, matches, form = '', checkUnit = false) {
+    if (value == null || !String(value).trim()) return [null, ''];
+    if (kind === 'text') return [text_candidates(value).some(matches) || 'review', ''];
+    if (kind !== 'radical' && kind !== 'number') return [null, ''];
+    const parts = kind === 'radical' ? radicalParts(value) : numericDetails(value);
+    if (!parts) return [false, ''];
+    const [key, alternate, unit] = kind === 'radical' ? parts : [parts[0], parts[2], parts[1]];
+    const matchUnit = candidate => matches(checkUnit && unit ? `${candidate}@${unit}` : candidate);
+    const exact = matchUnit(key);
+    if (!exact && (kind === 'number' || !matchUnit(alternate))) return [false, ''];
+    if (unit && !checkUnit) return ['review', 'unit'];
+    if (kind === 'radical') return exact ? [true, ''] : ['review', 'radical'];
+    if (matches(`written:${norm(value)}`)) return [true, ''];
+    if (form === '기약분수' && alternate !== 'reduced') return [false, 'reduced'];
+    if (form === '분수' && !['reduced', 'unreduced'].includes(alternate)) return ['review', 'fraction'];
+    return [true, alternate === 'unreduced' ? 'reduce' : ''];
   }
   function input_mode(values) {
     const texts = values.map(norm);
     if (!texts.every(t => /^[0-9]+(?:\.[0-9]+)?$/.test(t))) return '';
     return texts.some(t => t.includes('.')) ? 'decimal' : 'numeric';
   }
-  const symbols = { times: '×', div: '÷', le: '≤', ge: '≥', ne: '≠', pi: 'π', circ: '°', angle: '∠',
-    triangle: '△', square: '□', perp: '⊥', parallel: '⫽', equiv: '≡', sim: '∽', pm: '±', approx: '≈',
-    cdot: '⋅', therefore: '∴', because: '∵', cdots: '⋯' };
   function plain(source) {
-    let i = 0;
-    function group() {
-      if (source[i] !== '{') return null;
-      i++;
-      return read(true);
-    }
-    function read(nested = false) {
-      let out = '';
-      while (i < source.length) {
-        if (source.startsWith('**', i)) { i += 2; continue; }
-        const degree = /^\^(?:\{\\circ\s*\}|\\circ(?![a-zA-Z])\s*)/.exec(source.slice(i));
-        if (degree) { i += degree[0].length; out += '°'; continue; }
-        const c = source[i++];
-        if (c === '}' && nested) break;
-        if (c === '{') { out += read(true); continue; }
-        if (c === '$' || c === '}' || c === '~') continue;
-        if (c !== '\\') { out += c; continue; }
-        const command = /^[a-zA-Z]+\s*/.exec(source.slice(i));
-        if (!command) {
-          const literal = source[i++];
-          if (literal && '$}{\\'.includes(literal)) out += literal;
-          continue;
-        }
-        i += command[0].length;
-        const name = command[0].trimEnd();
-        if (name === 'frac' || name === 'dfrac') {
-          const a = group();
-          while (source[i] && /\s/u.test(source[i])) i++;
-          const b = group();
-          out += (a ?? '') + (b == null ? '' : '/' + b);
-        } else if (name === 'sqrt') {
-          const index = /^\[([^\[\]]*)\]\s*/.exec(source.slice(i));
-          if (index) i += index[0].length;
-          const body = group() ?? '';
-          out += index ? `√[${plain(index[1])}](${body})` : /^[0-9]+$/.test(body) ? `√${body}` : `√(${body})`;
-        } else if (['sin', 'cos', 'tan'].includes(name)) out += name + ' ';
-        else if (name === 'quad') out += ' ';
-        else if (Object.hasOwn(symbols, name)) out += symbols[name];
-      }
-      return out;
-    }
-    return read();
+    try { return core.answerMarkup(String(source))[1].replaceAll('−', '-'); }
+    catch { return String(source); }
   }
   const snapValue = (v, snap) => Number((Math.round(v / snap) * snap).toFixed(6));
   const numericPart = (v, snap) => typeof v === 'number' && snap ? num(snapValue(v, snap)) : num(v);
@@ -275,7 +285,7 @@
   const decodeReveal = (salt, text) => JSON.parse(decoder.decode(xor(salt, unbase64(text))));
   // 계약 시험용 내부 표면. window.sheet의 학생 API와 분리한다.
   core.codec = Object.freeze({ norm, num, number_parts, inferred_unit, number_forms, input_mode, text_candidates,
-    plain, line, points, writing_forms, writing_result, sha256: hex, hash, encodeReveal, decodeReveal });
+    plain, line, points, fraction_requirement, writing_forms, writing_result, sha256: hex, hash, encodeReveal, decodeReveal });
 
   const salt = () => document.querySelector('meta[name="sheet-salt"]')?.content || '';
   const policy = root.dataset.reveal || '시도 후';
@@ -361,14 +371,18 @@
     return true;
   }
   function check(record) {
+    record.notice = '';
     if (!record.auto) return null;
     const { kind, el } = record, value = record.value ?? record.control?.initial;
     const matches = normalized => record.hashes.includes(hash(salt(), kind, normalized));
     if (value == null || value === '' || (Array.isArray(value) && !value.length)) return null;
     if (['text', 'number', 'radical'].includes(kind)) {
-      const form = writingShape(el).includes('fraction') ? 'fraction' : '';
-      return writing_result(kind, value, matches, form, record.item.dataset.reducedFractions === '1',
-        el.dataset.checkUnit === '1');
+      const data = record.item.dataset;
+      const form = (kind === 'number' && (writingShape(el).includes('fraction') || numericDetails(value)?.[0].includes('/')))
+        ? data.fractionForm ?? (data.reducedFractions === '1' ? '기약분수' : '') : '';
+      const [verdict, notice] = writing_result(kind, value, matches, form, el.dataset.checkUnit === '1');
+      record.notice = notice;
+      return verdict;
     }
     const normalized = normalize(kind, value, el);
     if (normalized == null && ['match','line','bars'].includes(kind)) return null;
@@ -443,6 +457,7 @@
       row.restoredDrawing = !!drawing?.strokes.length;
     }
   }
+  let sheetSymbols = '';
   function indexSlots() {
     records.clear();
     for (const item of core.items()) {
@@ -459,12 +474,26 @@
         if (!slotReveal.has(el)) slotReveal.set(el, Object.hasOwn(initialReveal.slots ?? {}, old) ? initialReveal.slots[old] : undefined);
         if (item.dataset.id === 'head' && old.startsWith('head.')) row.slot = old;
         else row.slot = el.dataset.slot = `${item.dataset.id}.${++i}`;
+        const previousKind = row.kind;
         row.kind = kind;
+        if (previousKind !== kind) row.control?.syncSymbols?.();
         row.hashes = (el.dataset.checkHash || '').split(',').filter(Boolean);
         row.auto = canGrade && automatic.has(kind) && row.hashes.length > 0;
         if (!row.auto) row.result = null;
         records.set(row.slot, row);
       }
+    }
+    const shapes = new Set([...records.values()].filter(row => ['number', 'radical'].includes(row.kind))
+      .flatMap(row => writingShape(row.el)));
+    for (const item of core.items()) {
+      if (item.querySelector('msqrt, mroot')) shapes.add('√');
+      if (all(item, 'math mi').some(node => node.textContent === 'π')) shapes.add('π');
+    }
+    const nextSymbols = [['π', 'π'], ['√', '√'], ['/', 'fraction']]
+      .filter(([, shape]) => shapes.has(shape)).map(([symbol]) => symbol).join('');
+    if (sheetSymbols !== nextSymbols) {
+      sheetSymbols = nextSymbols;
+      for (const row of records.values()) row.control?.syncSymbols?.();
     }
   }
   const values = () => Object.fromEntries([...records.values()].filter(r => r.value !== undefined).map(r => [r.slot, clone(r.value)]));
@@ -672,8 +701,9 @@
     function syncSymbols() {
       symbols?.remove();
       symbols = undefined;
-      for (const [symbol, label] of [['π', '파이'], ['√', '루트']]) {
-        if (!writingShape(el).includes(symbol)) continue;
+      if (!['number', 'radical'].includes(row.kind)) return;
+      for (const [symbol, label] of [['π', '파이'], ['√', '루트'], ['/', '분수 기호']]) {
+        if (!sheetSymbols.includes(symbol)) continue;
         if (!symbols) {
           symbols = solveOnly('span', 'ws-symbols');
           if (answerBox) el.append(symbols); else el.after(symbols);
@@ -1258,13 +1288,12 @@
       row.verdict.classList.toggle('ws-no', no);
       row.verdict.classList.toggle('ws-review', review);
       let message = ok ? '✓' : no ? '다시 생각해 봐요' : '';
-      if (review) {
-        if (row.kind === 'number') message = '기약분수로 나타냈는지 확인해 보세요.';
-        else if (row.kind === 'radical') message = '값은 같아요. 근호가 있는 꼴을 확인해 보세요.';
-        else message = '예상한 답과 달라요. 같은 뜻이면 선생님께 확인받아요.';
-      }
+      if (review) message = row.notice ? '확인 필요' : '예상한 답과 달라요. 같은 뜻이면 선생님께 확인받아요.';
+      const note = ({ reduce: '약분해 보세요', fraction: '분수로 나타내세요', reduced: '기약분수로 나타내세요',
+        unit: '단위를 확인해 보세요', radical: '값은 같아요. 근호가 있는 꼴을 확인해 보세요.' })[row.notice];
+      if (note && (ok || no || review)) message += ` · ${note}`;
       if (row.verdict.textContent !== message) row.verdict.textContent = message;
-      if (ok) row.verdict.setAttribute('aria-label', '맞았어요');
+      if (ok) row.verdict.setAttribute('aria-label', note ? `맞았어요. ${note}` : '맞았어요');
       else row.verdict.removeAttribute('aria-label');
     }
   }
@@ -1793,9 +1822,12 @@
   }
 
   function changedAnswer(el, source, html, options, blank) {
-    const answer = plain(source).trim(), accept = options.accept ?? [];
-    const mode = options.mode || 'auto';
-    const numeric = numericDetails(answer), answers = [answer, ...accept.map(value => plain(value).trim())];
+    const accept = options.accept ?? [], mode = options.mode || 'auto';
+    const [rendered, text] = core.answerMarkup(source);
+    if (html && rendered !== html) throw new Error('answer-render-mismatch: 화면 수식과 판별 자료가 맞지 않습니다.');
+    const answer = text.trim().replaceAll('−', '-');
+    const numeric = numericDetails(answer), answers = [answer, ...accept.map(value => core.answerMarkup(value)[1].trim().replaceAll('−', '-'))];
+    if (mode === 'number' && !numeric) throw new Error('정답을 수로 읽을 수 없습니다.');
     let kind = 'open';
     if (answer && mode !== 'off') {
       if (mode !== 'text' && numeric) kind = 'number';
@@ -1809,23 +1841,25 @@
       'data-input-mode': kind === 'number' ? input_mode(answers) || null : null };
     const { column, row, unit } = options.headings;
     const forms = kind === 'open' ? [] : writing_forms(kind, answers, inferred_unit(options.tail ?? '', column, row, unit));
+    if ((kind === 'number' && answers.some(v => ['reduced', 'unreduced'].includes(numericDetails(v)?.[2]))) ||
+        (kind === 'radical' && answers.some(v => v.includes('/')))) shape.push('fraction');
+    if (kind !== 'open' && !forms.length) throw new Error('허용 답을 정답과 같은 형식으로 읽을 수 없습니다.');
     if (forms.length && salt()) {
-      let right = answer, wrong;
+      let wrong;
       if (kind === 'number') {
-        const [number, , written] = numeric;
+        const [number] = numeric;
         const pi = number.endsWith('π') ? 'π' : '', coefficient = pi ? number.slice(0, -1) : number;
-        if (written === 'reduced' || written === 'unreduced') shape.push('fraction');
-        if (written === 'unreduced') right = coefficient + (coefficient.includes('/') ? '' : '/1') + pi;
         const [p, q = 1n] = coefficient.split('/').map(BigInt);
         let next = p;
         do { next += q; wrong = fraction(next, q) + pi; } while (forms.includes(wrong));
-      } else {
+      } else if (kind === 'radical') wrong = '0';
+      else {
         wrong = answer + '오답';
         while (text_candidates(wrong).some(v => forms.includes(v))) wrong += '오답';
       }
-      attrs['data-check'] = JSON.stringify({ mode, accept, right, wrong });
+      attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
       if (canGrade) {
-        if (kind === 'number' && forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
+        if (['number', 'radical'].includes(kind) && forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
         attrs['data-check-hash'] = [...new Set(forms)].map(v => hash(salt(),kind,v)).join(',');
       }
     } else if (mode !== 'auto' || accept.length) {
@@ -1889,34 +1923,32 @@
     panel.bar?.remove(); panel.solutionBox?.remove(); panel.compareBox?.remove(); panels.delete(item);
   }
   function writeAnswer(el, result) {
-    const oldShape = el.dataset.writingShape;
     applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
     const row = recordByNode.get(el);
     if (!row) return;
     row.result = null; row.reveal?.remove(); row.reveal = undefined;
     const input = el.querySelector('.ws-in');
     if (input) applyAttrs(input, { inputmode: result.attrs['data-input-mode'] });
-    if (oldShape !== el.dataset.writingShape) row.control?.syncSymbols?.();
   }
   function tableAnswerUpdates(table, editedField) {
     // 원본 표기에서 정답·대안·빈칸 바로 뒤의 글을 읽는다. 이미 붙은 해시로는 단위를 되돌릴 수 없다.
     const answers = [];
     for (const field of all(table, '[data-src]')) {
       if (field === editedField || field.closest('table') !== table || field.closest('.ws-teacher-only')) continue;
-      const writing = field.closest('.ws-ans[data-slot][data-check-kind="number"]');
+      const writing = field.closest('.ws-ans[data-slot]:is([data-check-kind="number"],[data-check-kind="radical"])');
       if (writing && field.matches('.ws-key')) {
         answers.push([writing, field.dataset.src, field.innerHTML, json(writing.dataset.check, {}), false]);
         continue;
       }
       if (field.closest('.ws-key')) continue;
       const nodes = all(field, '.ws-blank[data-slot]');
-      if (!nodes.some(el => el.dataset.checkKind === 'number')) continue;
+      if (!nodes.some(el => ['number', 'radical'].includes(el.dataset.checkKind))) continue;
       const blanks = [];
       core.renderMarkup(field.dataset.src, blank => blanks.push(blank));
       if (nodes.length !== blanks.length) continue;
       nodes.forEach((el, i) => {
         const { answer, accept, html, tail } = blanks[i];
-        if (el.dataset.checkKind === 'number') answers.push([el, answer, html, { accept, tail }, true]);
+        if (['number', 'radical'].includes(el.dataset.checkKind)) answers.push([el, answer, html, { accept, tail }, true]);
       });
     }
     return () => {
@@ -1961,16 +1993,15 @@
     function write(text, children, result) {
       target.dataset.src = text; target.replaceChildren(...children);
       if (isAnswer) writeAnswer(writing, result);
-      if (target.matches(promptFields)) {
-        const strict = all(item, promptFields).some(field => {
+      if (target.matches(promptFields) && item.dataset.fractionFormExplicit !== '1') {
+        item.dataset.fractionForm = fraction_requirement(all(item, promptFields).map(field => {
           const copy = field.cloneNode(true);
-          for (const node of all(copy, '.ws-blank, [data-sheet-runtime]')) node.remove();
-          return copy.textContent.includes('기약분수');
-        });
-        if (strict) item.dataset.reducedFractions = '1';
-        else delete item.dataset.reducedFractions;
+          for (const node of all(copy, '.ws-blank, [data-sheet-runtime]')) node.replaceWith(' ');
+          return copy.textContent;
+        }));
+        delete item.dataset.reducedFractions;
         for (const row of records.values()) {
-          if (row.item === item && writingShape(row.el).includes('fraction')) row.result = null;
+          if (row.item === item && row.kind === 'number') row.result = null;
         }
       }
       refresh?.();

@@ -17,7 +17,7 @@ class AnswerTest(unittest.TestCase):
 
     def test_contract_cases(self):
         self.assertEqual(set(answer.UNITS), set(self.cases['units']))
-        for name in ('norm', 'num', 'number_parts', 'text_candidates', 'plain', 'line', 'points'):
+        for name in ('norm', 'num', 'number_parts', 'text_candidates', 'plain', 'line', 'points', 'fraction_requirement'):
             for source, expected in self.cases[name]:
                 with self.subTest(kind=name, source=source):
                     self.assertEqual(getattr(answer, name)(source), expected)
@@ -38,11 +38,12 @@ class AnswerTest(unittest.TestCase):
     def test_writing_results(self):
         for spec in self.cases['writing_results']:
             kind = spec['kind']
-            forms = answer.writing_forms(kind, [answer.plain(spec['answer'])], spec.get('unit', ''))
+            values = [answer.plain(v) for v in [spec['answer'], *spec.get('accept', [])]]
+            forms = answer.writing_forms(kind, values, spec.get('unit', ''))
             for value, expected in spec['cases']:
-                with self.subTest(answer=spec['answer'], value=value, strict=spec.get('strict')):
+                with self.subTest(answer=spec['answer'], value=value, form=spec.get('form')):
                     result = answer.writing_result(kind, value, forms.__contains__, spec.get('form', ''),
-                                                   spec.get('strict', False), bool(spec.get('unit')))
+                                                   check_unit=any('@' in v for v in forms))
                     self.assertEqual(result, expected)
 
     def test_thousands_separator_matches_plain_integer(self):

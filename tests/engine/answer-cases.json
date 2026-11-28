@@ -41,9 +41,20 @@
   "g",
   "l",
   "°",
-  "%"
+  "%", "가지", "쌍", "켤레", "자루", "벌", "조각", "묶음", "상자", "봉지", "바퀴", "층", "곳", "군데", "dl"
+ ],
+ "fraction_requirement": [
+  [["기약분수로 나타내지 않아도 좋습니다."], "자유"],
+  [["기약분수가 아니어도 좋습니다. 약분하지 않아도 됩니다."], "자유"],
+  [["기약분수로 나타내지 않아도 되지만 분수로 쓰세요."], "분수"],
+  [["삼각비를 기약분수로 구해 봅시다."], "기약분수"],
+  [["각각 분수로 나타냅니다."], "분수"],
+  [["기약분수의 뜻을 생각하세요."], "자유"]
  ],
  "inferred_unit": [
+  [["가지입니다.", "", ""], "가지"], [["켤레를", "", ""], "켤레"],
+  [[" mL를 담아요.", "", ""], "ml"], [[" 중 하나를 고릅니다.", "부피(dL)", ""], "dl"],
+  [[" 가지 말고 기다립니다.", "", ""], ""],
   [["일.", "", ""], "일"], [["cm입니다.", "", ""], "cm"],
   [["를 곱한다", "", ""], ""], [["도 같아요", "", ""], ""], [["일정하다", "", ""], ""],
   [["", "도수 (일)", ""], "일"], [["", "합계", "길이 (㎝)"], "cm"],
@@ -55,15 +66,22 @@
   [["분 동안", "", ""], "분"], [["점이다", "", ""], "점"]
  ],
  "writing_results": [
-  {"kind":"number", "answer":"$4\\pi$", "unit":"cm", "cases":[["4π",true],["4 π",true],["4pi",true],["4파이",true],["4π cm",true],["4πcm",true],["4×π",true],["4π mm",false],["4π kg",false],["4",false],["4π+0",false],["4π²",false],["",null]]},
-  {"kind":"number", "answer":"$\\pi$", "cases":[["pi",true],["+π",true],["1.0π",true],["-π",false],["×π",false]]},
-  {"kind":"number", "answer":"$\\frac{3}{2}\\pi$", "form":"fraction", "cases":[["3π/2",true],["6/4π","review"],["6π/4","review"],["1.50π",true],["3/0π",false],["3/2",false]]},
-  {"kind":"number", "answer":"$\\dfrac{3\\pi}{2}$", "form":"fraction", "strict":true, "cases":[["3/2 π",true],["6π/4",false],["1.5π",false]]},
-  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"fraction", "unit":"cm", "cases":[["6/10","review"],["6/10cm","review"],["6/10mm",false],["3/5",true],["0.6",true],["0.60",true],["7/10",false]]},
-  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"fraction", "strict":true, "cases":[["6/10",false],["0.6",false],["0.60",false],["3/5",true],["⅗",true],["7/10",false]]},
-  {"kind":"number", "answer":"$0.6$", "cases":[["6/10",true]]},
-  {"kind":"radical", "answer":"$2\\sqrt{3}$", "cases":[["2√3",true],["2√(3)",true],["2루트3",true],["√12","review"],["√(12)","review"],["-√12",false],["√13",false],["2√3+0",false]]},
-  {"kind":"radical", "answer":"$-\\sqrt{12}$", "cases":[["-√12",true],["-2√3","review"],["2√3",false]]}
+  {"kind":"number", "answer":"$4\\pi$", "unit":"cm", "cases":[["4π",[true,""]],["4 π",[true,""]],["4pi",[true,""]],["4파이",[true,""]],["4π cm",[true,""]],["4πcm",[true,""]],["4×π",[true,""]],["4π mm",[false,""]],["4π kg",[false,""]],["4",[false,""]],["4π+0",[false,""]],["4π²",[false,""]],["",[null,""]]]},
+  {"kind":"number", "answer":"$\\pi$", "cases":[["pi",[true,""]],["+π",[true,""]],["1.0π",[true,""]],["-π",[false,""]],["×π",[false,""]],["π칸",["review","unit"]]]},
+  {"kind":"number", "answer":"$\\frac{3}{2}\\pi$", "cases":[["3π/2",[true,""]],["6/4π",[true,"reduce"]],["6π/4",[true,"reduce"]],["1.50π",[true,""]],["3/0π",[false,""]],["3/2",[false,""]]]},
+  {"kind":"number", "answer":"$\\dfrac{3\\pi}{2}$", "form":"기약분수", "cases":[["3/2 π",[true,""]],["6π/4",[false,"reduced"]],["1.5π",[false,"reduced"]]]},
+  {"kind":"number", "answer":"$\\frac{3} {5}$", "unit":"cm", "cases":[["6/10",[true,"reduce"]],["6/10cm",[true,"reduce"]],["6/10mm",[false,""]],["3/5",[true,""]],["0.6",[true,""]],["0.60",[true,""]],["35",[false,""]],["7/10",[false,""]]]},
+  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"기약분수", "cases":[["6/10",[false,"reduced"]],["0.60",[false,"reduced"]],["3/5",[true,""]],["⅗",[true,""]],["7/10",[false,""]]]},
+  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"분수", "cases":[["6/10",[true,"reduce"]],["0.6",["review","fraction"]],["3/5",[true,""]],["0.7",[false,""]]]},
+  {"kind":"number", "answer":"$0.6$", "cases":[["6/10",[true,"reduce"]]]},
+  {"kind":"number", "answer":"$\\frac{1}{6}$", "accept":["$\\frac{6}{36}$"], "form":"기약분수", "cases":[[" 6 / 36 ",[true,""]],["2/12",[false,"reduced"]],["1/6cm",["review","unit"]]]},
+  {"kind":"number", "answer":"$36$", "unit":"가지", "cases":[["36가지",[true,""]],["36명",[false,""]],["36뭉탱이",[false,""]]]},
+  {"kind":"number", "answer":"$36$", "cases":[["36명",["review","unit"]],["36뭉탱이",["review","unit"]],["35명",[false,""]]]},
+  {"kind":"radical", "answer":"$2\\sqrt{3}$", "unit":"cm", "cases":[["2√3",[true,""]],["2√(3)",[true,""]],["2루트3",[true,""]],["2√3cm",[true,""]],["2√3 cm",[true,""]],["2√3 mm",[false,""]],["√12cm",["review","radical"]],["√12mm",[false,""]],["√(12)",["review","radical"]],["-√12",[false,""]],["√13",[false,""]],["2√3+0",[false,""]]]},
+  {"kind":"radical", "answer":"$-\\sqrt{12}$", "cases":[["-√12",[true,""]],["-2√3",["review","radical"]],["2√3",[false,""]]]},
+  {"kind":"radical", "answer":"$\\frac{\\sqrt{3}}{2}$", "cases":[["√3/2",[true,""]],["√32",[false,""]],["루트3/2",[true,""]],["√12/4",["review","radical"]],["√3/2mL",["review","unit"]],["-√3/2",[false,""]],["√3/0",[false,""]]]},
+  {"kind":"radical", "answer":"$\\frac{2\\sqrt{3}}{3}$", "cases":[["2√3/3",[true,""]],["√12/3",["review","radical"]],["2/√3",["review","radical"]],["1/√3",[false,""]]]},
+  {"kind":"radical", "answer":"$\\frac{\\sqrt{3}}{3}$", "cases":[["1/√3",["review","radical"]],["2/(2√3)",["review","radical"]]]}
  ],
  "number_forms": [
   [[["11"], "일"], ["11", "11@일"]], [[["11권"], "일"], ["11", "11@권"]],
@@ -246,6 +264,21 @@
   ["원점", ["원점"]]
  ],
  "plain": [
+  ["$\\frac{\\sqrt{3}}{2}$", "√3/2"],
+  ["$\\frac{3} {5}$", "3/5"],
+  ["$\\frac{2\\sqrt{3}}{3}$", "2√3/3"],
+  ["$\\frac{a+b}{2}$", "(a+b)/2"],
+  ["$\\dfrac{1+\\sqrt{2}}{3}$", "(1+√2)/3"],
+  ["$\\frac{1}{x^{2}}$", "1/x^2"],
+  ["$\\frac{\\frac{1}{2}}{3}$", "(1/2)/3"],
+  ["$\\frac{3}{2\\pi}$", "3/(2π)"],
+  ["$\\frac{1}{2\\sqrt{3}}$", "1/(2√3)"],
+  ["$\\frac{3}{5}2$", "(3/5)2"],
+  ["$2\\frac{1}{3}$", "2(1/3)"],
+  ["$\\frac{1}{3}\\sqrt{2}$", "(1/3)√2"],
+  ["$\\sqrt [3] {\\frac{1}{2}}$", "√[3](1/2)"],
+  ["$\\sqrt{x}$", "√(x)"],
+  ["$\\frac{\\mathrm {a+b}}{2}$", "(a+b)/2"],
   ["$\\sin A+\\cos B+\\tan C$", "sin A+cos B+tan C"],
   ["$\\overgroup{AB}$와 $\\overarc{CD}$", "AB와 CD"],
   ["$\\dfrac{3\\pi}{2}$", "3π/2"],
@@ -289,7 +322,7 @@
   ],
   [
    "$a \\le 3$",
-   "a ≤3"
+   "a≤3"
   ],
   [
    "$a^{2}$",
@@ -313,7 +346,7 @@
   ],
   [
    "$\\left( -3 \\right)$",
-   "( -3 )"
+   "(-3)"
   ],
   [
    "7000원",

@@ -886,6 +886,8 @@ def _interactive_check(protocol, out, table, problems):
                 if not isinstance(slots, list) or any(not isinstance(s, dict) or not isinstance(s.get('slot'), str) for s in slots):
                     raise CheckError("학생용 자리 목록을 읽을 수 없습니다.")
                 info["auto_slots"] = sum(bool(slot.get("auto")) for slot in slots)
+                # right is the parser's written form, not just the reduced value:
+                # a teacher-approved form must pass even under a stricter item rule.
                 data = json.dumps(rows, ensure_ascii=True)
                 results = protocol.evaluate("""(() => %s.map(row => {
                   let right, wrong;

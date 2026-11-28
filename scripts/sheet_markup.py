@@ -23,6 +23,7 @@ DECIMAL = re.compile(r'(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)')
 LETTERS = re.compile(r'[A-Za-z]+')
 NEWLINE = re.compile(r'[\r\n\v\f\x85  ]')
 MARKS = '㉠㉡㉢㉣㉤㉥㉦㉧㉨㉩㉪㉫㉬㉭㉮㉯㉰㉱㉲㉳㉴㉵㉶㉷㉸㉹㉺㉻'
+MATH_SPACES = {',': '0.1667em', ' ': '0.1667em', ':': '0.2222em', ';': '0.2778em', '!': '0em'}
 
 
 def join_parts(parts):
@@ -53,9 +54,26 @@ def fraction_term(text, *, denominator=False):
     return text
 
 
+def is_math_space(part):
+    return part[0].startswith('<mspace ')
+
+
+def fraction_operand(text, parts, *, denominator):
+    grouped = fraction_term(text, denominator=denominator)
+    if grouped != text.strip():
+        return grouped
+    factors = [part for part in parts if not is_math_space(part)]
+    if factors and factors[0][0].startswith('<mo form="prefix"') and factors[0][1] in ('+', '−'):
+        factors = factors[1:]
+    # Keep the established compact spelling of a radical or pi coefficient in the numerator.
+    compact = not denominator and re.fullmatch(r'[+−-]?[0-9.]+(?:π|√(?:[0-9]+|\([^()]+\)))', grouped)
+    return f'({grouped})' if len(factors) > 1 and not compact else grouped
+
+
 class MathParser:
-    def __init__(self, source, *, answer=False):
+    def __init__(self, source, *, answer=False, label=False):
         self.source, self.pos, self.answer = source, 0, answer
+        self.structured_plain = answer or label
 
     @property
     def next(self):
@@ -74,7 +92,7 @@ class MathParser:
             else:
                 break
 
-    def group(self, opening='{', close='}'):
+    def group(self, opening='{', close='}', *, denominator=None):
         self.spaces()
         if self.next != opening:
             self.fail(f'{opening}가 필요합니다')
@@ -85,7 +103,10 @@ class MathParser:
         if not parts:
             self.fail(f'{opening}{close} 안에 값이 없습니다')
         self.pos += 1
-        return wrap_row(parts)
+        rendered, plain = wrap_row(parts)
+        if self.structured_plain and denominator is not None:
+            plain = fraction_operand(plain, parts, denominator=denominator)
+        return rendered, plain
 
     @staticmethod
     def prefix_sign(sign):
@@ -105,9 +126,10 @@ class MathParser:
         return self.prefix_sign(part[1]) if part[0] in ('<mo>+</mo>', '<mo>−</mo>') else part
 
     def command(self, start):
-        if self.next in (',', ' '):
+        if self.next in MATH_SPACES:
+            width = MATH_SPACES[self.next]
             self.pos += 1
-            return '<mspace width="0.1667em"></mspace>', ''
+            return f'<mspace width="{width}"></mspace>', ''
         match = LETTERS.match(self.source, self.pos)
         if not match:
             self.fail('명령 이름이 필요합니다', start)
@@ -122,7 +144,7 @@ class MathParser:
         if name in ('sin', 'cos', 'tan'):
             return f'<mo form="prefix" lspace="0em" rspace="0.1667em">{name}</mo>', name + ' '
         if name == 'quad':
-            return '<mspace width="1em"></mspace>', ' '
+            return '<mspace width="1em"></mspace>', '' if self.structured_plain else ' '
         if name == 'begin':
             self.spaces()
             if not self.source.startswith('{cases}', self.pos):
@@ -151,9 +173,8 @@ class MathParser:
             return ('<mrow><mo stretchy="true">{</mo><mtable columnalign="left">'
                     + ''.join(rows) + '</mtable></mrow>', '{' + '; '.join(texts))
         if name in ('frac', 'dfrac'):
-            a, b = self.group(), self.group()
-            plain = (f'{fraction_term(a[1])}/{fraction_term(b[1], denominator=True)}'
-                     if self.answer else f'({a[1]})/({b[1]})')
+            a, b = self.group(denominator=False), self.group(denominator=True)
+            plain = f'{a[1]}/{b[1]}' if self.structured_plain else f'({a[1]})/({b[1]})'
             return f'<mfrac>{a[0]}{b[0]}</mfrac>', plain
         if name == 'sqrt':
             self.spaces()
@@ -201,6 +222,8 @@ class MathParser:
         self.pos += 1
         if c == '\\':
             return self.command(start)
+        if c == '~':
+            return '<mspace width="0.3333em"></mspace>', ''
         if c == '{':
             self.pos = start
             return self.group()
@@ -246,8 +269,9 @@ class MathParser:
             if c in '^_':
                 self.fail('첨자 앞에 값이 필요합니다')
             base = self.atom()
+            prior = next((i for i in range(len(result) - 1, -1, -1) if not is_math_space(result[i])), None)
             if base[1] in ('+', '−') and base[0].startswith('<mo>'):
-                previous = next((p for p in reversed(result) if not p[0].startswith('<mspace ')), None)
+                previous = result[prior] if prior is not None else None
                 if not previous or (previous[0].startswith(('<mo>', '<mo ')) and previous[1] not in ('!', '°')):
                     base = self.prefix_sign(base[1])
             if base[0] == '<mo>°</mo>' and result and re.fullmatch(r'<mn>[^<]+</mn>', result[-1][0]):
@@ -266,6 +290,8 @@ class MathParser:
             if scripts:
                 tag = 'm' + ('sub' if '_' in scripts else '') + ('sup' if '^' in scripts else '')
                 rendered, plain = base
+                if self.structured_plain and rendered.startswith('<mfrac>'):
+                    plain = fraction_term(plain)
                 for op, translation in (('_', SUBS), ('^', SUPERS)):
                     if op in scripts:
                         markup, text = scripts[op]
@@ -279,15 +305,15 @@ class MathParser:
                         else:
                             plain += text.translate(translation) if all(ord(c) in translation for c in text) else f'{op}({text})'
                 base = f'<{tag}>{rendered}</{tag}>', plain
-            if self.answer and result:
-                # Adjacent factors must not turn into digits of a denominator or radicand.
-                html_before, before = result[-1]
+            if self.structured_plain and prior is not None and not is_math_space(base):
+                # Adjacent factors must not merge with a denominator or radicand.
+                html_before, before = result[prior]
                 html_now, now = base
                 if (html_before.startswith('<mfrac>') and re.match(r'[0-9√]', now)
                         or html_before.startswith('<msqrt>') and re.match(r'[0-9]', now)):
-                    result[-1] = html_before, f'({before})'
+                    result[prior] = html_before, f'({before})'
                 elif html_now.startswith('<mfrac>') and re.search(r'[0-9π)]$', before):
-                    base = html_now, f'({now})'
+                    base = html_now, fraction_term(now)
             result.append(base)
 
     def parse(self):
@@ -363,8 +389,8 @@ def join_inline_parts(parts):
     return ''.join(rendered), ''.join(part[1] for part in parts)
 
 
-def inspect_markup(source, *, interactive=False, table_blank_mm=None, answer=False):
-    """Parse once; return rendered markup and the facts plan needs to check."""
+def inspect_markup(source, *, interactive=False, table_blank_mm=None, answer=False, label=False):
+    """Parse once; label plain text uses readable math and shows only blank marks."""
     if NEWLINE.search(source):
         raise MarkupError('한 필드에는 줄을 바꾸지 마세요.')
     pos = 0
@@ -396,7 +422,7 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None, answer=Fal
                     pos += 2 if at('\\$') or at('\\\\') else 1
                 if not at('$'):
                     fail('$', start)
-                parts.append((*MathParser(source[begin:pos], answer=answer).parse(), 'math', bold))
+                parts.append((*MathParser(source[begin:pos], answer=answer, label=label).parse(), 'math', bold))
                 pos += 1
                 outside_math.append(' ')
             elif c == '*' and at('*'):
@@ -457,7 +483,8 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None, answer=Fal
                 hook = blank_hook.get() if interactive else None
                 slot = hook(answers, rendered, source[pos:]) if hook and answers else ''
                 kind = 'blank' if re.match(r'[가-힣]', source[pos:]) else 'boundary'
-                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', plain or mark, kind, bold))
+                blank_text = (mark or ' ') if label else (plain or mark)
+                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', blank_text, kind, bold))
             else:
                 outside_math.append(c)
                 parts.append((html.escape(c), c, 'boundary' if c.isspace() else 'text', bold))

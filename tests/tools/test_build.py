@@ -104,6 +104,20 @@ class BuildTest(unittest.TestCase):
                 'teacher': {'memo': ['교사 전용 메모'], 'solutions': [{'item': 'q1', 'answer': '교사 전용 풀이'}]}}
         self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
 
+    def test_unnumbered_solution_titles_keep_math_without_blank_answers(self):
+        cases = json.loads((ROOT / 'tests/engine/markup-cases.json').read_text(encoding='utf-8'))
+        labels = [case for case in cases if 'label' in case]
+        data = json.loads(self.source.read_text(encoding='utf-8'))
+        data['meta'].update(kind='수업', sync=False, unit='수식', goal='수식의 값을 구한다.')
+        data['items'] = [{'id': 'numbered', 'blocks': [{'type': 'question', 'text': '수는 {{㉠|$3$}}입니다.'}]}]
+        data['items'] += [{'id': f'q{i}', 'blocks': [{'type': 'question', 'number': False, 'text': case['src']}]}
+                          for i, case in enumerate(labels, 1)]
+        data['teacher'] = {'solutions': [{'item': item['id'], 'answer': '예시 답안'} for item in data['items'][1:]]}
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.cli('build', self.folder)
+        titles = re.findall(r'<h3 class="ws-t-q">([^<]*)</h3>', self.teacher.read_text(encoding='utf-8'))
+        self.assertEqual(titles, [case['label'] for case in labels])
+
     def manifest(self):
         return json.loads(self.record.read_text(encoding='utf-8'))
 

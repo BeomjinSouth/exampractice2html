@@ -5,16 +5,20 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from sheet_markup import MarkupError, render_markup
+from sheet_markup import MarkupError, inspect_markup, render_markup
 
 
 class MarkupTest(unittest.TestCase):
     def test_engine_pairs(self):
         cases = json.loads((ROOT / 'tests/engine/markup-cases.json').read_text(encoding='utf-8'))
-        self.assertEqual(len(cases), 20)
         for case in cases:
             with self.subTest(src=case['src']):
-                self.assertEqual(render_markup(case['src']), case['html'])
+                if 'html' in case:
+                    self.assertEqual(render_markup(case['src']), case['html'])
+                if 'answer' in case:
+                    parsed = inspect_markup(case['src'], answer=True)
+                    self.assertEqual(parsed.plain, case['answer'])
+                    self.assertEqual(parsed.html, render_markup(case['src']))
 
     def test_invalid_markup(self):
         for source in ('$$', '$x^{2$', '$\\unknown{1}$', '$\\mathit{12}$', '$x', '**굵게',

@@ -38,18 +38,8 @@ def student_policy(interactive, reveal_policy):
 
 
 def _visible_label(source):
-    """Use the rendered student text, without blank answers, for a solution title."""
-    class Text(HTMLParser):
-        def __init__(self):
-            super().__init__(convert_charrefs=True)
-            self.parts = []
-
-        def handle_data(self, data):
-            self.parts.append(data)
-
-    parser = Text()
-    parser.feed(render_markup(inspect_markup(source).public_source))
-    return ' '.join(''.join(parser.parts).split())
+    """Use readable math and blank marks, never blank answers, in a label."""
+    return ' '.join(inspect_markup(source, label=True).plain.split())
 
 
 def _solution_label(item):

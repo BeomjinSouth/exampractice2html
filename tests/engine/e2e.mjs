@@ -359,7 +359,7 @@ try {
     await tab.key('e');
     // 이미 기호가 있는 자리 뒤에 새 기호를 넣고, 검사할 때는 data-mark 원본으로 정규화한다.
     const target = qText('q1');
-    for (const { src, html } of cases) {
+    for (const { src, html } of cases.filter(c => c.html !== undefined)) {
       await tab.mouseClick(target, 2);
       await paste(tab, src);
       await tab.key('Enter');
@@ -434,6 +434,16 @@ try {
     const after = await tab.report();
     assert.deepEqual(after.items, before.items);
     assert.deepEqual(after.pages, before.pages);
+  }));
+  await test('JS와 Python 공통 판별 평문 및 표시 수식 자료 대조', () => usingTab(interactive, async tab => {
+    const cases = JSON.parse(await fs.readFile(path.join(here, 'markup-cases.json'), 'utf8')).filter(c => 'answer' in c);
+    const checked = await tab.js(`(${quote(cases)}).map(({src}) => {
+      try {
+        const [html, plain] = __sheetCore.answerMarkup(src);
+        return {src, plain, sameHtml:html === __sheetCore.renderMarkup(src)};
+      } catch (error) { return {src, error:error.message}; }
+    })`);
+    assert.deepEqual(checked, cases.map(({src, answer}) => ({src, plain:answer, sameHtml:true})));
   }));
   await test('JS 정규화·해시·난독화 기준 자료 전부 및 Node SHA-256 대조', () => usingTab(interactive, async tab => {
     const cases = JSON.parse(await fs.readFile(path.join(here, 'answer-cases.json'), 'utf8'));
@@ -2220,24 +2230,24 @@ assert 'q.2' in problems[1]['msg']
       assert.match(await tab.js('document.querySelector(".ws-t-list").textContent'), /메모는 처음에/);
     });
   });
-  await test('번호 없는 문항의 풀이 제목은 학생에게 보이는 말', async () => {
+  await test('번호 없는 문항의 풀이 제목은 수식을 보존하고 빈칸 정답은 숨김', async () => {
+    const labels = JSON.parse(await fs.readFile(path.join(here, 'markup-cases.json'), 'utf8')).filter(c => 'label' in c);
     const blocks = [
       {id:'one', blocks:[{type:'question', text:'번호가 있는 발문 {{㉠|$3$}}'}]},
       {id:'activity', blocks:[{type:'heading', tag:'활동 3', text:'같은 끝점이면 언제나 같을까?'},
         {type:'question', number:false, text:'같은 호를 살펴보세요.'}]},
-      {id:'prompt', blocks:[{type:'question', number:false, text:'수 $x^2$에 {{㉡|비밀}}를 더하고 까닭을 설명해 보세요.'}]},
+      ...labels.map(({src}, i) => ({id:`prompt${i}`, blocks:[{type:'question', number:false, text:src}]})),
       {id:'fallback', blocks:[{type:'text', text:'질문이 없는 문항'}]},
     ];
     const files = await buildEditorCase('번호-없는-제목', blocks,
       blocks.map(({id}) => ({item:id, answer:'예시 답안'})));
     const expected = [['one','1번'], ['activity','활동 3 · 같은 끝점이면 언제나 같을까?'],
-      ['prompt','수 x2에 ㉡를 더하고 까닭을 설명해 보세요.'], ['fallback','fallback 풀이']];
+      ...labels.map(({label}, i) => [`prompt${i}`,label]), ['fallback','fallback 풀이']];
     const source = await fs.readFile(files.teacher, 'utf8');
     await usingTab(files.open(files.teacher), async tab => {
       const built = await tab.js(`(() => {const d=new DOMParser().parseFromString(${quote(source)},'text/html');
         return [...d.querySelectorAll('#sheet-teacher [data-solution-for]')].map(n=>[n.dataset.solutionFor,n.querySelector('.ws-t-q').textContent]);})()`);
-      assert.deepEqual(built, expected, 'Python 조립 제목');
-      assert.deepEqual(await solutionOrder(tab), expected, 'JS 편집기 제목');
+      assert.deepEqual({ built, browser: await solutionOrder(tab) }, { built: expected, browser: expected });
       await tab.click(action('edit'));
       await editField(tab, `${item('activity')} .ws-heading-text`, '고친 활동 제목');
       assert.equal((await solutionOrder(tab))[1][1], '활동 3 · 고친 활동 제목');
@@ -2248,7 +2258,29 @@ assert 'q.2' in problems[1]['msg']
       await tab.click(action('undo'));
       assert.deepEqual(await solutionOrder(tab), expected);
       await tab.click(action('delete', item('one')));
-      assert.equal((await solutionOrder(tab))[1][1], '수 x2에 ㉠를 더하고 까닭을 설명해 보세요.');
+      assert.equal((await solutionOrder(tab)).find(([id]) => id === 'prompt2')[1],
+        '수 x²에 ㉠를 더하고 까닭을 설명해 보세요.');
+    });
+  });
+  await test('A4 표의 분수 빈칸 행에만 위아래 필기 공간 확보', async () => {
+    const files = await buildEditorCase('분수-행-높이', [{id:'ratios', blocks:[
+      {type:'table', header:['구분', '값'], rows:[['분수', '{{|$\\frac{\\sqrt{3}}{3}$}}'], ['정수', '{{|$2$}}']]},
+    ]}]);
+    await usingTab(files.open(files.student), async tab => {
+      const heights = selector => tab.js(`[...document.querySelectorAll(${quote(selector)})].map(r=>r.getBoundingClientRect().height * 25.4 / 96)`);
+      const rows = `${item('ratios')} .ws-data tbody tr`;
+      const screen = await heights(`#sheet-flow ${rows}`);
+      assert.equal(screen.length, 2);
+      assert(screen.every(mm => mm < 13.5), screen.join(', '));
+      await tab.js(`sheet.view('a4')`);
+      const verify = async () => {
+        const [fraction, integer] = await heights(`#sheet-pages ${rows}`);
+        assert(fraction >= 13.49 && fraction <= 20.5, `분수 행: ${fraction}mm`);
+        assert(integer < 13.5, `정수 행: ${integer}mm`);
+      };
+      await verify();
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      await verify();
     });
   });
   await test('문항을 옮기면 교사용 풀이의 순서와 번호가 저장 후에도 같음', async () => {

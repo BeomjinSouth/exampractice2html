@@ -11,6 +11,8 @@
   const translate = (from, to) => Object.fromEntries([...from].map((c, i) => [c, to[i]]));
   const supers = translate('0123456789+-=()nix', '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˣ');
   const subs = translate('0123456789+-=()aeiox', '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑᵢₒₓ');
+  const mathSpaces = { ',': '0.1667em', ' ': '0.1667em', ':': '0.2222em', ';': '0.2778em', '!': '0em' };
+  const isMathSpace = part => part[0].startsWith('<mspace ');
   const joinParts = parts => [parts.map(p => p[0]).join(''), parts.map(p => p[1]).join('')];
   function wrapRow(parts) {
     const [markup, plain] = joinParts(parts);
@@ -30,8 +32,20 @@
     }
     return text;
   }
+  function fractionOperand(text, parts, denominator) {
+    const grouped = fractionTerm(text, denominator);
+    if (grouped !== text.trim()) return grouped;
+    const factors = parts.filter(part => !isMathSpace(part));
+    if (factors[0]?.[0].startsWith('<mo form="prefix"') && ['+', '−'].includes(factors[0][1])) factors.shift();
+    // Keep the established compact spelling of a radical or pi coefficient in the numerator.
+    const compact = !denominator && /^[+−-]?[0-9.]+(?:π|√(?:[0-9]+|\([^()]+\)))$/u.test(grouped);
+    return factors.length > 1 && !compact ? `(${grouped})` : grouped;
+  }
   class MathParser {
-    constructor(source, answer = false) { this.source = Array.from(source); this.pos = 0; this.answer = answer; }
+    constructor(source, answer = false, label = false) {
+      this.source = Array.from(source); this.pos = 0; this.answer = answer;
+      this.structuredPlain = answer || label;
+    }
     get next() { return this.source[this.pos] ?? ''; }
     fail(message, at = this.pos) {
       throw new Error(`수식 $${this.source.join('')}$ · ${at + 1}번째 글자: ${message}`);
@@ -46,7 +60,7 @@
         } else break;
       }
     }
-    group(open = '{', close = '}') {
+    group(open = '{', close = '}', denominator) {
       this.spaces();
       if (this.next !== open) this.fail(`${open}가 필요합니다`);
       this.pos++;
@@ -54,7 +68,8 @@
       if (this.next !== close) this.fail(`닫는 ${close}가 없습니다`);
       if (!result.length) this.fail(`${open}${close} 안에 값이 없습니다`);
       this.pos++;
-      return wrapRow(result);
+      const [markup, plain] = wrapRow(result);
+      return [markup, this.structuredPlain && denominator !== undefined ? fractionOperand(plain, result, denominator) : plain];
     }
     static prefixSign([, sign]) { return [`<mo form="prefix" lspace="0em" rspace="0em">${sign}</mo>`, sign]; }
     argument() {
@@ -74,9 +89,9 @@
       const start = this.pos;
       const c = this.source[this.pos++];
       if (c === '\\') {
-        if (this.next === ',' || this.next === ' ') {
-          this.pos++;
-          return ['<mspace width="0.1667em"></mspace>', ''];
+        if (Object.hasOwn(mathSpaces, this.next)) {
+          const width = mathSpaces[this.source[this.pos++]];
+          return [`<mspace width="${width}"></mspace>`, ''];
         }
         const begin = this.pos;
         while (/[A-Za-z]/.test(this.next)) this.pos++;
@@ -91,7 +106,7 @@
         if (['sin', 'cos', 'tan'].includes(name)) {
           return [`<mo form="prefix" lspace="0em" rspace="0.1667em">${name}</mo>`, name + ' '];
         }
-        if (name === 'quad') return ['<mspace width="1em"></mspace>', ' '];
+        if (name === 'quad') return ['<mspace width="1em"></mspace>', this.structuredPlain ? '' : ' '];
         if (name === 'begin') {
           this.spaces();
           if (!this.at('{cases}')) this.fail('지원하는 환경은 cases입니다', start);
@@ -115,8 +130,8 @@
           return [`<mrow><mo stretchy="true">{</mo><mtable columnalign="left">${rows.join('')}</mtable></mrow>`, '{' + texts.join('; ')];
         }
         if (name === 'frac' || name === 'dfrac') {
-          const a = this.group(), b = this.group();
-          const plain = this.answer ? `${fractionTerm(a[1])}/${fractionTerm(b[1], true)}` : `(${a[1]})/(${b[1]})`;
+          const a = this.group('{', '}', false), b = this.group('{', '}', true);
+          const plain = this.structuredPlain ? `${a[1]}/${b[1]}` : `(${a[1]})/(${b[1]})`;
           return [`<mfrac>${a[0]}${b[0]}</mfrac>`, plain];
         }
         if (name === 'sqrt') {
@@ -153,6 +168,7 @@
         }
         this.fail(`모르는 명령 \\${name}입니다`, start);
       }
+      if (c === '~') return ['<mspace width="0.3333em"></mspace>', ''];
       if (c === '{') { this.pos--; return this.group(); }
       if (c === '(' || c === '|') {
         const close = c === '(' ? ')' : '|';
@@ -189,8 +205,9 @@
         if ('})]'.includes(this.next)) this.fail('짝이 맞지 않는 닫는 괄호입니다');
         if ('^_'.includes(this.next)) this.fail('첨자 앞에 값이 필요합니다');
         let base = this.atom();
+        const prior = result.findLastIndex(part => !isMathSpace(part));
         if (['+', '−'].includes(base[1]) && base[0].startsWith('<mo>')) {
-          const previous = result.findLast(part => !part[0].startsWith('<mspace '));
+          const previous = result[prior];
           if (!previous || (/^<mo[ >]/.test(previous[0]) && !['!', '°'].includes(previous[1]))) base = MathParser.prefixSign(base);
         }
         const previous = result.at(-1);
@@ -211,7 +228,7 @@
         if (sup || sub) {
           const markup = sup && sub ? `<msubsup>${base[0]}${sub[0]}${sup[0]}</msubsup>`
             : sup ? `<msup>${base[0]}${sup[0]}</msup>` : `<msub>${base[0]}${sub[0]}</msub>`;
-          let plain = base[1];
+          let plain = this.structuredPlain && base[0].startsWith('<mfrac>') ? fractionTerm(base[1]) : base[1];
           for (const [arg, table, prefix] of [[sub, subs, '_'], [sup, supers, '^']]) {
             if (!arg) continue;
             if (this.answer) plain += prefix === '^' && arg[1] === '°' ? '°' : prefix + fractionTerm(arg[1]);
@@ -220,13 +237,13 @@
           }
           base = [markup, plain];
         }
-        if (this.answer && result.length) {
-          const [htmlBefore, before] = result.at(-1), [htmlNow, now] = base;
+        if (this.structuredPlain && prior !== -1 && !isMathSpace(base)) {
+          const [htmlBefore, before] = result[prior], [htmlNow, now] = base;
           if ((htmlBefore.startsWith('<mfrac>') && /^[0-9√]/u.test(now)) ||
               (htmlBefore.startsWith('<msqrt>') && /^[0-9]/.test(now))) {
-            result[result.length - 1] = [htmlBefore, `(${before})`];
+            result[prior] = [htmlBefore, `(${before})`];
           } else if (htmlNow.startsWith('<mfrac>') && /[0-9π)]$/u.test(before)) {
-            base = [htmlNow, `(${now})`];
+            base = [htmlNow, fractionTerm(now)];
           }
         }
         result.push(base);
@@ -266,7 +283,7 @@
     return [rendered.join(''), parts.map(part => part[1]).join('')];
   }
 
-  function parseMarkup(source, onBlank, answer = false) {
+  function parseMarkup(source, onBlank, answer = false, blankLabel) {
     if (/[\r\n\p{Zl}\p{Zp}]/u.test(source)) throw new Error('한 필드에는 줄을 바꾸지 마세요.');
     let pos = 0;
     const at = token => source.startsWith(token, pos);
@@ -285,7 +302,7 @@
             pos++;
           }
           if (!at('$')) fail('$', start);
-          parts.push([...new MathParser(source.slice(begin, pos++), answer).parse(), 'math', bold]);
+          parts.push([...new MathParser(source.slice(begin, pos++), answer, !!blankLabel).parse(), 'math', bold]);
         } else if (c === '*' && at('*')) {
           pos++;
           for (const part of sequence(['**', ...stops], inBlank, true)) parts.push(part);
@@ -331,7 +348,8 @@
           const key = text.trim() ? `<span class="ws-key">${html}</span>` : '';
           const tail = source.slice(pos);
           onBlank?.({ answer, accept, html, tail });
-          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, text || mark, /^[가-힣]/.test(tail) ? 'blank' : 'boundary', bold]);
+          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, blankLabel ? blankLabel(mark) : text || mark,
+            /^[가-힣]/.test(tail) ? 'blank' : 'boundary', bold]);
         } else {
           parts.push([escapeHTML(c), c, /[\p{White_Space}\x1c-\x1f]/u.test(c) ? 'boundary' : 'text', bold]);
         }
@@ -479,7 +497,15 @@
       if (!node) return '';
       const copy = node.cloneNode(true);
       for (const hidden of all(copy, `${privateContent}, [data-sheet-runtime]`)) hidden.remove();
-      return copy.textContent.replace(/\s+/g, ' ').trim();
+      let text = copy.textContent;
+      if (node.dataset.src !== undefined) {
+        const blankMarks = all(copy, '.ws-blank-mark');
+        let index = 0;
+        // Use the source for math, but keep the marks already renumbered on the page.
+        text = parseMarkup(node.dataset.src, undefined, false,
+          mark => mark ? (blankMarks[index++]?.textContent ?? mark) : ' ')[1];
+      }
+      return text.replace(/\s+/g, ' ').trim();
     };
     for (const heading of all(item, '.ws-heading').filter(node => !node.closest(privateContent))) {
       const title = [visibleText(heading.querySelector('.ws-heading-tag')), visibleText(heading.querySelector('.ws-heading-text'))]

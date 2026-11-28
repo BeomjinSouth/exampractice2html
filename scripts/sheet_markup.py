@@ -265,6 +265,7 @@ class Markup:
     outside_math: str
     blanks: tuple
     public_source: str
+    blank_spans: tuple = ()
 
 
 def join_inline_parts(parts):
@@ -418,7 +419,16 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
         public_parts.extend((source[last:start], mark or ' '))
         last = end
     public_parts.append(source[last:])
-    return Markup(rendered, plain, ''.join(outside_math), tuple(blanks), ''.join(public_parts))
+    return Markup(rendered, plain, ''.join(outside_math), tuple(blanks), ''.join(public_parts), tuple(blank_spans))
+
+
+def whole_blank(source):
+    """Whether the cell contains exactly one blank and surrounding whitespace."""
+    spans = inspect_markup(source).blank_spans
+    if len(spans) != 1:
+        return False
+    start, end, _ = spans[0]
+    return not source[:start].strip() and not source[end:].strip()
 
 
 def js_number(value):

@@ -19,7 +19,7 @@ from sheet_common import (BUILD_FILE, CHECK_DIR, LABEL_MM, PICTURE_CELL_PADDING_
                           TEACHER_SUFFIX, TOOL, VERSION, atomic_write, box_five, box_tick_values, content_width_mm,
                           figure_width_mm, html_paths, image_path, json_bytes, sha256, situation_cell_mm, split_widths_mm,
                           FOREIGN_CODE_FIX, engine_script, find_usable_python, foreign_code_issues, python_sheet_command)
-from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
+from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup, whole_blank
 from sheet_plan import (SVG_URL, answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
@@ -1170,7 +1170,7 @@ class Renderer:
 
             def cell(tag, text, column='', row_label=''):
                 # 칸 전체가 빈칸 하나면 밑줄을 겹쳐 긋지 않는다(ws-fill).
-                whole = tag == 'td' and re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', text)
+                whole = tag == 'td' and whole_blank(text)
                 token = blank_hook.set(lambda a, markup, tail: hook(a, markup, tail, column, row_label, unit)) if hook else None
                 try:
                     return editable(tag, text, 'ws-fill' if whole else '', table_blank_mm=widest)

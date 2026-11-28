@@ -675,9 +675,17 @@ _READY_JS = """(async()=>{
 
 # 채움 인쇄: 정답표의 자동 판별 자리 + 서술 칸(여러 줄)·빈칸·그리기·이름 칸까지 넣는다.
 _FILL_JS = """(async()=>{
-  for (const row of %s) sheet.answer(row.slot, row.right);
-  const kinds = {open_box: 0, open_blank: 0, draw: 0, name: 0};
   const nodes = [...document.querySelectorAll('[data-slot]')];
+  for (const row of %s) {
+    const el = nodes.find(n => n.dataset.slot === row.slot);
+    const input = el?.querySelector('input.ws-in');
+    if (input) {
+      // 학생이 입력할 때처럼 채운다. sheet.answer는 확인 전에도 판별 표시를 띄운다.
+      input.value = row.right;
+      input.dispatchEvent(new Event('input', {bubbles:true}));
+    } else sheet.answer(row.slot, row.right);
+  }
+  const kinds = {open_box: 0, open_blank: 0, draw: 0, name: 0};
   for (const s of sheet.slots()) {
     if (s.auto) continue;
     const el = nodes.find(n => n.dataset.slot === s.slot);
@@ -710,6 +718,11 @@ _FILL_JS = """(async()=>{
 _FILL_LINES = ("검사 서술 첫째 줄", "검사 서술 둘째 줄")
 _FILLED_SCREEN_JS = """(async function filledScreenInspection(){
   await sheet.view('solve');
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  const typing_clipped = [...document.querySelectorAll('#sheet-flow input.ws-in')]
+    .filter(el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible' &&
+      (!el.checkVisibility || el.checkVisibility({checkOpacity:true})) && el.clientWidth && el.scrollWidth > el.clientWidth + 1)
+    .map(el => el.closest('[data-slot]')?.dataset.slot).filter(Boolean);
   const items = [...document.querySelectorAll('#sheet-flow .ws-item')];
   let checked_items = 0, revealed_items = 0, solution_items = 0, compare_items = 0;
   for (const item of items) {
@@ -731,7 +744,8 @@ _FILLED_SCREEN_JS = """(async function filledScreenInspection(){
       (el.matches('.ws-solution, .ws-reveal') && el.scrollHeight > el.clientHeight + 1)))
     .map(el => el.closest('[data-slot]')?.dataset.slot || el.closest('.ws-item')?.dataset.id || el.tagName.toLowerCase());
   return { view: sheet.view(), overflow_x: sheet.report().overflow_x,
-    clipped: [...new Set(clipped)].sort(), checked_items, revealed_items, solution_items, compare_items };
+    clipped: [...new Set(clipped)].sort(), typing_clipped: [...new Set(typing_clipped)].sort(),
+    checked_items, revealed_items, solution_items, compare_items };
 })()"""
 _RESTORED_JS = """(async()=>{
   await sheet.view('a4');
@@ -898,8 +912,15 @@ def _interactive_check(protocol, out, table, problems):
                     or type(screen.get('overflow_x')) not in (int, float)
                     or not math.isfinite(screen['overflow_x']) or screen['overflow_x'] < 0
                     or not isinstance(screen.get('clipped'), list)
-                    or any(not isinstance(slot, str) for slot in screen['clipped'])):
+                    or any(not isinstance(slot, str) for slot in screen['clipped'])
+                    or not isinstance(screen.get('typing_clipped'), list)
+                    or any(not isinstance(slot, str) for slot in screen['typing_clipped'])):
                 raise CheckError('답을 채운 폰 화면의 넘침을 확인할 수 없습니다.')
+            info['typing_screen_clipped'] = screen['typing_clipped']
+            if screen['typing_clipped']:
+                _problem(problems, 'warning', 'typing-screen-clipped', None, None,
+                         '답을 입력하는 동안 폰 화면에서 잘리는 칸: ' + ', '.join(screen['typing_clipped']),
+                         '해당 한 줄 입력 칸의 폭과 실제 표시를 확인하세요.')
             screen['pen_sizes'] = _pen_sizes(protocol)
             info['filled_screen'] = screen
             filled_aspects = _pen_aspects(screen['pen_sizes'])

@@ -199,6 +199,39 @@ def _page_for(report, item):
     return next((entry.get("page") for entry in report.get("items", []) if entry.get("id") == item), None)
 
 
+_HANDWRITING_LINE_MM = 8
+
+
+def _grow_handwriting_height(key, width):
+    available = width - 3.6
+    if available <= 0:
+        return float('inf')
+    # 문장마다 새 줄에서 쓰는 경우까지 여유를 둔다. 소수점 뒤에는 공백이 없다.
+    parts = re.split(r'(?<=[.!?。！？])\s+|\n', key.strip())
+    lines = sum(max(1, math.ceil(sum(2.25 if char.isspace() else 4.5 for char in part) / available))
+                for part in parts)
+    return lines * _HANDWRITING_LINE_MM + 2
+
+
+def _audit_grow(teacher_report, student_report, problems):
+    keys = {(box.get('item'), box.get('index')): box.get('key_text') or ''
+            for box in teacher_report.get('boxes', []) if box.get('kind') == 'text'}
+    for box in student_report.get('boxes', []):
+        if box.get('kind') != 'text' or not box.get('grow') or box.get('height_mm', 0) <= 40:
+            continue
+        item, index = box.get('item'), box.get('index', 0)
+        key = keys.get((item, index), '')
+        if not key.strip():
+            continue
+        height = box['height_mm']
+        required = _grow_handwriting_height(key, box.get('width_mm', 0))
+        # 한 줄의 여유를 더 허용해 식을 여러 줄에 나눠 쓰는 답까지 과하게 잡지 않는다.
+        if height > 3 * required + _HANDWRITING_LINE_MM:
+            _problem(problems, 'warning', 'grow-excess', _page_for(student_report, item), item,
+                     f'{index + 1}번 답 칸의 예상 필기 높이는 {required:.1f}mm, 늘이기 뒤 높이는 {height:.1f}mm입니다.',
+                     '짧은 답 칸은 늘이기를 끄고, 남는 공간은 서술 칸이나 쪽 아래 여백으로 두세요.')
+
+
 def _audit_report(report, role, problems):
     fixes = {
         "too-tall": "문항 묶음을 나누거나 내용을 줄이세요.",
@@ -1032,6 +1065,7 @@ def cmd_check(folder: Path) -> int:
         _audit_source(teacher_text, student_text, keys, problems, teacher_public)
         _audit_report(teacher_report, "교사용", problems)
         _audit_report(student_report, "학생용", problems)
+        _audit_grow(teacher_report, student_report, problems)
         for role, engine, pdf in (('교사용', teacher_report, teacher_pdf), ('학생용', student_report, student_pdf)):
             engine['print_graph_labels'] = _audit_graph_labels(pdf, engine.pop('graph_regions', []), role, problems)
         _audit_fill(student_report, problems)
@@ -1225,16 +1259,23 @@ def _edited_plan_status(teacher, build, warnings):
         try:
             if build.get('source_sha256') == _sha(source):
                 original = _json(source).get('meta', {})
-                grade, unit = original.get('grade'), original.get('unit')
+                grade, unit = build.get('grade', original.get('grade')), build.get('unit', original.get('unit'))
         except (OSError, ValueError, AttributeError):
             pass
-        head = next((el for el in public.elements() if el.attrs.get('data-id') == 'head'), None)
-        if head is not None and grade is None:
+    head = next((el for el in public.elements() if el.attrs.get('data-id') == 'head'), None)
+    if head is not None:
+        if grade is None and 'grade' not in build:
             grade = next((el.text() for el in head.walk(public=True) if el.has('ws-head-name') or el.has('ws-head-1')
                           if grade_level(el.text()) is not None), None)
+        for field in head.walk(public=True):
+            if field.has('ws-head-2') or (field.tag == 'td' and 'data-src' in field.attrs):
+                match = re.match(r'\s*(?:단원|평가영역)\s*[:：]\s*(.*)', field.text())
+                if match:
+                    unit = match[1].strip()
+                    break
     validator = Validator(teacher.parent)
     # 단원 조건이 있는 표현 점검(작도 단원의 ‘호’ 등)도 원고 검증과 같은 문맥으로 본다.
-    title = next((el.text() for el in doc.root.elements() if el.tag == 'title'), None)
+    title = next((el.text() for el in root.walk() if el.tag == 'title' and el.parent.tag == 'head'), None)
     validator.set_text_context({'grade': grade, 'unit': unit, 'title': title})
     validator.kind = root.attrs.get('data-kind', '수업')
 

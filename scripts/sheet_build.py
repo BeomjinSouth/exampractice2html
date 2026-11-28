@@ -22,7 +22,8 @@ from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_mark
 from sheet_plan import (answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
-from sheet_answer import canonical, check_hash, inferred_unit, input_mode, make_salt, num, number_forms, plain, reveal, text_candidates
+from sheet_answer import (canonical, check_hash, inferred_unit, input_mode, make_salt, normalized_unit,
+                          num, number_forms, plain, reveal, text_candidates)
 
 KEY_COLOR = '#c00000'  # --ws-key-color; data images cannot inherit the document's CSS.
 TEACHER_ONLY = 'ws-teacher-only'
@@ -112,8 +113,8 @@ def cols(*widths):
     return '<colgroup>' + ''.join(f'<col style="width:{mm(w)}mm">' for w in widths) + '</colgroup>'
 
 
-def table(cls, widths, body, head=''):
-    return f'<table class="{cls}">{cols(*widths)}{head}<tbody>{body}</tbody></table>'
+def table(cls, widths, body, head='', attrs=''):
+    return f'<table class="{cls}"{attrs}>{cols(*widths)}{head}<tbody>{body}</tbody></table>'
 
 
 def solve_only(block):
@@ -327,9 +328,9 @@ class Renderer:
         attrs['data-check'] = json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))
         return _attrs_text(attrs)
 
-    def blank_slot(self, answers, rendered, tail, column='', row=''):
+    def blank_slot(self, answers, rendered, tail, column='', row='', unit=''):
         return self.slot('writing', answers[0], accept=answers[1:], answer_html=rendered,
-                         unit=inferred_unit(tail, column, row), blank=True)
+                         unit=inferred_unit(tail, column, row, unit), blank=True)
 
     def answer_slot(self, answer, *, mode='auto', accept=(), draw=False, unit=''):
         if draw:
@@ -1075,21 +1076,29 @@ class Renderer:
                 widths = [width * self.content_mm / sum(widths) for width in widths]
             widest = max((blank.width_mm for row in (header, *block['rows']) for text in row
                           for blank in inspect_markup(text).blanks if blank.width_mm is not None), default=None)
-            head = '<thead>' + tr(''.join(editable('th', text, table_blank_mm=widest) for text in header)) + '</thead>'
-            # 칸 전체가 빈칸 하나뿐이면 칸 자체가 답 자리이므로 밑줄을 겹쳐 긋지 않는다(ws-fill).
-            columns = [inspect_markup(text).plain for text in header]
-            def cell(text, column, row_label):
-                whole = re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', text) is not None
-                hook = blank_hook.get()
-                token = blank_hook.set(lambda answers, markup, tail: hook(answers, markup, tail, column, row_label)) if hook else None
+            unit = normalized_unit(block.get('unit'))
+            hook = blank_hook.get()
+
+            def cell(tag, text, column='', row_label=''):
+                # 칸 전체가 빈칸 하나면 밑줄을 겹쳐 긋지 않는다(ws-fill).
+                whole = tag == 'td' and re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', text)
+                token = blank_hook.set(lambda a, markup, tail: hook(a, markup, tail, column, row_label, unit)) if hook else None
                 try:
-                    return editable('td', text, 'ws-fill' if whole else '', table_blank_mm=widest)
+                    return editable(tag, text, 'ws-fill' if whole else '', table_blank_mm=widest)
                 finally:
                     if token is not None:
                         blank_hook.reset(token)
-            body = ''.join(tr(''.join(cell(text, column, inspect_markup(row[0]).plain if i and not inspect_markup(row[0]).blanks else '')
-                                      for i, (text, column) in enumerate(zip(row, columns)))) for row in block['rows'])
-            return table('ws-data', widths, body, head)
+
+            head = '<thead>' + tr(''.join(cell('th', text) for text in header)) + '</thead>'
+            columns = [node.text(without_blanks=True) for node in _Document(head).root.walk() if node.tag == 'th']
+            rows = []
+            for row in block['rows']:
+                first = inspect_markup(row[0])
+                label = '' if first.blanks else _Document(first.html).root.text()
+                rows.append(tr(''.join(cell('td', text, column, label if i else '')
+                                       for i, (text, column) in enumerate(zip(row, columns)))))
+            attrs = _attrs_text({'data-table-unit': unit}) if unit else ''
+            return table('ws-data', widths, ''.join(rows), head, attrs)
         if kind == 'figure':
             return self.picture(block)
         if kind == 'figures':
@@ -1548,13 +1557,13 @@ def _table_unit(el, tail=''):
     index = cells.index(cell)
     column = row_label = ''
     if table.has('ws-data') or table.has('ws-steps'):
-        # Table header blanks are rendered outside the assembler's unit context.
+        # Header blanks use the table default, not other cells of the header.
         head = next((node for node in table.elements() if node.tag == 'thead'), None)
         if head and head.elements() and row.parent is not head:
             headings = head.elements()[0].elements()
             if index < len(headings):
                 column = headings[index].text(without_blanks=True)
-        if table.has('ws-data') and index and not any(node.has('ws-blank') for node in cells[0].walk()):
+        if table.has('ws-data') and row.parent is not head and index and not any(node.has('ws-blank') for node in cells[0].walk()):
             row_label = cells[0].text()
     elif table.has('ws-ans-table'):
         rows = row.parent.elements()
@@ -1566,7 +1575,7 @@ def _table_unit(el, tail=''):
                     label = next((node for node in lab.walk() if node.has('ws-lab-text')), lab)
                     row_label = label.text(without_blanks=True)
                 break
-    return inferred_unit(tail, column, row_label)
+    return inferred_unit(tail, column, row_label, table.attrs.get('data-table-unit') if table.has('ws-data') else '')
 
 
 _TEXT_ATTRS = ('data-check-kind', 'data-check-hash', 'data-check-unit', 'data-check', 'data-input-mode')

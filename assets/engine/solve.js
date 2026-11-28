@@ -54,12 +54,18 @@
     return n == null ? null : [n, unit === '도' ? '°' : unit];
   }
   const num = s => number_parts(s)?.[0] ?? null;
-  function inferred_unit(tail, column = '', row = '') {
-    // 표의 명시 단위가 문장 뒤의 모호한 단위보다 우선한다.
+  function normalizedUnit(value) {
+    const unit = norm(value);
+    return unit === '도' ? '°' : units.includes(unit) ? unit : '';
+  }
+  function inferred_unit(tail, column = '', row = '', table = '') {
+    // 열 머리 → 행 라벨 → 표 전체 → 빈칸 뒤 순으로 본다.
     for (const heading of [column, row]) {
-      const unit = norm(/\(([^()]*)\)\s*$/.exec(heading.normalize('NFKC'))?.[1] ?? '');
-      if (units.includes(unit)) return unit === '도' ? '°' : unit;
+      const unit = normalizedUnit(/\(([^()]*)\)\s*$/.exec(heading.normalize('NFKC'))?.[1] ?? '');
+      if (unit) return unit;
     }
+    const fallback = normalizedUnit(table);
+    if (fallback) return fallback;
     const text = tail.normalize('NFKC').toLowerCase().replace(/^[ \t]+/, '');
     const particles = '(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?';
     for (const unit of [...units].sort((a, b) => b.length - a.length)) {
@@ -530,7 +536,7 @@
     const read = node => {
       if (!node) return '';
       const copy = node.cloneNode(true);
-      for (const blank of all(copy, '.ws-blank, [data-sheet-runtime]')) blank.remove();
+      for (const ignored of all(copy, '.ws-blank, .ws-tools, [data-sheet-runtime]')) ignored.remove();
       return copy.textContent.trim();
     };
     if (!tr || !table) return { row: '', column: '' };
@@ -548,10 +554,11 @@
     const heads = table.tHead?.rows[0];
     const first = tr.cells[0];
     const rowHead = tr.querySelector(':scope > th.ws-lab, :scope > th.ws-step-n');
-    const row = read(rowHead?.querySelector('.ws-lab-text') ?? rowHead ??
+    const inHead = tr.parentElement === table.tHead;
+    const row = forGrading && inHead ? '' : read(rowHead?.querySelector('.ws-lab-text') ?? rowHead ??
       (table.matches('.ws-data') && first !== cell && !first.querySelector('.ws-blank') ? first : null));
-    const column = forGrading && tr.parentElement === table.tHead ? '' : read(heads?.cells[cell.cellIndex]);
-    return { row, column };
+    const column = forGrading && inHead ? '' : read(heads?.cells[cell.cellIndex]);
+    return { row, column, unit: table.matches('.ws-data') ? table.dataset.tableUnit : undefined };
   }
   function field(row) {
     const { el, kind } = row, multiline = el.matches('.ws-ans');
@@ -1628,8 +1635,8 @@
       attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
       if (canGrade) {
         if (kind === 'number') {
-          const { column, row } = options.headings;
-          const forms = number_forms(answers, inferred_unit(options.tail ?? '', column, row));
+          const { column, row, unit } = options.headings;
+          const forms = number_forms(answers, inferred_unit(options.tail ?? '', column, row, unit));
           if (forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
           for (const form of forms) valid.add(form);
         }
@@ -1689,6 +1696,61 @@
       revert() { write(oldSrc, oldHtml, original); },
     };
   }
+  function resetPanel(item) {
+    const panel = panels.get(item);
+    if (!panel) return;
+    panel.bar?.remove(); panel.solutionBox?.remove(); panel.compareBox?.remove(); panels.delete(item);
+  }
+  function writeAnswer(el, result) {
+    applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
+    const row = recordByNode.get(el);
+    if (!row) return;
+    row.result = null; row.reveal?.remove(); row.reveal = undefined;
+    const input = el.querySelector('.ws-in');
+    if (input) applyAttrs(input, { inputmode: result.attrs['data-input-mode'] });
+  }
+  function tableAnswerUpdates(table, editedField) {
+    // 원본 표기에서 정답·대안·빈칸 바로 뒤의 글을 읽는다. 이미 붙은 해시로는 단위를 되돌릴 수 없다.
+    const answers = [];
+    for (const field of all(table, '[data-src]')) {
+      if (field === editedField || field.closest('table') !== table || field.closest('.ws-teacher-only')) continue;
+      const writing = field.closest('.ws-ans[data-slot][data-check-kind="number"]');
+      if (writing && field.matches('.ws-key')) {
+        answers.push([writing, field.dataset.src, field.innerHTML, json(writing.dataset.check, {}), false]);
+        continue;
+      }
+      if (field.closest('.ws-key')) continue;
+      const nodes = all(field, '.ws-blank[data-slot]');
+      if (!nodes.some(el => el.dataset.checkKind === 'number')) continue;
+      const blanks = [];
+      core.renderMarkup(field.dataset.src, blank => blanks.push(blank));
+      if (nodes.length !== blanks.length) continue;
+      nodes.forEach((el, i) => {
+        const { answer, accept, html, tail } = blanks[i];
+        if (el.dataset.checkKind === 'number') answers.push([el, answer, html, { accept, tail }, true]);
+      });
+    }
+    return () => {
+      for (const [el, source, html, options, blank] of answers) {
+        const result = changedAnswer(el, source, html, { ...options, headings: tableHeadings(el, true) }, blank);
+        if (result.attrs['data-check-hash'] !== el.getAttribute('data-check-hash') ||
+            result.attrs['data-check-unit'] !== el.getAttribute('data-check-unit')) writeAnswer(el, result);
+      }
+    };
+  }
+  function editTableUnit(table, value) {
+    const previous = table.getAttribute('data-table-unit');
+    const unit = normalizedUnit(value) || null;
+    if (value.trim() && !unit) throw new Error('점, 명, cm처럼 단위 하나만 쓰세요. 단위를 없애려면 비워 두세요.');
+    if (unit === previous) return null;
+    const refresh = tableAnswerUpdates(table);
+    const write = next => {
+      applyAttrs(table, { 'data-table-unit': next });
+      refresh();
+      resetPanel(table.closest('.ws-item'));
+    };
+    return { apply: () => write(unit), revert: () => write(previous) };
+  }
   function editMarkup(target, source, html, blanks) {
     const item = target.closest('.ws-item');
     if (!item) return null;
@@ -1701,39 +1763,31 @@
     const writing = target.closest('.ws-ans[data-slot]');
     const key = target.closest('.ws-key');
     const isAnswer = writing?.matches(':not([data-kind="draw"])') && !!key;
-    if (!key) {
-      for (const [i,el] of newBlanks.entries()) {
-        el.dataset.slot = ''; // assigned after the edited nodes are inserted
-        const { answer, accept, html, tail } = blanks[i];
-        const result = changedAnswer(el, answer, html, { accept, tail, headings: tableHeadings(target, true) }, true);
-        applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
-      }
-    }
+    const table = target.closest('table');
+    const refresh = !key && table?.matches('.ws-data, .ws-steps, .ws-ans-table') ? tableAnswerUpdates(table, target) : null;
     const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check','data-input-mode'].map(name => [name,writing.getAttribute(name)])) : null;
     const oldReveal = isAnswer ? slotReveal.get(writing) : undefined;
     const updated = isAnswer ? changedAnswer(writing, source, html, { ...json(writing.dataset.check, {}), headings: tableHeadings(writing, true) }, false) : null;
     function write(text, children, result) {
       target.dataset.src = text; target.replaceChildren(...children);
-      if (isAnswer) {
-        applyAttrs(writing, result.attrs); slotReveal.set(writing, result.reveal);
-        const row = recordByNode.get(writing);
-        if (row) {
-          row.result = null; row.reveal?.remove(); row.reveal = undefined;
-          const input = writing.querySelector('.ws-in');
-          if (input) applyAttrs(input, { inputmode: result.attrs['data-input-mode'] });
-        }
-      }
-      const panel = panels.get(item);
-      if (panel) {
-        panel.bar?.remove(); panel.solutionBox?.remove(); panel.compareBox?.remove(); panels.delete(item);
-      }
+      if (isAnswer) writeAnswer(writing, result);
+      refresh?.();
+      resetPanel(item);
     }
     const fill = target.matches('td:not(.ws-ans)') && (target.classList.contains('ws-fill') || oldBlanks.length || newBlanks.length);
     const hadFill = target.classList.contains('ws-fill');
     const nextFill = newChildren.filter(n => n.nodeType !== Node.TEXT_NODE || n.textContent.trim()).length === 1 &&
       newChildren.some(n => n.nodeType === Node.ELEMENT_NODE && n.matches('.ws-blank'));
     return {
-      apply() { write(source, newChildren, updated); if (fill) target.classList.toggle('ws-fill', nextFill); },
+      apply() {
+        write(source, newChildren, updated);
+        if (!key) for (const [i, el] of newBlanks.entries()) {
+          el.dataset.slot = ''; // assigned in layout order after the edit
+          const { answer, accept, html, tail } = blanks[i];
+          writeAnswer(el, changedAnswer(el, answer, html, { accept, tail, headings: tableHeadings(el, true) }, true));
+        }
+        if (fill) target.classList.toggle('ws-fill', nextFill);
+      },
       revert() { write(oldSrc, oldChildren, { attrs: oldAttrs, reveal: oldReveal }); if (fill) target.classList.toggle('ws-fill', hadFill); },
     };
   }
@@ -1804,7 +1858,7 @@
   }
 
   core.attach({ init, layoutFlow, afterLayout, studentPreview: () => preview, beforePrintButton, report,
-    editMarkup, copiedItem, cleanItem, cleanDocument, revealData });
+    editMarkup, editTableUnit, copiedItem, cleanItem, cleanDocument, revealData });
   core.restorePending = () => !!pendingRestore;
   core.verdicts = () => Object.fromEntries([...records.values()].filter(r => r.auto).map(r => [r.slot, r.result]));
   Object.assign(window.sheet, { view, slots, answer, values, score, clearAnswers });

@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from sheet_common import (KINDS, LABEL_MM, PICTURE_CELL_PADDING_MM, PLACEHOLDER, RASTER_MIMES, ROOT, SOURCE,
                           SPLIT_RATIOS, box_five, box_tick_values, content_width_mm, figure_width_mm, image_path,
                           situation_cell_mm, split_widths_mm, youtube_id)
-from sheet_answer import UNITS, norm, num, plain
+from sheet_answer import UNITS, norm, normalized_unit, num, plain
 
 
 def ambiguous_answer(value):
@@ -1298,6 +1298,9 @@ class Validator:
             if 'cols' in block:
                 self.integer(block['cols'], path + '.cols', 1, limit)
         elif kind == 'table':
+            if 'unit' in block and not normalized_unit(block['unit']):
+                self.error(path + '.unit', '판별에 쓸 수 있는 단위가 아닙니다.',
+                           '점, 명, cm처럼 숫자 없이 단위 하나만 쓰거나 unit을 빼세요.', 'table-unit')
             header = self.texts(block.get('header'), path + '.header', field='header[]')
             for i, label in enumerate(header or []):
                 if isinstance(label, str) and CATEGORY_HEADER_UNIT.fullmatch(label):

@@ -305,6 +305,32 @@ class BuildTest(unittest.TestCase):
         self.assertIn(check_hash(renderer.salt, 'number', '3@cm'), hashes)
         self.assertNotIn(check_hash(renderer.salt, 'number', '3@일'), hashes)
 
+    def test_table_unit_defaults_and_overrides_survive_derive(self):
+        data = {'version': 1, 'meta': {'title': self.title, 'interactive': True}, 'items': [{'id': 'q1', 'blocks': [
+            {'type': 'table', 'unit': '점', 'header': ['반', '최솟값', '길이(cm)', '{{|2}}'],
+             'rows': [['1반', '{{|45}}', '{{|3}}', ''], ['시간(분)', '{{|50}}', '{{|4}}', '']]}]}]}
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.cli('build', self.folder)
+        expected = [('2', '점'), ('45', '점'), ('3', 'cm'), ('50', '분'), ('4', 'cm')]
+        for after_derive in (False, True):
+            with self.subTest(after_derive=after_derive):
+                if after_derive:
+                    self.cli('derive', self.teacher)
+                slots = [a for _, a in Tags(self.student.read_text(encoding='utf-8')).tags
+                         if a.get('data-slot', '').startswith('q1.')]
+                self.assertEqual(len(slots), len(expected))
+                salt = '00112233445566778899aabbccddeeff'
+                for attrs, (number, unit) in zip(slots, expected):
+                    self.assertEqual(attrs.get('data-check-unit'), '1')
+                    self.assertEqual(set(attrs['data-check-hash'].split(',')),
+                                     {check_hash(salt, 'number', v) for v in (number, f'{number}@{unit}')})
+
+    def test_plan_rejects_invalid_table_unit(self):
+        data = {'version': 1, 'meta': {'title': self.title}, 'items': [{'id': 'q1', 'blocks': [
+            {'type': 'table', 'unit': '점수', 'header': ['값'], 'rows': [['{{|45}}']]}]}]}
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.assertIn('table-unit', self.cli('plan', self.folder, status=1))
+
     def test_coordinate_names_clear_tick_labels(self):
         from itertools import combinations
         from xml.etree import ElementTree as ET

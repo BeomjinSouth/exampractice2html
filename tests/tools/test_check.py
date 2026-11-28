@@ -14,6 +14,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[2]
 TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT / 'tests' / '_out' / '검사-시험'))
 sys.path.insert(0, str(ROOT / 'scripts'))
+import sheet_build
 import sheet_check
 
 
@@ -425,6 +426,115 @@ class CheckBoundaryTest(unittest.TestCase):
             self.assertEqual(sheet_check._contact_sheets(out, [('학생', 1, out / '학생-01.png')], problems), [])
         self.assertEqual(problems[0]['code'], 'pillow-missing')
         self.assertTrue((out / '_이전/모아보기-흑백.png').is_file())
+
+
+class DeliveryGateTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import time
+        self.temp = tempfile.TemporaryDirectory(dir=TRIALS if TRIALS.exists() else None)
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name)
+        self.out = self.folder / '검사'
+        self.out.mkdir()
+        self.teacher = self.folder / '활동 (교사용).html'
+        self.student = self.folder / '활동.html'
+        self.digest = sheet_build.engine_sha256()
+        self.write_html(self.teacher)
+        self.write_html(self.student, interactive=True, sync=True)
+        for path in (self.teacher, self.student):
+            path.with_suffix('.pdf').write_bytes(b'%PDF')
+        (self.folder / '구성.json').write_text('{}', encoding='utf-8')
+        self.build = {'source_sha256': sheet_check._sha(self.folder / '구성.json'), 'engine_sha256': self.digest,
+                      'teacher': {'file': self.teacher.name}, 'student': {'file': self.student.name}}
+        self.write_build()
+        self.report = {'student': {'interactive': True, 'pages': [{'n': 1, 'teacher': False}]},
+                       'teacher': {'pages': [{'n': 1, 'teacher': False}, {'n': 2, 'teacher': True}]},
+                       'interactive_check': {'screens': [{'width': 390, 'height': 844}, {'width': 1024, 'height': 768}],
+                           'grading': 'passed', 'answer_slots': 3, 'filled_inputs': {'auto': 3, 'open_box': 1, 'name': 1},
+                           'filled_restored': True}, 'problems': []}
+        self.report_path = self.out / 'report.json'
+        self.report_path.write_text(json.dumps(self.report, ensure_ascii=False), encoding='utf-8')
+        self.review = self.out / '검토.md'
+        self.review.write_text('판정: 통과\n검수: 자체\n학생 1쪽\n교사용 1쪽\n교사용 2쪽\n'
+                               '## 내용 검산\n확인\n## 화면 확인\n확인\n', encoding='utf-8')
+        for name in ('학생-01.png', '교사-01.png', '교사-02.png'):
+            (self.out / name).write_bytes(b'page')
+        base = time.time_ns() - 10_000_000_000
+        for path, delta in ((self.teacher, 1), (self.student, 1), (self.report_path, 2), (self.review, 3)):
+            os.utime(path, ns=(base + delta * 1_000_000_000,) * 2)
+
+    def write_html(self, path, digest=None, interactive=False, sync=False):
+        import html
+        meta = html.escape(json.dumps({'engine_sha256': digest or self.digest}), quote=True)
+        root = ' data-interactive="1"' if interactive else ''
+        sync_meta = '<meta name="sheet-sync" content="PRIVATE-CONFIG">' if sync else ''
+        path.write_text(f'<html{root}><head><meta name="sheet-build" content="{meta}">{sync_meta}</head><body></body></html>', encoding='utf-8')
+
+    def write_build(self):
+        (self.out / 'build.json').write_text(json.dumps(self.build), encoding='utf-8')
+
+    def status(self):
+        with patch.object(sheet_check, '_plan_status', return_value=(True, 'plan 오류 0개')), contextlib.redirect_stdout(io.StringIO()) as output:
+            result = sheet_check.cmd_status(self.folder)
+        return result, output.getvalue()
+
+    def test_fingerprint_and_delivery_draft(self):
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        for expected in ('전달 문안 초안', '학생 1쪽, 교사 2쪽', '390×844', '1024×768', '3곳 통과',
+                         '채움 인쇄 검사', '실제 인쇄', '실제 기기', '다른 브라우저', '난독화', '개인정보'):
+            self.assertIn(expected, output)
+        self.assertNotIn('PRIVATE-CONFIG', output)
+        self.assertTrue(output.rstrip().endswith('이 활동지 스킬이 도움이 됐다면 GitHub에 ⭐ 하나 부탁드려요 → https://github.com/BeomjinSouth/exampractice2html'))
+        self.build['engine_sha256'] = '0' * 64
+        self.write_build()
+        result, output = self.status()
+        self.assertEqual(result, 1)
+        self.assertIn('설치된 스킬과 다른 엔진으로 조립됐습니다', output)
+        self.assertNotIn('전달 문안 초안', output)
+
+    def test_html_engine_mismatch_and_missing_page_block(self):
+        self.write_html(self.teacher, digest='f' * 64)
+        result, output = self.status()
+        self.assertEqual(result, 1)
+        self.assertIn('설치된 스킬과 다른 엔진으로 조립됐습니다', output)
+        self.write_html(self.teacher)
+        (self.out / '교사-02.png').unlink()
+        result, output = self.status()
+        self.assertEqual(result, 1)
+        self.assertIn('쪽 그림이 없어 눈으로 검토할 수 없습니다', output)
+        self.assertIn('python -m pip install pymupdf pillow', output)
+
+    def test_fingerprint_changes_with_engine_and_assembly_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = ('assets/engine/sheet.js', 'assets/templates/구성.json', 'assets/kit/blocks.json',
+                     'scripts/sheet_build.py', 'scripts/sheet_markup.py', 'scripts/sheet_answer.py',
+                     'scripts/sheet_plan.py', 'scripts/sheet_common.py', 'scripts/sheet_sync.py')
+            for name in files:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name, encoding='utf-8')
+            with patch.object(sheet_build, 'ROOT', root):
+                initial = sheet_build.engine_sha256()
+                self.assertEqual(initial, sheet_build.engine_sha256())
+                (root / 'assets/engine/sheet.js').write_text('수정된 엔진', encoding='utf-8')
+                changed_engine = sheet_build.engine_sha256()
+                self.assertNotEqual(initial, changed_engine)
+                (root / 'scripts/sheet_build.py').write_text('수정된 조립기', encoding='utf-8')
+                self.assertNotEqual(changed_engine, sheet_build.engine_sha256())
+
+    def test_doctor_does_not_print_configuration(self):
+        import sheet
+        secret = self.folder / 'sync.json'
+        secret.write_text('PRIVATE-CONFIG', encoding='utf-8')
+        with patch.dict(os.environ, {'SHEET_SYNC_CONFIG': str(secret)}), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sheet.cmd_doctor(), 0)
+        self.assertIn('학생 기록 설정 파일 | 있음', output.getvalue())
+        self.assertNotIn('PRIVATE-CONFIG', output.getvalue())
+        self.assertNotIn(str(secret), output.getvalue())
 
 
 if __name__ == '__main__':

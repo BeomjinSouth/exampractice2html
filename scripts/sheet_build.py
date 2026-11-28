@@ -1280,6 +1280,24 @@ def load_manifest(folder):
     return record
 
 
+def engine_sha256():
+    """조립에 영향을 주는 설치본의 경로와 파일 내용을 함께 지문으로 만든다."""
+    paths = [path for directory in ('assets/engine', 'assets/templates')
+             for path in (ROOT / directory).rglob('*') if path.is_file()]
+    paths += [ROOT / name for name in ('assets/kit/blocks.json', 'scripts/sheet_build.py',
+              'scripts/sheet_markup.py', 'scripts/sheet_answer.py', 'scripts/sheet_plan.py',
+              'scripts/sheet_common.py', 'scripts/sheet_sync.py')]
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda p: p.relative_to(ROOT).as_posix()):
+        name = path.relative_to(ROOT).as_posix().encode('utf-8')
+        content = path.read_bytes()
+        digest.update(len(name).to_bytes(8, 'big'))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, 'big'))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def file_record(path, data):
     return {'file': path.name, 'sha256': sha256(data)}
 
@@ -1312,7 +1330,7 @@ def cmd_build(folder: Path, force=False) -> int:
         print('다음: 편집을 보존하려면 derive를, 덮어쓰려면 원본을 백업한 뒤 build --force를 실행하세요.')
         return 1
     metadata = {'tool': TOOL, 'version': VERSION, 'built_at': datetime.now(timezone.utc).isoformat(),
-                'source_sha256': sha256(source)}
+                'source_sha256': sha256(source), 'engine_sha256': engine_sha256()}
     warnings = []
     font_css, font_bytes = font_styles(data, warnings)
     renderer = Renderer(data, folder, warnings)

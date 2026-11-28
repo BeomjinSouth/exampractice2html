@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from fractions import Fraction
 import json
+from html.parser import HTMLParser
 import math
 import operator
 from pathlib import Path
@@ -26,6 +27,41 @@ class Issue:
     path: str
     message: str
     hint: str
+    code: str = ''
+
+
+@lru_cache(maxsize=1)
+def load_terms():
+    return json.loads((ROOT / 'assets/kit/terms.json').read_text(encoding='utf-8'))
+
+
+def grade_level(value):
+    if not isinstance(value, str) or '고' in value or '초' in value:
+        return None
+    match = re.search(r'중\s*(?:학교\s*)?([123])(?!\d)(?:\s*학년)?|(?<!\d)([123])\s*학년', value)
+    return int(match.group(1) or match.group(2)) if match else None
+
+
+class StudentText(HTMLParser):
+    """렌더된 빈칸의 정답은 빼고 학생에게 보이는 수식·글만 모은다."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if self.hidden:
+            self.hidden += 1
+        elif 'ws-key' in dict(attrs).get('class', '').split():
+            self.hidden = 1
+
+    def handle_endtag(self, tag):
+        if self.hidden:
+            self.hidden -= 1
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
 
 
 @lru_cache(maxsize=1)
@@ -188,8 +224,33 @@ class Validator:
     def error(self, path, message, hint):
         self.issues.append(Issue('error', path, message, hint))
 
-    def warn(self, path, message, hint):
-        self.issues.append(Issue('warning', path, message, hint))
+    def warn(self, path, message, hint, code=''):
+        self.issues.append(Issue('warning', path, message, hint, code))
+
+    def check_terms(self, parsed, path):
+        if self.grade is None:
+            return
+        text = StudentText()
+        text.feed(parsed.html)
+        visible = ''.join(text.parts)
+        levels = load_terms()['levels']
+        for entry in load_terms()['terms']:
+            level = entry['level']
+            if level not in levels or levels.index(level) < self.grade:
+                continue
+            term = entry['term']
+            prefixes = entry.get('skip_if_preceded_by', [])
+            if isinstance(prefixes, str):
+                prefixes = [prefixes]
+            for match in re.finditer(re.escape(term), visible):
+                before = visible[:match.start()]
+                if any(before.endswith(prefix) for prefix in prefixes):
+                    continue
+                hint = '일상어가 아니라면 이 학년에서 배운 말로 바꾸세요.'
+                if entry.get('note'):
+                    hint += ' ' + entry['note']
+                self.warn(path, f'‘{term}’ 용어는 {level}에서 처음 나옵니다.', hint, 'term-beyond-grade')
+                break
 
     def object(self, value, path, allowed):
         if not isinstance(value, dict):
@@ -223,7 +284,7 @@ class Validator:
             if key in value and type(value[key]) is not bool:
                 self.error(f'{path}.{key}', '참·거짓 값이 필요합니다.', 'true 또는 false를 쓰세요.')
 
-    def text(self, value, path, *, empty=False, private=False, local=False, field=None):
+    def text(self, value, path, *, empty=False, private=False, local=False, field=None, term_visible=None):
         if not isinstance(value, str) or (not empty and not value.strip()):
             self.error(path, '글자 내용이 필요합니다.', '비어 있지 않은 문자열을 쓰세요.')
             return None
@@ -242,6 +303,8 @@ class Validator:
             return None
         if not empty and not parsed.plain.strip():
             self.error(path, '표기 안에 실제 내용이 없습니다.', '화면에 보일 글자나 수식을 쓰세요.')
+        if term_visible is True or (term_visible is None and not private):
+            self.check_terms(parsed, path)
         limit = self.limits.get(field)
         if limit is not None and len(parsed.plain) > limit:
             self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.')
@@ -314,7 +377,7 @@ class Validator:
                 message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else '그림 파일을 읽지 못했습니다.'
                 self.error(where, message, '활동지 폴더 안의 읽을 수 있는 그림을 지정하세요.')
         if 'alt' in value or 'src' in value:
-            parsed = self.text(value.get('alt'), path + '.alt', private=True, field=field + 'alt')
+            parsed = self.text(value.get('alt'), path + '.alt', private=True, term_visible=not private, field=field + 'alt')
             if parsed and parsed.blanks:
                 self.error(path + '.alt', '대체 설명에는 빈칸을 그릴 수 없습니다.', '정답이 없는 일반 설명으로 바꾸세요.')
         if 'caption' in value or caption_required:
@@ -433,7 +496,7 @@ class Validator:
             if 'names' in entry:
                 n = len(points) if points else 1
                 names = self.texts(entry['names'], where + '.names', minimum=n, maximum=n,
-                                   private=True, field='draw[].names[]') or []
+                                   private=True, term_visible=not entry.get('teacher', False), field='draw[].names[]') or []
                 for j, name in enumerate(names):
                     if isinstance(name, str) and '{{' in name:
                         self.error(f'{where}.names[{j}]', '점 이름에는 빈칸을 그릴 수 없습니다.', '빈칸은 발문이나 표로 옮기세요.')
@@ -527,6 +590,18 @@ class Validator:
                 if not math.isfinite(quotient) or abs(quotient - round(quotient)) > 1e-8:
                     self.error(f'{path}.answer[{i}]', '정답이 snap의 배수가 아닙니다.', 'snap에 맞는 값을 쓰세요.')
 
+    def frequencies(self, values, path, relative):
+        if not isinstance(values, list):
+            return
+        for i, value in enumerate(values):
+            if not is_number(value):
+                continue
+            where = f'{path}[{i}]'
+            if value < 0:
+                self.error(where, '도수는 음수일 수 없습니다.', '0 이상의 값을 쓰세요.')
+            if not relative and not float(value).is_integer():
+                self.warn(where, '도수가 정수가 아닙니다.', '자료의 개수인지 확인하고 필요하면 정수로 고치세요.', 'frequency-not-integer')
+
     def chart(self, block, path):
         kind = block.get('kind')
         if kind not in ('bar', 'line', 'histogram', 'polygon', 'scatter'):
@@ -565,6 +640,16 @@ class Validator:
                 bins = self.list(block.get('bins'), path + '.bins', 2) or []
                 if len(bins) != len(values) + 1 or not all(is_number(v) for v in bins) or any(a >= b for a, b in zip(bins, bins[1:])):
                     self.error(path + '.bins', '계급 경계가 맞지 않습니다.', '증가하는 경계 n+1개와 값 n개를 쓰세요.')
+                else:
+                    widths = [b - a for a, b in zip(bins, bins[1:])]
+                    if any(not math.isclose(width, widths[0], rel_tol=1e-9, abs_tol=1e-9) for width in widths[1:]):
+                        self.warn(path + '.bins', '계급의 폭이 서로 다릅니다.', '같은 계급 폭을 쓰거나 그래프의 뜻을 확인하세요.', 'unequal-bin-width')
+                label = block.get('y_label', '')
+                relative = isinstance(label, str) and ('상대도수' in label or '비율' in label)
+                self.frequencies(values, path + '.values', relative)
+                plot = block.get('plot')
+                if isinstance(plot, dict):
+                    self.frequencies(plot.get('answer'), path + '.plot.answer', relative)
         if 'plot' in block:
             if kind not in ('bar', 'histogram'):
                 self.error(path + '.plot', '이 그래프에는 막대를 그릴 수 없습니다.', 'bar 또는 histogram을 쓰세요.')
@@ -743,7 +828,7 @@ class Validator:
                 else:
                     self.error(where + '.name', '매개변수 이름이 맞지 않습니다.', 'x를 제외한 서로 다른 영문 소문자 한 글자를 쓰세요.')
                 if 'label' in param:
-                    parsed = self.text(param['label'], where + '.label', private=True)
+                    parsed = self.text(param['label'], where + '.label', private=True, term_visible=True)
                     if parsed and parsed.blanks:
                         self.error(where + '.label', '슬라이더 이름에는 빈칸을 넣을 수 없습니다.', '$a$의 값처럼 글과 수식으로 쓰세요.')
                 low, high, step, value = (param.get(k) for k in ('min', 'max', 'step', 'value'))
@@ -855,17 +940,20 @@ class Validator:
         self.integer(data.get('version'), 'version', 1, 1)
         meta = data.get('meta')
         self.kind = meta.get('kind', '수업') if isinstance(meta, dict) else '수업'
+        self.grade = grade_level(meta.get('grade')) if isinstance(meta, dict) else None
         self.columns = meta.get('columns', 1) if isinstance(meta, dict) else 1
         if isinstance(meta, dict):
-            title = self.text(meta.get('title'), 'meta.title', private=True)
+            title = self.text(meta.get('title'), 'meta.title', private=True, term_visible=True)
             if title and title.blanks:
                 self.error('meta.title', '제목에는 빈칸 표기를 넣을 수 없습니다.', '빈칸은 상황이나 발문에 넣으세요.')
             for key in ('term', 'grade', 'subject', 'header_title', 'unit', 'goal'):
                 if key in meta and (key != 'header_title' or meta[key] is not None):
-                    parsed = self.text(meta[key], 'meta.' + key, empty=key in ('term', 'grade', 'subject', 'unit'), private=True)
+                    parsed = self.text(meta[key], 'meta.' + key, empty=key in ('term', 'grade', 'subject', 'unit'),
+                                       private=True, term_visible=key != 'goal')
                     if parsed and parsed.blanks:
                         self.error('meta.' + key, '머리표 정보에는 빈칸 표기를 넣을 수 없습니다.', '빈칸은 상황이나 발문에 넣으세요.')
-            for i, name in enumerate(self.texts(meta['name_fields'], 'meta.name_fields', minimum=1, maximum=3, private=True) or []
+            for i, name in enumerate(self.texts(meta['name_fields'], 'meta.name_fields', minimum=1, maximum=3,
+                                                private=True, term_visible=True) or []
                                      if 'name_fields' in meta else []):
                 if isinstance(name, str) and '{{' in name:
                     self.error(f'meta.name_fields[{i}]', '이름 항목에는 빈칸 표기를 넣을 수 없습니다.', '라벨만 쓰세요. 쓰기 공간은 자동으로 붙습니다.')
@@ -920,7 +1008,8 @@ def load_plan(folder: Path):
 def print_issues(issues):
     for issue in issues:
         label = '오류' if issue.level == 'error' else '경고'
-        print(f'{label} {issue.path}: {issue.message} 수정: {issue.hint}')
+        code = f' {issue.code}' if issue.code else ''
+        print(f'{label}{code} {issue.path}: {issue.message} 수정: {issue.hint}')
 
 
 def cmd_plan(folder: Path) -> int:

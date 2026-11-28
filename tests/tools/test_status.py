@@ -1,4 +1,5 @@
 import contextlib
+import html
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[2]
 TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT.parent / '시험' / '검사-시험'))
 sys.path.insert(0, str(ROOT / 'scripts'))
+import sheet_build
 import sheet_check
 
 
@@ -25,17 +27,22 @@ class StatusTest(unittest.TestCase):
         self.teacher = self.folder / '활동 (교사용).html'
         self.student = self.folder / '활동.html'
         self.source.write_text('{}', encoding='utf-8')
-        self.teacher.write_text('<html data-role="teacher"></html>', encoding='utf-8')
-        self.student.write_text('<html data-role="student"></html>', encoding='utf-8')
+        self.engine = sheet_build.engine_sha256()
+        metadata = html.escape(json.dumps({'engine_sha256': self.engine}), quote=True)
+        self.teacher.write_text(f'<html data-role="teacher"><head><meta name="sheet-build" content="{metadata}"></head></html>', encoding='utf-8')
+        self.student.write_text(f'<html data-role="student"><head><meta name="sheet-build" content="{metadata}"></head></html>', encoding='utf-8')
         for path in (self.teacher, self.student):
             path.with_suffix('.pdf').write_bytes(b'%PDF')
         self.build = self.out / 'build.json'
-        self.build.write_text(json.dumps({'source_sha256': sheet_check._sha(self.source),
+        self.build.write_text(json.dumps({'source_sha256': sheet_check._sha(self.source), 'engine_sha256': self.engine,
             'teacher': {'file': self.teacher.name, 'sha256': sheet_check._sha(self.teacher)},
             'student': {'file': self.student.name, 'sha256': sheet_check._sha(self.student)}}), encoding='utf-8')
         self.report = self.out / 'report.json'
         self.data = {'teacher': {'pages': [{'n': 1, 'teacher': False}, {'n': 2, 'teacher': True}]},
                      'student': {'pages': [{'n': 1, 'teacher': False}]}, 'problems': []}
+        for role, prefix in (('student', '학생'), ('teacher', '교사')):
+            for page in self.data[role]['pages']:
+                (self.out / f'{prefix}-{page["n"]:02d}.png').write_bytes(b'page')
         self.write_report()
         self.review = self.out / '검토.md'
         self.review.write_text('판정: 통과\n검수: 자체\n1쪽 확인\n교사용 1쪽 확인\n교사용 2쪽 확인\n## 내용 검산\n정답과 풀이를 확인함.\n', encoding='utf-8')
@@ -110,7 +117,9 @@ class StatusTest(unittest.TestCase):
 
     def test_edited_teacher_is_original_even_when_source_changes(self):
         self.source.write_text('{"changed":true}', encoding='utf-8')
-        self.teacher.write_text('<html data-role="teacher" data-saved-at="2026-01-01">수정</html>', encoding='utf-8')
+        edited = self.teacher.read_text(encoding='utf-8').replace('data-role="teacher"',
+                                                                  'data-role="teacher" data-saved-at="2026-01-01"')
+        self.teacher.write_text(edited.replace('</html>', '수정</html>'), encoding='utf-8')
         self.stamp(self.teacher, 1)
         self.fake_plan.load_plan = lambda folder: ({}, b'', [types.SimpleNamespace(level='error')])
         result, output = self.status()

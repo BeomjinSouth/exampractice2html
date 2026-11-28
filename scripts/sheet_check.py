@@ -816,6 +816,57 @@ def cmd_check(folder: Path) -> int:
         return 2
 
 
+class _DeliveryMeta(HTMLParser):
+    """조립 지문과 연동 여부만 읽고 연동 설정 값은 보관하지 않는다."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.build = None
+        self.sync = False
+        self.interactive = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'html':
+            self.interactive = 'data-interactive' in attrs
+        if tag == 'meta' and attrs.get('name') == 'sheet-build':
+            try:
+                self.build = json.loads(attrs.get('content', ''))
+            except (ValueError, TypeError):
+                self.build = None
+        elif tag == 'meta' and attrs.get('name') == 'sheet-sync':
+            self.sync = True
+
+
+def _delivery_meta(path):
+    parser = _DeliveryMeta()
+    with path.open(encoding='utf-8-sig') as source:
+        while True:
+            chunk = source.read(8192)
+            if not chunk:
+                break
+            end = re.search(r'</head\s*>', chunk, re.I)
+            parser.feed(chunk[:end.end()] if end else chunk)
+            if end:
+                break
+    parser.close()
+    return parser
+
+
+def _engine_matches(build, teacher, student):
+    from sheet_build import engine_sha256
+    installed = engine_sha256()
+    return (isinstance(build, dict) and build.get('engine_sha256') == installed and
+            all(isinstance(meta.build, dict) and meta.build.get('engine_sha256') == installed
+                for meta in (teacher, student)))
+
+
+def _page_images_missing(out, report):
+    return [out / f'{prefix}-{page["n"]:02d}.png'
+            for role, prefix in (('student', '학생'), ('teacher', '교사'))
+            for page in report[role]['pages']
+            if not (out / f'{prefix}-{page["n"]:02d}.png').is_file()]
+
+
 def _review_errors(text, report):
     lines = text.splitlines()
     errors = []
@@ -854,6 +905,47 @@ def _plan_status(folder):
         return True, f"plan 확인 불가 ({exc})"
 
 
+def _delivery_draft(student, teacher, report, metadata):
+    print('\n전달 문안 초안')
+    print(f'학생용 HTML: {student}')
+    print(f'학생용 PDF: {student.with_suffix(".pdf")}')
+    print(f'교사용 HTML: {teacher}')
+    print(f'교사용 PDF: {teacher.with_suffix(".pdf")}')
+    print(f'확인한 것: 학생 {len(report["student"]["pages"])}쪽, 교사 {len(report["teacher"]["pages"])}쪽의 검사와 검토.')
+    info = report.get('interactive_check')
+    if metadata.interactive or report['student'].get('interactive'):
+        info = info if isinstance(info, dict) else {}
+        screens = info.get('screens')
+        sizes = [f'{s["width"]}×{s["height"]}' for s in screens or []
+                 if isinstance(s, dict) and type(s.get('width')) is int and type(s.get('height')) is int]
+        print('화면 크기 검사: ' + (', '.join(sizes) if sizes else '기록 없음'))
+        grading = info.get('grading')
+        count = info.get('answer_slots')
+        if grading == 'passed' and type(count) is int:
+            print(f'자동 판별 자체 시험: {count}곳 통과.')
+        else:
+            reason = '정답 공개 없음으로 생략' if grading == 'skipped-reveal-none' else '기록 없음 또는 미완료'
+            print(f'자동 판별 자체 시험: {reason}.')
+        filled = info.get('filled_inputs')
+        if isinstance(filled, dict) and info.get('filled_restored') is True:
+            counts = ', '.join(f'{label} {filled[key]}곳' for key, label in
+                               (('auto', '자동 판별'), ('open_box', '서술 칸'), ('open_blank', '빈칸'),
+                                ('draw', '그리기'), ('name', '이름')) if type(filled.get(key)) is int)
+            print(f'채움 인쇄 검사: {counts or "입력 수 기록 없음"}; 다시 열기 복원 확인.')
+            if info.get('filled_text') == 'skipped-no-pymupdf':
+                print('채운 서술의 PDF 글자 확인은 생략했습니다.')
+        else:
+            print('채움 인쇄 검사: 기록 없음 또는 미완료.')
+    else:
+        print('화면 크기·자동 판별·채움 인쇄 검사: 화면 풀이가 꺼져 있어 해당 없음.')
+    print('확인하지 못한 것: 실제 인쇄, 실제 기기, 다른 브라우저.')
+    if metadata.interactive or report['student'].get('interactive'):
+        print('화면 풀이의 정답은 난독화되어 있을 뿐이어서 소스에서 찾을 수 있습니다.')
+    if metadata.sync:
+        print('학생의 이름과 답이 교사의 Supabase에 저장됩니다. 학교 개인정보 규정을 확인하고 학생에게 안내해 주세요.')
+    print('이 활동지 스킬이 도움이 됐다면 GitHub에 ⭐ 하나 부탁드려요 → https://github.com/BeomjinSouth/exampractice2html')
+
+
 def cmd_status(folder: Path) -> int:
     folder = Path(folder).resolve()
     out = folder / "검사"
@@ -864,6 +956,15 @@ def cmd_status(folder: Path) -> int:
     except (CheckError, OSError) as exc:
         teacher = student = build = None
         files_ok, file_note = False, str(exc)
+
+    teacher_meta = student_meta = None
+    fingerprint_ok = False
+    if files_ok:
+        try:
+            teacher_meta, student_meta = _delivery_meta(teacher), _delivery_meta(student)
+            fingerprint_ok = _engine_matches(build, teacher_meta, student_meta)
+        except (OSError, UnicodeError, ValueError, ImportError):
+            fingerprint_ok = False
 
     edited = False
     if files_ok and build:
@@ -896,6 +997,9 @@ def cmd_status(folder: Path) -> int:
                     file_note = "구성.json 해시가 조립 기록과 다릅니다"
             except OSError:
                 file_note = "구성.json 해시를 읽을 수 없습니다"
+        if not fingerprint_ok:
+            build_ok = False
+            file_note = "설치된 스킬과 다른 엔진으로 조립됐습니다. build로 다시 조립하세요."
 
     report_path = out / "report.json"
     report, check_ok, check_note = None, False, "검사 결과가 없습니다"
@@ -944,10 +1048,14 @@ def cmd_status(folder: Path) -> int:
             review_note = f"검토.md를 읽을 수 없습니다 ({exc})"
     elif report is None:
         review_note = "먼저 검사 결과가 필요합니다"
+    if report is not None and _page_images_missing(out, report):
+        review_ok = False
+        image_note = "쪽 그림이 없어 눈으로 검토할 수 없습니다. python -m pip install pymupdf pillow 후 check를 다시 실행하세요."
+        review_note = image_note if review_note == "쪽별 검토와 내용 검산 확인" else review_note + "; " + image_note
 
     ready = plan_ok and build_ok and check_ok and review_ok
     pdfs = [student.with_suffix(".pdf"), teacher.with_suffix(".pdf")] if files_ok else []
-    if ready and not all(path.is_file() for path in pdfs):
+    if files_ok and not all(path.is_file() for path in pdfs):
         ready = False
         delivery_note = "전달할 PDF가 없습니다 · check를 다시 실행하세요"
     else:
@@ -961,6 +1069,7 @@ def cmd_status(folder: Path) -> int:
         for path in (student, teacher, *pdfs):
             print(f"전달: {path}")
         print("다음 할 일: 전달할 파일을 확인하세요.")
+        _delivery_draft(student, teacher, report, student_meta)
     else:
         action = next(label for label, ok, _ in gates if not ok)
         print(f"다음 할 일: {action} 관문을 확인하세요.")

@@ -405,10 +405,7 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 .ws-pen-tools { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-block-start: 4px; }
 .ws-pen-tools button { white-space: nowrap; }
 .ws-pen-zoom { display: none; }
-@media screen and (max-width: 719.98px) {
-  #sheet-flow .ws-draw-table col:first-child { width: 20% !important; }
-  #sheet-flow .ws-draw-table col:last-child { width: 80% !important; }
-  #sheet-flow .ws-pen-tools button { padding-inline: 5px; min-height: 30px; }
+@media screen {
   #sheet-flow .ws-pen-zoom { display: inline-block; }
   #sheet-flow .ws-pen-viewport { max-height: min(50vh, 420px); overflow: auto; overscroll-behavior: contain; }
   #sheet-flow .ws-pen-viewport.ws-pen-pan { touch-action: none; cursor: grab; }
@@ -416,6 +413,11 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   #sheet-flow .ws-pen-stage { position: relative; width: 200%; }
   #sheet-flow .ws-pen-stage > :is(img, svg) { display: block; width: 100% !important; max-width: none !important; height: auto !important; }
   #sheet-flow .ws-pen-stage > .ws-fig-answer { position: absolute; inset: 0; pointer-events: none; }
+}
+@media screen and (max-width: 719.98px) {
+  #sheet-flow .ws-draw-table col:first-child { width: 20% !important; }
+  #sheet-flow .ws-draw-table col:last-child { width: 80% !important; }
+  #sheet-flow .ws-pen-tools button { padding-inline: 5px; min-height: 30px; }
 }
 :root[data-role="student"] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
 :root[data-sheet-preview] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],

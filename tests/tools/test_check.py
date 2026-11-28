@@ -246,6 +246,62 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertEqual(warning['level'], 'warning')
         self.assertIn('q1.1', warning['msg'])
 
+    def test_hidden_tablet_zoom_button_warns_for_its_pen_slot(self):
+        folder = self.run_root / '태블릿-확대-누락'
+        folder.mkdir()
+        data = {'meta': {'title': '확대 검사', 'kind': '수업', 'reveal': '없음', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [
+                    {'type': 'figure', 'width_mm': 35, 'pen': True,
+                     'svg': '<svg viewBox="0 0 30 20"><path d="M3 3H27V17H3Z"/></svg>'}]}]}
+        teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>',
+            '<style id="sheet-user">@media screen and (min-width:720px) '
+            '{#sheet-flow .ws-pen-zoom {opacity:0}}</style>')
+        path = folder / '학생.html'
+        path.write_text(student, encoding='utf-8')
+        out = folder / '검사'
+        out.mkdir()
+        with sheet_check.sheet_browser() as browser:
+            for domain in ('Page.enable', 'Runtime.enable'):
+                browser.cdp.call(domain)
+            sheet_check._navigate(browser, path, False)
+            problems = []
+            info, _, _ = sheet_check._interactive_check(browser.cdp, out, None, problems)
+        phone, tablet = info['screens']
+        self.assertEqual(phone['pen_zoom']['zoomed_slots'], ['q1.1'])
+        self.assertEqual(tablet['pen_zoom']['zoomed_slots'], [])
+        missing = [p for p in problems if p['code'] == 'pen-zoom-missing']
+        self.assertEqual(len(missing), 1)
+        self.assertIn('태블릿', missing[0]['msg'])
+        self.assertIn('q1.1', missing[0]['msg'])
+
+    def test_missing_both_screen_and_print_pen_measurements_warns(self):
+        folder = self.run_root / '펜-크기-누락'
+        folder.mkdir()
+        data = {'meta': {'title': '측정 검사', 'kind': '수업', 'reveal': '없음', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [
+                    {'type': 'figure', 'width_mm': 35, 'pen': True,
+                     'svg': '<svg viewBox="0 0 30 20"><path d="M3 3H27V17H3Z"/></svg>'}]}]}
+        teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>',
+            '<style id="sheet-user">#sheet-flow canvas.ws-pen {display:none!important}'
+            '@media print {#sheet-pages svg.ws-pen-ink {display:none!important}}</style>')
+        path = folder / '학생.html'
+        path.write_text(student, encoding='utf-8')
+        out = folder / '검사'
+        out.mkdir()
+        with sheet_check.sheet_browser() as browser:
+            for domain in ('Page.enable', 'Runtime.enable'):
+                browser.cdp.call(domain)
+            sheet_check._navigate(browser, path, False)
+            problems = []
+            sheet_check._interactive_check(browser.cdp, out, None, problems)
+        missing = [p for p in problems if p['code'] == 'pen-zoom-missing']
+        self.assertEqual(len(missing), 2)
+        self.assertTrue(all('q1.1' in p['msg'] for p in missing))
+
     def test_pen_print_detects_opaque_layers_and_missing_ink(self):
         try:
             import pymupdf  # noqa: F401
@@ -524,6 +580,21 @@ class FakeInteractiveProtocol:
 
 
 class CheckBoundaryTest(unittest.TestCase):
+    def test_pen_zoom_missing_when_measurements_are_absent_or_empty(self):
+        normal = {'q1.1': {'width_px': 100, 'height_px': 50},
+                  'q1.2': {'width_px': 120, 'height_px': 60}}
+        problems = []
+        sheet_check._audit_pen_zoom(normal, {'q1.1': {'width_px': 0, 'height_px': 0}}, problems)
+        self.assertEqual([p['code'] for p in problems], ['pen-zoom-missing', 'pen-zoom-missing'])
+        self.assertTrue(all(slot in p['msg'] for slot, p in zip(normal, problems)))
+        problems = []
+        enlarged = {slot: {'width_px': size['width_px'] * 2, 'height_px': size['height_px'] * 2}
+                    for slot, size in normal.items()}
+        sheet_check._audit_pen_zoom(normal, enlarged, problems, '태블릿', ['q1.1'])
+        self.assertEqual([(p['code'], p['item']) for p in problems], [('pen-zoom-missing', 'q1')])
+        self.assertIn('q1.2', problems[0]['msg'])
+        self.assertIn('태블릿', problems[0]['msg'])
+
     def test_pen_aspect_mismatch_compares_each_slot_with_a4(self):
         screen = {'q1.1': 1.029, 'q1.2': 1.970, 'q2.1': 3.046, 'q2.2': 4}
         printed = {'q1.1': 1.015, 'q1.2': 2, 'q2.1': 3, 'q3.1': 5}

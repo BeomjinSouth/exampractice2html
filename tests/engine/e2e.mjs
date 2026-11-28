@@ -473,6 +473,45 @@ try {
   const results = (tab, col) => tab.js(`${quote(examples)}.map(row => sheet.answer(row[0], row[${col}]))`);
   const setInput = (tab, selector, value) => tab.js(`{ const input=document.querySelector(${quote(selector)}); input.value=${quote(value)}; input.dispatchEvent(new Event('input',{bubbles:true})); }`);
   const valuesOf = tab => tab.js('sheet.values()');
+  await test('확인한 값만 정답 공개', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    await tab.js('sheet.clearAnswers()');
+    const q1 = item('q1');
+    const visible = id => tab.js(`(() => {
+      const el = document.querySelector(${quote(slot(id))});
+      if (!el.matches('.ws-blank,.ws-choices')) return !!el.querySelector('.ws-reveal')?.checkVisibility();
+      for (let node = el.nextElementSibling; node && !node.hasAttribute('data-slot'); node = node.nextElementSibling)
+        if (node.classList.contains('ws-reveal')) return node.checkVisibility();
+      return false;
+    })()`);
+    await setInput(tab, `${slot('q1.1')} input`, '1/2');
+    await tab.click(action('check', q1));
+    await tab.click(action('reveal-answer', q1));
+    assert.equal(await visible('q1.1'), true);
+    await setInput(tab, `${slot('q1.2')} input`, '새 답');
+    assert.equal(await visible('q1.2'), false, '확인하지 않은 B의 정답은 닫힘');
+    await tab.click(action('check', q1));
+    assert.equal(await visible('q1.2'), true, 'B를 확인하면 열림');
+    await setInput(tab, `${slot('q1.1')} input`, '2');
+    assert.equal(await visible('q1.1'), false, '고친 A의 정답은 닫힘');
+    for (const [id, before, after] of [
+      ['q2.1',[1],[1,3]], ['q2.2','O','X'],
+      ['q2.3',{l1:'r2',l2:'r1'},{l1:'r1',l2:'r2'}],
+      ['q2.4',['t2','t3','t1'],['t1','t2','t3']],
+      ['q3.1',[-1.5,1],[0,1]], ['q3.3',[[0,1],[-2,-1]],[[0,1],[-1,-1]]],
+      ['q3.4',[2,3],[0,3]],
+    ]) {
+      const question = item(id.split('.')[0]);
+      await tab.js(`sheet.clearAnswers(); sheet.answer(${quote(id)},${quote(before)})`);
+      await tab.click(action('check', question));
+      await tab.click(action('reveal-answer', question));
+      assert.equal(await visible(id), true, `${id}: 확인한 답`);
+      await tab.js(`sheet.answer(${quote(id)},${quote(after)})`);
+      assert.equal(await visible(id), false, `${id}: API 판별은 변경한 답의 확인이 아님`);
+      await tab.click(action('check', question));
+      assert.equal(await visible(id), true, `${id}: 다시 확인한 답`);
+    }
+  }));
   await test('자리별 판별 결과·점수·입력·그리기·짝·순서 상태', () => usingTab(studentInteractive, async tab => {
     assert.deepEqual(await tab.js('sheet.slots().filter(s=>s.auto).map(s=>[s.slot,s.kind])'), examples.map(([s,k])=>[s,k]));
     assert.deepEqual(await results(tab, 3), examples.map(() => true));
@@ -764,6 +803,22 @@ try {
       }, metrics(390,844));
     }
   });
+  await test('태블릿 펜 그림의 크게 버튼과 확대', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    const draw = slot('q4.1'), canvas = `${draw} canvas.ws-pen`, zoom = action('pen-zoom', draw);
+    const size = () => tab.js(`(() => {const r=document.querySelector(${quote(canvas)}).getBoundingClientRect(); return [r.width,r.height]})()`);
+    assert.equal(await tab.js(`document.querySelector(${quote(zoom)}).checkVisibility()`), true);
+    const normal = await size();
+    await tab.click(zoom);
+    const large = await size();
+    assert(large[0] >= normal[0] * 1.9, quote({normal,large}));
+    assert(Math.abs(large[0]/large[1] / (normal[0]/normal[1]) - 1) <= .015);
+    assert.equal((await tab.report()).overflow_x, 0);
+    await tab.js(`sheet.view('a4')`, true);
+    assert.equal(await tab.js(`document.querySelector(${quote(zoom)}).checkVisibility()`), false);
+    await tab.js(`sheet.view('solve')`, true);
+    assert.equal(await tab.js(`document.querySelector(${quote(zoom)}).getAttribute('aria-pressed')`), 'true');
+  }, metrics(1024,768)));
   await test('펜 확대 경고의 1.3배 경계', async () => {
     const script = `
 import sys
@@ -1029,6 +1084,35 @@ assert 'q.2' in problems[1]['msg']
       } finally { await tab.js('sheet.clearAnswers()'); }
     });
   });
+  await test('기기 답 삭제 실패를 안내하고 성공하면 지움', async () => {
+    const student = await usingTab(interactive, tab => tab.js('sheet.exportStudent()'));
+    await usingTab(await saveFile('clear-failure', student), async tab => {
+      await tab.js(`sheet.clearAnswers(); sheet.answer('q1.1','1/2');
+        localStorage.setItem('pbj-sheet:interactive-fixture:student:pen','old');
+        window.removeOriginal = Storage.prototype.removeItem;
+        Storage.prototype.removeItem = function(key) {
+          if (key.endsWith(':pen')) throw new DOMException('삭제 실패','SecurityError');
+          return removeOriginal.call(this, key);
+        };`);
+      try {
+        await tab.js('sheet.clearAnswers()');
+        assert.deepEqual(await valuesOf(tab), {});
+        assert.match(await tab.js('document.querySelector(".ws-save-status").textContent'), /이 기기에 남은 답을 지우지 못했어요/);
+        assert.equal(await tab.js(`localStorage.getItem('pbj-sheet:interactive-fixture:student:pen')`), 'old');
+        await tab.js(`sheet.answer('q1.1','1/2')`);
+        assert.match(await tab.js('document.querySelector(".ws-save-status").textContent'), /이 기기에 남은 답을 지우지 못했어요/, '이후 자동 저장이 성공해도 삭제 실패는 남음');
+        await tab.js(`window.setOriginal = Storage.prototype.setItem;
+          Storage.prototype.setItem = () => { throw new DOMException('저장 실패','QuotaExceededError'); };
+          sheet.answer('q1.1','2')`);
+        const warning = await tab.js('document.querySelector(".ws-save-status").textContent');
+        assert.match(warning, /지우지 못했어요/);
+        assert.match(warning, /저장되지 않았어요/, '삭제와 저장에 모두 실패하면 두 상황을 알림');
+      } finally {
+        await tab.js('Storage.prototype.setItem = window.setOriginal || Storage.prototype.setItem; Storage.prototype.removeItem = removeOriginal; sheet.clearAnswers()');
+      }
+      assert.equal(await tab.js('document.querySelector(".ws-save-status").textContent'), '');
+    });
+  });
   await test('저장 용량이 차면 경고하고 다음 저장에 성공하면 시각 갱신', () => usingTab(studentInteractive, async tab => {
     const key = 'pbj-sheet:interactive-fixture:student', status = 'document.querySelector(".ws-save-status")';
     const saved = () => tab.js(`JSON.parse(localStorage.getItem(${quote(key)}))`);
@@ -1110,6 +1194,7 @@ assert 'q.2' in problems[1]['msg']
           if (policy === '시도 후') {
             await tab.js(`sheet.answer('q1.2','서로 평행')`);
             assert.equal(await status('reveal-solution'), false, '펜 칸은 채우지 않아도 됨');
+            await tab.click(action('check',q1));
           }
           await tab.click(action('reveal-solution',q1));
           assert.match(await tab.js(`document.querySelector('${q1} .ws-solution:not(.ws-compare)').textContent`), /풀이 표식/);
@@ -1129,6 +1214,24 @@ assert 'q.2' in problems[1]['msg']
       });
     }
   });
+  await test('풀이와 비교를 함께 열어도 채점 요소는 한 번만', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    await tab.js(`sheet.clearAnswers(); sheet.answer('q1.1','1/2'); sheet.answer('q1.2','서로 평행');
+      sheet.answer('q1.3','1'); sheet.answer('q1.4','설명')`);
+    const q1 = item('q1');
+    await tab.click(action('check', q1));
+    await tab.click(action('compare', q1));
+    const lists = () => tab.js(`[...document.querySelectorAll(${quote(`${q1} .ws-compare-list`)})]
+      .filter(el=>el.checkVisibility()).map(el=>({parent:el.parentElement.className, checked:el.querySelector('input').checked}))`);
+    assert.equal((await lists()).length, 1);
+    await tab.js(`document.querySelector(${quote(`${q1} .ws-compare-list input`)}).click()`);
+    await tab.click(action('reveal-solution', q1));
+    assert.deepEqual((await lists()).map(list=>list.checked), [true]);
+    await tab.click(action('compare', q1));
+    assert.deepEqual((await lists()).map(list=>list.checked), [true]);
+    await tab.click(action('compare', q1));
+    assert.deepEqual((await lists()).map(list=>list.checked), [true]);
+  }));
   await test('자동 판별 자리가 없으면 학생 도구 막대에 점수를 표시하지 않음', async () => {
     const source = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
     const withoutAuto = source.replaceAll(/ data-check-hash="[^"]+"/g, '')
@@ -1323,6 +1426,8 @@ assert 'q.2' in problems[1]['msg']
       assert.deepEqual(await state(),[true,true]);
       assert.match(await tab.js(`document.querySelector('${graph} .ws-item-score').textContent`),/높이를 모두/);
       for (let i = 1; i < 5; i++) await tab.mouseClick(hit(i));
+      assert.deepEqual(await state(),[true,false], '막대를 모두 채운 뒤에도 정답은 다시 확인해야 함');
+      await tab.click(btn('check'));
       assert.deepEqual(await state(),[false,false]);
       await tab.click(btn('reveal-answer')); await tab.click(btn('reveal-solution'));
       assert.equal(await tab.js(`document.querySelector('${graph} .ws-reveal').checkVisibility()`), true);
@@ -1423,6 +1528,9 @@ assert 'q.2' in problems[1]['msg']
       await setInput(tab, '#sheet-flow [data-slot="q1.4"] input', longAnswer);
       size = await geometry();
       assert(size.input[1] <= size.input[0]+1 && size.cell[1] <= size.cell[0]+1, `공개 뒤 입력·표 칸 잘림: ${quote(size)}`);
+      assert.equal(size.reveal, null, '값을 고치면 확인 전까지 정답을 숨김');
+      await tab.click(action('check',item('q1')));
+      size = await geometry();
       assert(size.reveal[1] <= size.reveal[0]+1 && size.math[0] <= size.math[1]+1, `정답 표시 잘림: ${quote(size)}`);
       assert.equal(await tab.js(`(() => {
         const input=document.querySelector('#sheet-flow [data-slot="q1.4"] .ws-in'), table=input.closest('table');
@@ -1739,6 +1847,33 @@ assert 'q.2' in problems[1]['msg']
     const teacher = path.join(folder, `${title} (교사용).html`), student = path.join(folder, `${title}.html`);
     return { teacher, student, derive:() => cli('derive', teacher), open:p => pathToFileURL(p).href };
   }
+  await test('탐구 그래프의 화면 읽기 이름이 값에 따라 갱신', async () => {
+    const block = {type:'explore', prompt:'그래프를 비교해 보세요.', fn:'a*x+b', x:[-2,2], y:[-4,4], unit_mm:5,
+      params:[{name:'a', min:-2, max:2, step:1, value:2}, {name:'b', min:-2, max:2, step:1, value:-1}],
+      print:[{a:1,b:0}]};
+    const files = await buildEditorCase('탐구-접근성', [{id:'graph', blocks:[block]}]);
+    const html = await fs.readFile(files.student, 'utf8');
+    await usingTab(files.open(files.student), async tab => {
+      const selector = `${item('graph')} .ws-explore svg[data-map]`;
+      const name = () => tab.js(`document.querySelector(${quote(selector)}).getAttribute('aria-label')`);
+      const built = await tab.js(`(() => {const d=new DOMParser().parseFromString(${quote(html)},'text/html');
+        const svg=d.querySelector('.ws-explore svg[data-map]');return [svg.getAttribute('role'),svg.getAttribute('aria-label')];})()`);
+      assert.equal(built[0], 'img');
+      assert.match(built[1], /그래프를 비교해 보세요.*y=a×x\+b 그래프.*a=2.*b=−1/);
+      assert.equal(await name(), built[1]);
+      await setInput(tab, `${item('graph')} .ws-explore-ctrl input:first-of-type`, '-2');
+      assert.match(await name(), /a=−2.*b=−1/);
+      const inputs = `${item('graph')} .ws-explore-ctrl input`;
+      await tab.js(`{const input=document.querySelectorAll(${quote(inputs)})[1]; input.value='1'; input.dispatchEvent(new Event('input',{bubbles:true}));}`);
+      assert.match(await name(), /a=−2.*b=1/);
+      const saved = await tab.js(`new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('.ws-explore svg[data-map]').getAttribute('aria-label')`);
+      assert.equal(saved, built[1]);
+      await tab.js(`sheet.view('a4')`, true);
+      assert.equal(await name(), built[1]);
+      await tab.js(`sheet.view('solve')`, true);
+      assert.match(await name(), /a=−2.*b=1/);
+    });
+  });
   const mathWriting = () => buildEditorCase('수식-답-판별', [
     {id:'symbols', blocks:[{type:'question', text:'길이 {{|$4\\pi$}} cm와 근호 {{|$2\\sqrt{3}$}}를 써 봅시다.'}]},
     {id:'strict', blocks:[{type:'situation', lines:['기약분수로 써 봅시다.']},
@@ -1942,6 +2077,58 @@ assert 'q.2' in problems[1]['msg']
   const solution = id => `.ws-item[data-solution-for="${id}"]`;
   const solutionOrder = tab => tab.js(`[...document.querySelectorAll('#sheet-pages .ws-item[data-solution-for]')]
     .map(n=>[n.dataset.solutionFor,n.querySelector('.ws-t-q').textContent])`);
+  await test('삭제와 되돌리기는 연결 풀이도 함께 처리', async () => {
+    const files = await buildEditorCase('삭제-풀이', editorQuestions.slice(0,3), editorSolutions.slice(0,3));
+    const before = [['q1','1번'],['q2','2번'],['q3','3번']];
+    const after = [['q1','1번'],['q3','2번']];
+    const saved = await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      assert.deepEqual(await solutionOrder(tab), before);
+      await tab.click(action('delete', item('q2')));
+      assert.deepEqual(await solutionOrder(tab), after);
+      assert.match(await tab.js('document.querySelector(".ws-t-list").textContent'), /메모는 처음에/);
+      const html = await tab.js('sheet.serialize()');
+      await tab.click(action('undo'));
+      assert.deepEqual(await solutionOrder(tab), before);
+      return html;
+    });
+    await usingTab(await saveFile('deleted-solution', saved), async tab => {
+      assert.deepEqual(await solutionOrder(tab), after);
+      assert.equal(await tab.js(`!!document.querySelector(${quote(solution('q2'))})`), false);
+      assert.match(await tab.js('document.querySelector(".ws-t-list").textContent'), /메모는 처음에/);
+    });
+  });
+  await test('번호 없는 문항의 풀이 제목은 학생에게 보이는 말', async () => {
+    const blocks = [
+      {id:'one', blocks:[{type:'question', text:'번호가 있는 발문 {{㉠|$3$}}'}]},
+      {id:'activity', blocks:[{type:'heading', tag:'활동 3', text:'같은 끝점이면 언제나 같을까?'},
+        {type:'question', number:false, text:'같은 호를 살펴보세요.'}]},
+      {id:'prompt', blocks:[{type:'question', number:false, text:'수 $x^2$에 {{㉡|비밀}}를 더하고 까닭을 설명해 보세요.'}]},
+      {id:'fallback', blocks:[{type:'text', text:'질문이 없는 문항'}]},
+    ];
+    const files = await buildEditorCase('번호-없는-제목', blocks,
+      blocks.map(({id}) => ({item:id, answer:'예시 답안'})));
+    const expected = [['one','1번'], ['activity','활동 3 · 같은 끝점이면 언제나 같을까?'],
+      ['prompt','수 x2에 ㉡를 더하고 까닭을 설명해 보세요.'], ['fallback','fallback 풀이']];
+    const source = await fs.readFile(files.teacher, 'utf8');
+    await usingTab(files.open(files.teacher), async tab => {
+      const built = await tab.js(`(() => {const d=new DOMParser().parseFromString(${quote(source)},'text/html');
+        return [...d.querySelectorAll('#sheet-teacher [data-solution-for]')].map(n=>[n.dataset.solutionFor,n.querySelector('.ws-t-q').textContent]);})()`);
+      assert.deepEqual(built, expected, 'Python 조립 제목');
+      assert.deepEqual(await solutionOrder(tab), expected, 'JS 편집기 제목');
+      await tab.click(action('edit'));
+      await editField(tab, `${item('activity')} .ws-heading-text`, '고친 활동 제목');
+      assert.equal((await solutionOrder(tab))[1][1], '활동 3 · 고친 활동 제목');
+      const saved = await tab.js('sheet.serialize()');
+      await usingTab(await saveFile('renamed-activity', saved), async copy => {
+        assert.equal((await solutionOrder(copy))[1][1], '활동 3 · 고친 활동 제목');
+      });
+      await tab.click(action('undo'));
+      assert.deepEqual(await solutionOrder(tab), expected);
+      await tab.click(action('delete', item('one')));
+      assert.equal((await solutionOrder(tab))[1][1], '수 x2에 ㉠를 더하고 까닭을 설명해 보세요.');
+    });
+  });
   await test('문항을 옮기면 교사용 풀이의 순서와 번호가 저장 후에도 같음', async () => {
     const files = await buildEditorCase('재배열', editorQuestions, editorSolutions);
     const expected = [['q1','1번'],['q2','2번'],['q4','3번'],['q3','4번']];

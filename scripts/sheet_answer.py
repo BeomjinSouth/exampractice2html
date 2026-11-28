@@ -136,11 +136,17 @@ def numeric_details(value, *, authored=False):
     return [parts[0], parts[2], parts[1]] if parts else None
 
 
+_QUALIFIER = re.compile(r'약(.+)|(.+?)(?:번째|쯤|정도|가량)')
+
+
+def qualified_details(value):
+    # Ordinal and approximate labels keep the number's meaning; a range word (3 이상) changes it.
+    match = _QUALIFIER.fullmatch(norm(value))
+    return numeric_details(match[1] or match[2], authored=True) if match else None
+
+
 def qualified_number(value):
-    # These short answer labels are meaningful text, not units. Allow the bare value separately.
-    text = norm(value)
-    match = re.fullmatch(r'약(.+)|(.+?)(?:이상|이하|초과|미만|번째|쯤|정도|가량|약)', text)
-    parts = numeric_details(match[1] or match[2], authored=True) if match else None
+    parts = qualified_details(value)
     return parts[0] if parts else None
 
 
@@ -234,8 +240,11 @@ def writing_forms(kind, values, unit='', *, auto=False):
                                   for v in ((key, f'{key}@{u or inferred}') if u or inferred else (key,))))
     forms = [norm(value) for value in values]
     if auto and values and qualified_number(values[0]) is not None:
-        forms += [_QUALIFIED, *(f'{_QUALIFIED}{number}' for value in values
-                                if (number := qualified_number(value)) is not None)]
+        forms.append(_QUALIFIED)
+        for key, unit, _ in filter(None, map(qualified_details, values)):
+            forms.append(f'{_QUALIFIED}{key}')
+            if unit:
+                forms.append(f'{_QUALIFIED}{key}@{unit}')
     return forms
 
 
@@ -247,8 +256,12 @@ def writing_result(kind, value, matches, form='', check_unit=False):
         if any(map(matches, text_candidates(value))):
             return [True, '']
         if matches(_QUALIFIED):
+            # The same number, bare or with the authored unit, keeps an ordinal or approximate answer.
             parts = number_parts(value)
-            return [bool(parts and not parts[1] and matches(_QUALIFIED + parts[0])), '']
+            if not parts:
+                return ['review', '']
+            key, unit = parts
+            return [matches(f'{_QUALIFIED}{key}@{unit}' if unit else f'{_QUALIFIED}{key}'), '']
         return ['review', '']
     if kind not in ('radical', 'number'):
         return [None, '']

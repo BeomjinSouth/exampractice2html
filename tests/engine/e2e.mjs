@@ -2171,7 +2171,8 @@ assert 'q.2' in problems[1]['msg']
         assert.deepEqual(await tab.js('__sheetCore.verdicts()'),
           {'infer.1':'review', 'fixed.1':false, 'root.1':false, 'root-free.1':true, 'qualified.1':true});
         assert.equal(await tab.js(`sheet.answer('root.1','√2/2')`), true);
-        assert.equal(await tab.js(`sheet.answer('qualified.1','2개')`), false);
+        assert.equal(await tab.js(`sheet.answer('qualified.1','2개')`), true);
+        assert.equal(await tab.js(`sheet.answer('qualified.1','2명')`), false);
         await tab.js('sheet.clearAnswers()');
       });
     }

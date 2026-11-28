@@ -125,10 +125,12 @@
     const parts = withUnit(value, numberDetail, authored);
     return parts && [parts[0], parts[2], parts[1]];
   }
-  function qualifiedNumber(value) {
-    const match = /^(?:약(.+)|(.+?)(?:이상|이하|초과|미만|번째|쯤|정도|가량|약))$/u.exec(norm(value));
-    return match ? numericDetails(match[1] || match[2], true)?.[0] ?? null : null;
+  function qualifiedDetails(value) {
+    // Ordinal and approximate labels keep the number's meaning; a range word (3 이상) changes it.
+    const match = /^(?:약(.+)|(.+?)(?:번째|쯤|정도|가량))$/u.exec(norm(value));
+    return match ? numericDetails(match[1] || match[2], true) ?? null : null;
   }
+  const qualifiedNumber = value => qualifiedDetails(value)?.[0] ?? null;
   function number_parts(s) { return numericDetails(s)?.slice(0, 2) ?? null; }
   const num = s => number_parts(s)?.[0] ?? null;
   function normalizedUnit(value) {
@@ -206,7 +208,11 @@
     }
     const forms = values.map(norm);
     if (auto && values.length && qualifiedNumber(values[0]) != null) {
-      forms.push(qualified, ...values.map(qualifiedNumber).filter(n => n != null).map(n => qualified + n));
+      forms.push(qualified);
+      for (const [key, unit] of values.map(qualifiedDetails).filter(Boolean)) {
+        forms.push(qualified + key);
+        if (unit) forms.push(`${qualified}${key}@${unit}`);
+      }
     }
     return forms;
   }
@@ -215,8 +221,11 @@
     if (kind === 'text') {
       if (text_candidates(value).some(matches)) return [true, ''];
       if (matches(qualified)) {
+        // The same number, bare or with the authored unit, keeps an ordinal or approximate answer.
         const parts = number_parts(value);
-        return [!!parts && !parts[1] && matches(qualified + parts[0]), ''];
+        if (!parts) return ['review', ''];
+        const [key, unit] = parts;
+        return [matches(unit ? `${qualified}${key}@${unit}` : qualified + key), ''];
       }
       return ['review', ''];
     }

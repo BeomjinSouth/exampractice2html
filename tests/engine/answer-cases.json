@@ -66,9 +66,10 @@
  ],
  "assembled_writing": [
   {"id":"coefficient", "blank":"(1/2)√3", "kind":"radical", "cases":[["√3/2",[true,""]],["루트3/2",[true,""]],["(1/2)√3",[true,""]],["1/(2√3)",[false,""]]]},
-  {"id":"range", "blank":"3 이상", "kind":"text", "cases":[["3",[true,""]],["3 이상",[true,""]],["3 이하",[false,""]]]},
-  {"id":"ordinal", "blank":"5번째", "kind":"text", "cases":[["5",[true,""]],["5번째",[true,""]]]},
-  {"id":"approx", "blank":"2개쯤", "kind":"text", "cases":[["2",[true,""]],["2개쯤",[true,""]],["2개",[false,""]]]},
+  {"id":"range", "blank":"3 이상", "kind":"text", "cases":[["3",["review",""]],["3 이상",[true,""]],["3이상",[true,""]],["3 이하",["review",""]],["x≥3",["review",""]]]},
+  {"id":"ordinal", "blank":"5번째", "kind":"text", "cases":[["5",[true,""]],["5번째",[true,""]],["4",[false,""]],["다섯 번째",["review",""]]]},
+  {"id":"approx", "blank":"2개쯤", "kind":"text", "cases":[["2",[true,""]],["2개쯤",[true,""]],["2개",[true,""]],["3개",[false,""]],["2명",[false,""]]]},
+  {"id":"about", "blank":"약 3", "kind":"text", "cases":[["3",[true,""]],["약3",[true,""]],["4",[false,""]]]},
   {"id":"unknown", "blank":"3사과", "kind":"text", "cases":[["3사과",[true,""]],["3",["review",""]]]},
   {"id":"exponent", "blank":"23", "kind":"number", "cases":[["２３",[true,""]],["23",[true,""]],["2³",[false,""]],["x²",[false,""]],["23뭉탱이",["review","unit"]]]},
   {"id":"choice", "prompt":"소수 또는 분수로 나타내시오.", "blank":"$\\frac{1}{2}$", "kind":"number", "cases":[["0.5",[true,""]],["2/4",[true,"reduce"]]]},

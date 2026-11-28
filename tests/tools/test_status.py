@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 import types
@@ -12,7 +13,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
-TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT.parent / '시험' / '검사-시험'))
+TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT / 'tests' / '_out' / '검사-시험'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 import sheet_build
 import sheet_check
@@ -23,6 +24,8 @@ class StatusTest(unittest.TestCase):
         self.folder = TRIALS / ('status-' + uuid4().hex[:10])
         self.out = self.folder / '검사'
         self.out.mkdir(parents=True, exist_ok=True)
+        if not os.environ.get('SHEET_KEEP_TRIALS'):
+            self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
         self.source = self.folder / '구성.json'
         self.teacher = self.folder / '활동 (교사용).html'
         self.student = self.folder / '활동.html'

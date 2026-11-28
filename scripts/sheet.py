@@ -95,7 +95,7 @@ def cmd_doctor():
                 os.environ['DECK_BROWSER'] = old
     print('| 항목 | 확인 결과 |')
     print('| --- | --- |')
-    print(f'| Python | {sys.version.split()[0]} |')
+    print(f'| Python | {sys.version.split()[0]} · {sys.executable} |')
     print(f'| Chrome/Edge | {browser or "찾지 못함"} |')
     missing = []
     for name, module in PYTHON_MODULES:

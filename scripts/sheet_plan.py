@@ -1,6 +1,7 @@
 """Validate a worksheet manuscript without Chrome or optional dependencies."""
 import ast
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 from fractions import Fraction
 import json
@@ -79,21 +80,58 @@ def is_number(value):
     return type(value) in (int, float) and abs(value) <= 1e100
 
 
+def exact_number(source):
+    decimal = Decimal(source)
+    if not decimal.is_finite() or abs(decimal.as_tuple().exponent) > 4800:
+        raise ValueError('검산할 수의 자릿수가 너무 많습니다.')
+    return Fraction(decimal)
+
+
 def on_step(value, low, step):
     """슬라이더 눈금은 min을 기준으로 하며 소수 연산 오차만 허용한다."""
     index = (Fraction(str(value)) - Fraction(str(low))) / Fraction(str(step))
     return abs(index - round(index)) <= Fraction(1, 100_000_000)
 
 
-def slider_endpoints(low, high, step, excluded):
+def slider_samples(low, high, step, excluded):
     low, high, step = (Fraction(str(v)) for v in (low, high, step))
-    excluded = {Fraction(str(v)) for v in excluded}
-    first, last = 0, (high - low) // step
-    while first <= last and low + first * step in excluded:
-        first += 1
-    while first <= last and low + last * step in excluded:
-        last -= 1
-    return [float(low + i * step) for i in dict.fromkeys((first, last))] if first <= last else []
+    last = (high - low) // step
+    omitted = set()
+    for value in excluded:
+        index = (Fraction(str(value)) - low) / step
+        if index.denominator == 1 and 0 <= index <= last:
+            omitted.add(int(index))
+    count = last + 1 - len(omitted)
+    if not count:
+        return []
+    ranks = range(count) if count <= 61 else (i * (count - 1) // 60 for i in range(61))
+    skipped = iter(sorted(omitted))
+    next_skipped, offset = next(skipped, last + 1), 0
+    values = []
+    for rank in ranks:
+        while rank + offset >= next_skipped:
+            offset += 1
+            next_skipped = next(skipped, last + 1)
+        values.append(float(low + (rank + offset) * step))
+    return values
+
+
+def slider_scopes(ranges, snapshots):
+    defaults = {name: values[3] for name, values in ranges.items()}
+    yield defaults
+    for snapshot in snapshots:
+        yield {**defaults, **snapshot}
+    ticks = [slider_samples(low, high, step, excluded)
+             for low, high, step, _, excluded in ranges.values()]
+    for name, values in zip(ranges, ticks):
+        for value in values:
+            yield {**defaults, name: value}
+    # Keep the check bounded with two or three sliders: combine a small, even grid.
+    joint = [values if len(values) <= 9 else [values[i * (len(values) - 1) // 8] for i in range(9)]
+             for values in ticks]
+    if len(joint) > 1:
+        for values in product(*joint):
+            yield dict(zip(ranges, values))
 
 
 BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
@@ -101,12 +139,87 @@ BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
 UNOPS = {ast.USub: operator.neg}
 
 
+# Match solve.js parseExpression, including ASCII digits and ECMAScript whitespace.
+EXPLORE_NUMBER = re.compile(r'\d+(?:\.\d*)?|\.\d+', re.ASCII)
+EXPLORE_TOKEN = re.compile(r'\*\*|[a-z()+*/-]')
+JS_SPACE = '\t\n\v\f\r                  　﻿'
+
+
+def explore_tree(source, names):
+    def fail():
+        raise ValueError('탐구 식은 소수·정수, 괄호, 선언한 한 글자 이름과 + - * / **로 쓰세요.')
+
+    if len(source) > 512:
+        fail()
+    pos = 0
+
+    def token():
+        nonlocal pos
+        while pos < len(source) and source[pos] in JS_SPACE:
+            pos += 1
+        match = EXPLORE_NUMBER.match(source, pos) or EXPLORE_TOKEN.match(source, pos)
+        if match:
+            pos = match.end()
+            return match[0]
+        if pos != len(source):
+            fail()
+        return ''
+
+    current = token()
+
+    def take():
+        nonlocal current
+        result, current = current, token()
+        return result
+
+    operators = {'+': (1, ast.Add), '-': (1, ast.Sub), '*': (2, ast.Mult),
+                 '/': (2, ast.Div), '**': (4, ast.Pow)}
+
+    def expression(minimum=0):
+        item = take()
+        if item == '(':
+            result = expression()
+            if take() != ')':
+                fail()
+        elif item == '-':
+            result = ast.UnaryOp(op=ast.USub(), operand=expression(3))
+        elif EXPLORE_NUMBER.fullmatch(item):
+            result = ast.Constant(float(item))
+        elif item in names:
+            result = ast.Name(id=item, ctx=ast.Load())
+        else:
+            fail()
+        while current in operators and operators[current][0] > minimum:
+            symbol = take()
+            precedence, op = operators[symbol]
+            # Powers associate to the right; prefix minus binds less tightly than a power.
+            rhs = expression(precedence - (symbol == '**'))
+            result = ast.BinOp(left=result, op=op(), right=rhs)
+        return result
+
+    try:
+        tree = expression()
+    except RecursionError:
+        fail()
+    if current:
+        fail()
+    return tree
+
+
 def function_tree(source, params=()):
+    # Explore's plan and renderer both pass declared parameters; grid calls do not.
+    if params:
+        return explore_tree(source, {'x', *params})
+    return arithmetic_tree(source)
+
+
+def arithmetic_tree(source, params=(), *, exact=False):
     names = {'x', *params}
     if len(source) > 240 or not re.fullmatch(r'[0-9a-z.()+*/ \t-]+', source):
         raise ValueError('x, 수, 괄호와 + - * / **만 사용할 수 있습니다.')
+    source = source.strip()
     try:
-        tree = ast.parse(source.strip(), mode='eval').body
+        tree = ast.parse(source, mode='eval').body
     except (SyntaxError, ValueError, RecursionError) as error:
         raise ValueError('함수 식의 괄호와 연산 기호를 확인하세요.') from error
 
@@ -114,6 +227,8 @@ def function_tree(source, params=()):
         if depth > 24:
             raise ValueError('함수 식의 중첩을 줄이세요.')
         if isinstance(node, ast.Constant) and is_number(node.value):
+            if exact:
+                node.value = exact_number(ast.get_source_segment(source, node))
             return
         if isinstance(node, ast.Name) and node.id in names:
             return
@@ -132,7 +247,7 @@ def function_tree(source, params=()):
 
 def function_value(tree, x, params=None, *, exact=False):
     values = {'x': x, **(params or {})}
-    number = (lambda value: Fraction(str(value))) if exact else float
+    number = (lambda value: value if isinstance(value, Fraction) else Fraction(str(value))) if exact else float
 
     def calculate(node):
         if isinstance(node, ast.Constant):
@@ -245,8 +360,71 @@ def checked_svg(source):
     return source
 
 
+# Keep a decimal point inside a sentence even when math and prose touch.
+SENTENCE_BREAK = re.compile(r'[!?。！？\n]|\.(?!\d)')
+QUADRATIC_MATH = re.compile(r'<msup><mi>x</mi><mn>2</mn></msup>')
+INLINE_PARTS = re.compile(r'\\[\\${]|\$((?:\\[\\$]|[^$])*)\$')
+UPRIGHT_MATH = re.compile(r'\\(?:text|mathrm)\s*\{[^{}]*\}')
+UNIT_BASES = '|'.join([*(unit for unit in UNITS if re.fullmatch('[a-z]{2,}', unit)), 'mL'])
+UNIT_EXPONENT = r'(?:[²³]|\^\s*(?:[23]|\{\s*[23]\s*\})|[23])'
+BARE_MATH_UNIT = re.compile(
+    rf'(?<![A-Za-z0-9_.^])(?:\d+(?:\{{,\}}\d+)*(?:\.\d*)?|\.\d+)\s*'
+    rf'(?:m{UNIT_EXPONENT}|(?:{UNIT_BASES})(?:{UNIT_EXPONENT})?)(?![A-Za-z0-9_^])',
+    re.ASCII)
+SEGMENT_NAME = r'(?:[A-Z]{2}|\\overline\s*\{\s*[A-Z]{2}\s*\})'
+SEGMENT_COMPARISON = re.compile(
+    rf'(?<![A-Za-z0-9_^\\])({SEGMENT_NAME})\s*(?:[=<>≤≥≠]|\\(?:leq?|geq?|ne)(?![a-z]))\s*'
+    rf'(?=({SEGMENT_NAME})(?![A-Za-z0-9_^]))')
+GEOMETRY_PREFIX = re.compile(r'(?:\\(?:angle|triangle|square|overarc)[\s{]*|[∠△□]\s*)$')
+DRAW_ACTION = re.compile(
+    r'(?<![가-힣])(?:그[어려](?![가-힣]|\s+(?:놓[은았]|둔|두었))|그으(?:시오|세요)|그읍시다|'
+    r'그리(?:시오|세요|자|고\s+나서)|그립시다|작도\s*(?:하시오|하세요|하자|하고|하여|해)|'
+    r'표시\s*(?:하시오|하세요|하자|하고|하여|해))'
+    r'|[을를]\s+그리고(?![가-힣])')
+PAPER_LOCATION = re.compile(r'(?:종이(?:\s*\(인쇄본\))?|인쇄본|공책)(?:\s*위)?\s*에(?:서)?')
+MARK_LOCATION = re.compile(r'좌표|선분|직선|교점|외심|내심|중점|그래프|수직선|모눈|'
+                           r'(?<![가-힣])(?:점|각|원|변)(?=[을를에]|\s+[A-Z]|$)')
+
+
+def visible_text(parsed):
+    parser = StudentText()
+    parser.feed(QUADRATIC_MATH.sub('x²', parsed.html))
+    return ''.join(parser.parts)
+
+
+def item_blocks(blocks, path):
+    for i, block in enumerate(blocks if isinstance(blocks, list) else []):
+        if not isinstance(block, dict):
+            continue
+        where = f'{path}[{i}]'
+        yield block, where
+        if block.get('type') == 'split':
+            for side in ('left', 'right'):
+                yield from item_blocks(block.get(side), f'{where}.{side}')
+
+
+def screen_drawing_tools(blocks):
+    for block, _ in blocks:
+        kind = block.get('type')
+        if (kind in ('figure', 'grid', 'numberline') and block.get('pen') is True and
+                not block.get('teacher_only')):
+            yield 'pen'
+        if kind == 'answer' and isinstance(block.get('rows'), list) and any(
+                isinstance(row, dict) and row.get('kind') == 'draw' for row in block['rows']):
+            yield 'pen'
+        plot = block.get('plot')
+        if isinstance(plot, dict):
+            if kind == 'grid' and plot.get('mode') in ('points', 'line'):
+                yield plot['mode']
+            elif kind == 'numberline':
+                yield 'points'
+            elif kind == 'chart' and block.get('kind') in ('bar', 'histogram'):
+                yield 'bars'
+
+
 class Validator:
-    def __init__(self, folder):
+    def __init__(self, folder, decimals=None):
+        self.decimals = {} if decimals is None else decimals
         self.folder = folder
         self.issues = []
         self.blank_index = 0
@@ -255,7 +433,6 @@ class Validator:
         self.numbered = {}
         self.limits = {}
         self.local_marks = set()
-        self.expression_context = ''
 
     def error(self, path, message, hint, code=''):
         self.issues.append(Issue('error', path, message, hint, code))
@@ -263,12 +440,10 @@ class Validator:
     def warn(self, path, message, hint, code=''):
         self.issues.append(Issue('warning', path, message, hint, code))
 
-    def check_terms(self, parsed, path):
+    def check_terms(self, text, path):
         if self.grade is None:
             return
-        text = StudentText()
-        text.feed(parsed.html)
-        visible = ''.join(text.parts)
+        sentences = SENTENCE_BREAK.split(text)
         levels = load_terms()['levels']
         for entry in load_terms()['terms']:
             level = entry['level']
@@ -278,28 +453,70 @@ class Validator:
             prefixes = entry.get('skip_if_preceded_by', [])
             if isinstance(prefixes, str):
                 prefixes = [prefixes]
-            for match in re.finditer(re.escape(term), visible):
-                before = visible[:match.start()]
-                if any(before.endswith(prefix) for prefix in prefixes):
-                    continue
+            context = entry.get('context')
+            if any(not any(sentence[:match.start()].endswith(prefix) for prefix in prefixes)
+                   for sentence in sentences if not context or re.search(context, sentence)
+                   for match in re.finditer(re.escape(term), sentence)):
                 hint = '일상어가 아니라면 이 학년에서 배운 말로 바꾸세요.'
                 if entry.get('note'):
                     hint += ' ' + entry['note']
                 self.warn(path, f'‘{term}’ 용어는 {level}에서 처음 나옵니다.', hint, 'term-beyond-grade')
-                break
 
-    def check_expressions(self, parsed, path, private):
-        if private:
-            visible = parsed.plain
-        else:
-            text = StudentText()
-            text.feed(parsed.html)
-            visible = ''.join(text.parts)
+    def check_expressions(self, text, path):
+        sentences = SENTENCE_BREAK.split(text)
         for entry in load_expressions():
-            if entry['avoid'] in visible and any(word in self.expression_context for word in entry['context']):
+            context = entry.get('context')
+            if any(entry['avoid'] in sentence and (not context or any(word in sentence for word in context))
+                   for sentence in sentences):
                 self.warn(path, f'교과서 표현을 확인하세요: ‘{entry["avoid"]}’.',
                           f'{entry["reason"]} 문맥에 맞게 ‘{entry["preferred"]}’ 표현으로 이으세요.',
                           'textbook-expression')
+
+    def check_math_notation(self, value, path):
+        maths = [UPRIGHT_MATH.sub('@', match[1]) for match in INLINE_PARTS.finditer(value) if match[1] is not None]
+        if any(BARE_MATH_UNIT.search(math_source) for math_source in maths):
+            self.warn(path, '수식 안의 단위가 변수처럼 기울어 보입니다.',
+                      r'$12$ cm 또는 $12\text{ cm}$처럼 단위를 정체로 쓰세요.', 'math-unit-upright')
+        if any(not (left.startswith('\\') and right.startswith('\\')) and
+               not GEOMETRY_PREFIX.search(math_source[:match.start()])
+               for math_source in maths for match in SEGMENT_COMPARISON.finditer(math_source)
+               for left, right in [match.groups()]):
+            self.warn(path, '비교하는 선분 길이에 윗줄이 빠졌습니다.',
+                      r'$\overline{OA}=\overline{OB}$처럼 각 선분 이름 위에 윗줄을 쓰세요.',
+                      'segment-length-overline')
+
+    def check_screen_drawing(self, blocks, path):
+        located = list(item_blocks(blocks, path))
+        tools = set(screen_drawing_tools(located))
+        if 'pen' in tools:
+            return
+        for block, where in located:
+            source = block.get('text')
+            if block.get('type') not in ('question', 'ask') or not isinstance(source, str):
+                continue
+            try:
+                text = visible_text(inspect_markup(source))
+            except MarkupError:
+                continue
+            for sentence in SENTENCE_BREAK.split(text):
+                if any(DRAW_ACTION.search(sentence, location.end()) for location in PAPER_LOCATION.finditer(sentence)):
+                    continue
+                for action in DRAW_ACTION.finditer(sentence):
+                    clause = re.split(r'[,，]', sentence[:action.start()])[-1]
+                    marking = action[0].startswith(('표시', '표기'))
+                    if marking and not MARK_LOCATION.search(clause):
+                        continue
+                    if ('bars' in tools and any(word in clause for word in ('막대', '히스토그램')) or
+                        'line' in tools and any(word in clause for word in ('직선', '일차함수의 그래프', '정비례 관계의 그래프')) or
+                        'points' in tools and marking and re.search(r'(?:점|좌표|교점|꼭짓점)', clause)):
+                        continue
+                    self.warn(where + '.text', '화면 풀이의 작도·그리기 지시에 화면에서 그릴 곳이 없습니다.',
+                              '펜(pen: true)이나 그리기 칸을 넣거나, 종이(인쇄본)에 그리라고 발문에 쓰세요. '
+                              '교사 확인용 완성 그림은 teacher_only로 두세요.', 'interactive-drawing-missing')
+                    break
+                else:
+                    continue
+                break
 
     def object(self, value, path, allowed):
         if not isinstance(value, dict):
@@ -346,6 +563,7 @@ class Validator:
             self.error(path, '밑줄 문자로 빈칸을 만들었습니다.', '예: {{㉠|정답}} 또는 {{|정답|30}}로 바꾸세요.')
         if EXTERNAL.search(value):
             self.error(path, '외부 URL을 쓸 수 없습니다.', '외부 주소를 빼고 그림은 로컬 파일로 넣으세요.')
+        self.check_math_notation(value, path)
         try:
             parsed = inspect_markup(value)
         except MarkupError as error:
@@ -353,10 +571,14 @@ class Validator:
             return None
         if not empty and not parsed.plain.strip():
             self.error(path, '표기 안에 실제 내용이 없습니다.', '화면에 보일 글자나 수식을 쓰세요.')
-        if term_visible is True or (term_visible is None and not private):
-            self.check_terms(parsed, path)
-        if expression_visible is True or (expression_visible is None and (not private or term_visible is True)):
-            self.check_expressions(parsed, path, private=private and term_visible is not True)
+        check_terms = term_visible if term_visible is not None else not private
+        check_expressions = expression_visible if expression_visible is not None else check_terms
+        if check_terms or check_expressions:
+            text = visible_text(parsed) if parsed.blanks and not private else parsed.plain
+            if check_terms:
+                self.check_terms(text, path)
+            if check_expressions:
+                self.check_expressions(text, path)
         limit = self.limits.get(field)
         if limit is not None and len(parsed.plain) > limit:
             self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.')
@@ -833,7 +1055,8 @@ class Validator:
             for i, entry in enumerate(self.list(block.get('items'), path + '.items', 1, 10) or []):
                 where = f'{path}.items[{i}]'
                 if self.object(entry, where, ('text', 'answer')):
-                    self.text(entry.get('text'), where + '.text', field='items[].text')
+                    self.text(entry.get('text'), where + '.text', field='items[].text',
+                              expression_visible=entry.get('answer') != 'X')
                     if entry.get('answer') not in ('O', 'X'):
                         self.error(where + '.answer', '정답은 O 또는 X여야 합니다.', '대문자 O 또는 X를 쓰세요.')
         elif kind in ('match', 'order'):
@@ -934,30 +1157,31 @@ class Validator:
             try:
                 if not isinstance(block.get('fn'), str):
                     raise ValueError('함수 식이 필요합니다.')
-                tree = function_tree(block['fn'], names)
+                tree = explore_tree(block['fn'], {'x', *names})
             except ValueError as error:
-                self.error(path + '.fn', str(error), 'x와 선언한 매개변수로 식을 쓰세요.')
+                self.error(path + '.fn', str(error), 'x와 선언한 매개변수로 식을 쓰세요.', 'explore-expression')
             self.grid({'mode': 'coord', 'x': block.get('x'), 'y': block.get('y'), 'unit_mm': block.get('unit_mm')}, path)
             if 'table' in block:
-                xs = self.list(block['table'], path + '.table', 0) or []
-                for i, x in enumerate(xs):
+                xs = []
+                x_bounds = block.get('x')
+                x_valid = (isinstance(x_bounds, list) and len(x_bounds) == 2 and
+                           all(type(v) is int and abs(v) <= 10000 for v in x_bounds) and
+                           0 < x_bounds[1] - x_bounds[0] <= 200)
+                for i, x in enumerate(self.list(block['table'], path + '.table', 0) or []):
                     if not is_number(x):
                         self.error(f'{path}.table[{i}]', '수만 넣을 수 있습니다.', '표에 넣을 x값을 쓰세요.')
+                    elif x_valid and not x_bounds[0] <= x <= x_bounds[1]:
+                        self.warn(f'{path}.table[{i}]', f'표의 x={x:g}가 그래프 가로 범위를 벗어납니다.',
+                                  'x 범위 안의 표 값을 쓰거나 가로축 범위를 넓히세요.', 'explore-table-x-out-of-range')
+                    else:
+                        xs.append(x)
                 bounds = block.get('y')
-                if (tree is not None and len(ranges) == len(params) and params and defaults_valid and
+                if (xs and tree is not None and len(ranges) == len(params) and params and defaults_valid and
                         isinstance(bounds, list) and len(bounds) == 2 and
                         all(is_number(v) for v in bounds) and bounds[0] < bounds[1]):
-                    defaults = {name: values[3] for name, values in ranges.items()}
-                    edges = [slider_endpoints(low, high, step, excluded)
-                             for low, high, step, _, excluded in ranges.values()]
-                    scopes = [defaults, *({**defaults, **snapshot} for snapshot in snapshots)]
-                    scopes.extend({**defaults, name: value} for name, ends in zip(ranges, edges) for value in ends)
-                    scopes.extend(dict(zip(ranges, values)) for values in product(*edges))
                     outside = None
-                    for scope in scopes:
+                    for scope in slider_scopes(ranges, snapshots):
                         for x in xs:
-                            if not is_number(x):
-                                continue
                             try:
                                 y = function_value(tree, x, scope)
                             except (ValueError, ArithmeticError):
@@ -971,7 +1195,7 @@ class Validator:
                         x, scope, y = outside
                         values = ', '.join(f'{key}={value:g}' for key, value in scope.items())
                         self.warn(path + '.table', f'표의 값이 그래프 세로 범위를 벗어납니다: x={x:g}, {values}일 때 y={y:g}.',
-                                  '슬라이더 끝 눈금과 인쇄값에서 표의 점이 보이도록 y 범위나 표를 조정하세요.',
+                                  '슬라이더를 움직이거나 인쇄할 때 표의 점이 보이도록 y 범위나 표를 조정하세요.',
                                   'explore-table-out-of-range')
         elif kind == 'video':
             self.video(block, path)
@@ -1008,18 +1232,34 @@ class Validator:
                 self.error('meta.total_points', f'라벨 배점의 합({math.fsum(self.points):g}점)과 총점이 다릅니다.',
                            '연속 병합한 라벨은 첫 행 배점만 더해 총점을 맞추세요.')
 
+    def exact_input(self, value):
+        return exact_number(self.decimals.get(id(value), str(value)))
+
     def verify(self, checks, path):
         for i, check in enumerate(self.list(checks, path) or []):
             where = f'{path}[{i}]'
-            if not self.object(check, where, ('given', 'holds')):
+            if not self.object(check, where, ('given', 'holds', 'tolerance')):
                 continue
+            tolerance = check.get('tolerance', 0)
+            try:
+                if not is_number(tolerance) or (tolerance := self.exact_input(tolerance)) < 0:
+                    raise ValueError
+            except (ValueError, ArithmeticError):
+                self.error(where + '.tolerance', '허용 오차는 0 이상의 수여야 합니다.',
+                           '절대 차이 한도를 JSON 숫자로 쓰세요.', 'verify-expression')
+                tolerance = None
             given = check.get('given')
             valid_given = isinstance(given, dict)
             if not valid_given:
                 self.error(where + '.given', '대입할 문자와 값의 객체가 필요합니다.', '예: {"x": 2}로 쓰세요.', 'verify-expression')
                 given = {}
+            exact_given = {}
             for name, value in given.items():
-                if not isinstance(name, str) or not re.fullmatch(r'[a-z]', name) or not is_number(value):
+                try:
+                    if not isinstance(name, str) or not re.fullmatch(r'[a-z]', name) or not is_number(value):
+                        raise ValueError
+                    exact_given[name] = self.exact_input(value)
+                except (ValueError, ArithmeticError):
                     self.error(f'{where}.given.{name}', '문자 이름 또는 대입값이 맞지 않습니다.',
                                '영문 소문자 한 글자와 유한한 수를 쓰세요.', 'verify-expression')
                     valid_given = False
@@ -1028,14 +1268,14 @@ class Validator:
                 try:
                     if not isinstance(equation, str) or equation.count('=') != 1:
                         raise ValueError('등호가 한 개 있는 식을 쓰세요.')
-                    left, right = (function_tree(part, given) for part in equation.split('='))
+                    left, right = (arithmetic_tree(part, given, exact=True) for part in equation.split('='))
                     used = {node.id for tree in (left, right) for node in ast.walk(tree) if isinstance(node, ast.Name)}
                     if not used <= given.keys():
                         raise ValueError('식에 쓴 모든 문자의 대입값이 필요합니다.')
-                    if not valid_given:
+                    if not valid_given or tolerance is None:
                         continue
-                    lhs, rhs = (function_value(tree, given.get('x', 0), given, exact=True) for tree in (left, right))
-                    if abs(lhs - rhs) > Fraction(1, 1_000_000_000):
+                    lhs, rhs = (function_value(tree, 0, exact_given, exact=True) for tree in (left, right))
+                    if abs(lhs - rhs) > tolerance:
                         self.error(slot, f'대입한 양변이 다릅니다: {lhs} ≠ {rhs}.',
                                    '정답의 문자별 값과 원래 조건을 함께 확인하세요.', 'verify-failed')
                 except (ValueError, TypeError, ArithmeticError, KeyError, RecursionError) as error:
@@ -1054,9 +1294,6 @@ class Validator:
                 if not self.object(entry, path, ('item', 'answer', 'video', 'verify', *groups)):
                     continue
                 item = entry.get('item')
-                self.expression_context = self.expression_meta
-                if isinstance(item, str):
-                    self.expression_context += self.expression_items.get(item, '') + json.dumps(entry, ensure_ascii=False)
                 if not isinstance(item, str) or item not in self.ids:
                     self.error(path + '.item', '이 id의 item이 없습니다.', 'items에 실제로 있는 id를 쓰세요.')
                 elif item in solutions:
@@ -1066,10 +1303,13 @@ class Validator:
                 if not entry.get('steps'):
                     self.warn(path + '.steps', '교사용 풀이에 풀이 과정이 없습니다.',
                               '정답만 두지 말고 steps에 풀이 과정을 쓰세요(필요하면 rubric·misconceptions도).')
-                self.text(entry.get('answer'), path + '.answer', private=True, expression_visible=True)
+                self.text(entry.get('answer'), path + '.answer', private=True, term_visible=self.public_solution,
+                          expression_visible=True)
                 for key in groups:
                     if key in entry:
-                        self.texts(entry[key], f'{path}.{key}', minimum=0, private=True, expression_visible=True)
+                        self.texts(entry[key], f'{path}.{key}', minimum=0, private=True,
+                                   term_visible=self.public_solution and key in ('steps', 'rubric'),
+                                   expression_visible=True)
                 if 'verify' in entry:
                     self.verify(entry['verify'], path + '.verify')
                 if 'video' in entry:
@@ -1136,19 +1376,9 @@ class Validator:
         self.kind = meta.get('kind', '수업') if isinstance(meta, dict) else '수업'
         self.grade = grade_level(meta.get('grade')) if isinstance(meta, dict) else None
         self.columns = meta.get('columns', 1) if isinstance(meta, dict) else 1
-        context_meta = {key: meta.get(key) for key in ('title', 'header_title', 'unit')} if isinstance(meta, dict) else {}
-        self.expression_meta = json.dumps(context_meta, ensure_ascii=False)
-        self.expression_context = self.expression_meta
-        self.expression_items = {}
-        items = data.get('items', [])
-        for item in items if isinstance(items, list) else []:
-            if isinstance(item, dict) and isinstance(item.get('id'), str):
-                self.expression_items[item['id']] = json.dumps(item, ensure_ascii=False)
-        teacher = data.get('teacher', {})
-        entries = teacher.get('solutions', []) if isinstance(teacher, dict) else []
-        for entry in entries if isinstance(entries, list) else []:
-            if isinstance(entry, dict) and isinstance(entry.get('item'), str) and entry['item'] in self.expression_items:
-                self.expression_items[entry['item']] += json.dumps(entry, ensure_ascii=False)
+        settings = meta if isinstance(meta, dict) else {}
+        self.interactive = settings.get('interactive', self.kind in ('수업', '연습')) is True
+        self.public_solution = self.interactive and settings.get('reveal', '시도 후') in ('시도 후', '바로')
         if isinstance(meta, dict):
             title = self.text(meta.get('title'), 'meta.title', private=True, term_visible=True)
             if title and title.blanks:
@@ -1177,14 +1407,16 @@ class Validator:
                 self.error(path + '.id', '이미 있는 id입니다.', '문서 전체에서 유일한 id로 바꾸세요.')
             else:
                 self.ids.add(item_id)
-            self.expression_context = self.expression_meta + self.expression_items.get(item_id, '')
             self.bools(item, path, 'break')
             if 'hints' in item:
                 self.texts(item['hints'], path + '.hints', minimum=1, maximum=3)
             self.local_marks = set()
             marks = []
-            for j, block in enumerate(self.list(item.get('blocks'), path + '.blocks') or []):
+            blocks = self.list(item.get('blocks'), path + '.blocks') or []
+            for j, block in enumerate(blocks):
                 self.block(block, f'{path}.blocks[{j}]', item_id, marks)
+            if self.interactive:
+                self.check_screen_drawing(blocks, path + '.blocks')
             for where, mark in marks:
                 if mark not in self.local_marks:
                     self.warn(where, '같은 item의 상황·발문에 이 빈칸 기호가 없습니다.',
@@ -1195,15 +1427,23 @@ class Validator:
         return self.issues
 
 
-def validate(data, folder: Path):
-    return Validator(folder).check(data)
+def validate(data, folder: Path, *, decimals=None):
+    return Validator(folder, decimals).check(data)
 
 
 def load_plan(folder: Path):
     """Return (parsed manuscript, exact input bytes, validation issues)."""
     raw = (folder / SOURCE).read_bytes()
+    decimals = {}
+
+    def remember_decimal(literal):
+        # Keep normal JSON types for assembly, but don't round verify's source decimals.
+        value = float(literal)
+        decimals[id(value)] = literal
+        return value
+
     try:
-        data = json.loads(raw.decode('utf-8-sig'))
+        data = json.loads(raw.decode('utf-8-sig'), parse_float=remember_decimal)
     except json.JSONDecodeError as error:
         return None, raw, [Issue('error', '$', f'JSON 형식 오류({error.lineno}행 {error.colno}열).',
                                  '쉼표, 큰따옴표, 괄호를 확인하세요.')]
@@ -1211,7 +1451,7 @@ def load_plan(folder: Path):
         return None, raw, [Issue('error', '$', 'UTF-8로 읽을 수 없습니다.', '구성.json을 UTF-8로 저장하세요.')]
     except (ValueError, RecursionError):
         return None, raw, [Issue('error', '$', 'JSON의 깊이 또는 숫자가 너무 큽니다.', '중첩이나 숫자 자릿수를 줄이세요.')]
-    return data, raw, validate(data, folder)
+    return data, raw, validate(data, folder, decimals=decimals)
 
 
 def print_issues(issues):

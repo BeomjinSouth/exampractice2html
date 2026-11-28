@@ -587,9 +587,25 @@ class SourceAuditTest(unittest.TestCase):
         self.assertEqual(parser.markers, {'ws-key-choice', 'data-src'})
 
     def test_external_css_url_and_local_data_svg(self):
-        parser = sheet_check._SourceAudit()
-        parser.feed('<img src="data:image/svg+xml,%3Csvg xmlns=http://www.w3.org/2000/svg%3E"><style>x{background:url(https://example.invalid/x)}</style>')
-        self.assertEqual(parser.remotes, ['CSS url()'])
+        for css, external in (
+            ('/* 예: url(https://example.invalid/x) */', False),
+            ('x::after{content:"url(https://example.invalid/x)"}', False),
+            ('x{background:url(https://example.invalid/x)}', True),
+            ('x{background:image-set("https://example.invalid/x" 1x)}', True),
+            ('@font-face{src:url(data:font/woff;base64,YWJj)} x{clip-path:url(#clip)}', False),
+        ):
+            with self.subTest(css=css):
+                source = ('<img src="data:image/svg+xml,%3Csvg xmlns=http://www.w3.org/2000/svg%3E">'
+                          f'<style id="sheet-user">{css}</style>')
+                problems = []
+                sheet_check._audit_source('', source, [], problems)
+                self.assertEqual([p['code'] for p in problems], ['external-url'] if external else [])
+                self.assertEqual(bool(foreign_code_issues(source)), external)
+
+    def test_inline_css_uses_the_same_resource_tokens(self):
+        problems = []
+        sheet_check._audit_source('', '<p style="/* url(https://example.invalid/x) */ color:red">글</p>', [], problems)
+        self.assertEqual(problems, [])
 
     def test_answer_table_leak_private_attribute_and_video_exceptions(self):
         problems = []
@@ -841,6 +857,54 @@ class CheckBoundaryTest(unittest.TestCase):
         sheet_check._audit_later_answers(table, None, problems)
         self.assertEqual(problems, [])
 
+    def test_later_answer_matches_the_whole_equation_only(self):
+        table = {'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': 'y=2x'}]}
+        for text, shown in [('관계식 $y=2x+1$을 비교하시오.', False),
+                            ('관계식 y = 2x + 1을 비교하시오.', False),
+                            ('관계식 $ay=2x$를 사용하시오.', False),
+                            ('관계식 $y=2x^2$를 사용하시오.', False),
+                            ('관계식 $y=2x$와 $y=2x+1$을 비교하시오.', True),
+                            ('첫 번째 식은 $2 x = y$입니다.', True),
+                            ('관계식은 y = 2x. 그래프로 나타내시오.', True)]:
+            with self.subTest(text=text):
+                problems = []
+                sheet_check._audit_later_answers(table, [{'id': 'q1'}, {'id': 'q2', 'text': text}], problems)
+                self.assertEqual([p['code'] for p in problems], ['later-answer-shown'] if shown else [])
+                if shown:
+                    self.assertIn('비교', problems[0]['fix'])
+                    self.assertNotIn('그 식을 빼', problems[0]['fix'])
+
+    def test_handwriting_estimates_math_and_protects_reasoning(self):
+        for text, height, expected in [('sin45° = 1/√2', 10.2, []),
+                                       ('분자와 분모에 같은 수를 곱했다.', 15.8, [('handwriting-overflow', 'warning')]),
+                                       ('한글 설명을 두 줄로\n나누어 쓴다.', 10.2, [('handwriting-overflow', 'error')])]:
+            with self.subTest(text=text):
+                problems = []
+                report = {'boxes': [{'item': 'q1', 'kind': 'text', 'width_mm': 50,
+                                     'height_mm': height, 'key_text': text}]}
+                sheet_check._audit_report(report, '교사용', problems)
+                self.assertEqual([(p['code'], p['level']) for p in problems], expected)
+                if problems:
+                    self.assertIn('늘리', problems[0]['fix'])
+                    self.assertIn('추론', problems[0]['fix'])
+
+    def test_base_fill_requires_actual_growth_in_a_writing_column(self):
+        for fill, grow, kind, expected in [(.60, False, 'text', ['page-fill']),
+                                           (.60, True, 'text', ['page-fill']),
+                                           (.98, True, 'draw', []),
+                                           (.98, True, 'text', ['base-fill'])]:
+            with self.subTest(fill=fill, grow=grow, kind=kind):
+                problems = []
+                report = {'pages': [{'n': 1, 'slots': [{'items': ['q1'], 'fill': fill, 'base_fill': .60}]}],
+                          'boxes': [{'item': 'q1', 'kind': kind, 'grow': grow}]}
+                sheet_check._audit_fill(report, problems)
+                self.assertEqual([p['code'] for p in problems], expected)
+                if problems:
+                    self.assertIn('여백', problems[0]['fix'])
+                    self.assertNotIn('보강', problems[0]['fix'])
+                if expected == ['base-fill']:
+                    self.assertIn('38.0%p', problems[0]['msg'])
+
     def test_filled_text_counts_both_lines_in_pdf(self):
         try:
             import pymupdf
@@ -899,8 +963,10 @@ class CheckBoundaryTest(unittest.TestCase):
         self.assertNotIn('base-fill', codes)
 
     def test_single_page_with_thin_content_warns(self):
-        # 한 쪽짜리에서 늘이기 전 채움이 51%면 답칸만 반 쪽씩 늘어나므로 경고한다(실제 Codex 시험에서 나온 경우).
-        report = {'pages': [{'n': 1, 'teacher': False, 'slots': [{'fill': .985, 'base_fill': .51, 'overflow_mm': 0}]}]}
+        # 한 쪽짜리에서 서술 칸이 늘어 채움이 51%에서 98.5%가 된 경우.
+        report = {'pages': [{'n': 1, 'teacher': False, 'slots': [
+                    {'items': ['q1'], 'fill': .985, 'base_fill': .51, 'overflow_mm': 0}]}],
+                  'boxes': [{'item': 'q1', 'kind': 'text', 'grow': True}]}
         problems = []
         sheet_check._audit_fill(report, problems)
         self.assertEqual([issue['code'] for issue in problems], ['base-fill'])

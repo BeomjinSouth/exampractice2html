@@ -77,6 +77,85 @@ class StatusTest(unittest.TestCase):
         for path in (self.student, self.teacher, self.student.with_suffix('.pdf'), self.teacher.with_suffix('.pdf')):
             self.assertIn(str(path), output)
 
+    def build_education_fixture(self, **settings):
+        data = {'version': 1, 'meta': {'title': '활동', 'kind': '연습', 'sync': False, **settings},
+                'items': [{'id': 'q1', 'blocks': [{'type': 'question', 'text': '관계식을 구하시오.'}]}]}
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        with patch.dict(os.environ, {'SHEET_FONT_DIR': str(self.folder)}), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(sheet_build.cmd_build(self.folder), 0, out.getvalue())
+        for path in (self.teacher, self.student):
+            self.stamp(path, 1)
+        if settings.get('interactive', True):
+            with self.review.open('a', encoding='utf-8') as review:
+                review.write('## 화면 확인\n폰·태블릿 확인.\n')
+            self.stamp(self.review, 3)
+
+    def test_education_downgrade_needs_exact_records_for_each_change(self):
+        self.build_education_fixture(reveal='교사만', interactive=False)
+        first = self.out / '처음-설정.json'
+        first.write_text(json.dumps({
+            'version': 1, 'meta': {'kind': '연습', 'interactive': True, 'reveal': '시도 후'},
+            'items': 2, 'auto_slots': 3, 'written_boxes': 2, 'pen_figures': 1, 'draw_boxes': 1,
+            'forms': {'q1': {'fraction_form': '기약분수', 'radical_form': '유리화'}},
+        }, ensure_ascii=False), encoding='utf-8')
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('✗ 4 검토', output)
+        self.assertIn('교육 설정 변경 절이 없습니다', output)
+        review = self.review.read_text(encoding='utf-8') + '## 교육 설정 변경\n'
+        changes = ('공개 정책: 시도 후 → 교사만', '화면 풀이: 켬 → 끔', '문항 수: 2 → 1',
+                   '자동 판별 자리 수: 3 → 0', '서술 답 칸 수: 2 → 0', '펜 그림 수: 1 → 0',
+                   '그리기 칸 수: 1 → 0', 'q1 fraction_form: 기약분수 → 미지정', 'q1 radical_form: 유리화 → 미지정')
+        body = ''.join(f'- {line} — 비교 활동 조정\n' for line in changes[1:])
+        line = f'- {changes[0]} — 사용자 요청\n'
+        for malformed in (f'- {changes[0]} — (까닭)\n', '- 공개 정책: 바로 → 교사만 — 사용자 요청\n',
+                          '## 다른 절\n' + line, '```md\n' + line + '```\n'):
+            with self.subTest(malformed=malformed):
+                self.review.write_text(review + body + malformed, encoding='utf-8')
+                self.stamp(self.review, 3)
+                result, output = self.status()
+                self.assertEqual(result, 1, output)
+                self.assertIn('✗ 4 검토', output)
+                self.assertIn('공개 정책', output)
+        self.review.write_text(review + body + line, encoding='utf-8')
+        self.stamp(self.review, 3)
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        draft = output.split('전달 문안 초안', 1)[1]
+        for change in changes:
+            self.assertIn(change + ' — ', draft)
+        self.assertIn(line.strip(), draft)
+
+    def test_equal_rank_policy_change_does_not_require_review_section(self):
+        self.build_education_fixture(reveal='시도 후')
+        self.build_education_fixture(reveal='바로')
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        self.assertIn('공개 정책 `바로`', output)
+        self.assertNotIn('교육 설정 변경', output)
+
+    def test_corrupt_first_settings_does_not_count_as_legacy(self):
+        self.build_education_fixture()
+        (self.out / '처음-설정.json').write_text('{}', encoding='utf-8')
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('✗ 4 검토', output)
+        self.assertIn('현재 교육 설정을 비교할 수 없습니다', output)
+        self.assertNotIn('비교를 건너뜁니다', output)
+
+    def test_old_worksheet_without_first_settings_reports_skip(self):
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        self.assertIn('처음-설정.json이 없어 교육 설정 비교를 건너뜁니다', output)
+
+    def test_delivery_names_policy_and_default_before_student_contents(self):
+        self.build_education_fixture(reveal='교사만')
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        self.assertIn('공개 정책 `교사만`: 학생은 맞음·틀림만 보고 정답과 풀이는 보지 못합니다.', output)
+        self.assertIn('`연습` 기본 공개 정책은 `시도 후`', output)
+        self.assertLess(output.index('공개 정책 `교사만`'), output.index('학생용에 정답 공개 자료'))
+
     def test_foreign_code_blocks_gate_three_even_with_an_old_successful_report(self):
         source = self.student.read_text(encoding='utf-8')
         self.student.write_text(source.replace('</html>', '<script>/* 추가 코드 */</script></html>'), encoding='utf-8')

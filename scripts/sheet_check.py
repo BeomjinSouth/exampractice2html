@@ -17,7 +17,7 @@ import tempfile
 import unicodedata
 
 import cdp
-from sheet_common import FOREIGN_CODE_FIX, ForeignCodeAudit, foreign_code_issues
+from sheet_common import FOREIGN_CODE_FIX, ForeignCodeAudit, _style_resource_issues, foreign_code_issues
 
 
 class CheckError(Exception):
@@ -131,7 +131,6 @@ def _find_files(folder):
     return teacher, student, build
 
 
-_URL = re.compile(r"url\(\s*[\"\x27]?\s*https?://", re.I)
 _REMOTE = re.compile(r"^\s*https?://", re.I)
 _MARKERS = {"ws-key", "ws-teacher-only", "ws-key-choice", "ws-fig-answer"}
 _BOX_GEOMETRY = {"path": ("d",), "text": ("x", "y")}
@@ -143,7 +142,7 @@ class _SourceAudit(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.markers = set()
         self.remotes = []
-        self.in_style = False
+        self.style_data = None
         self.in_box = False
         self.box_geometry = Counter()
         self.images = Counter()
@@ -172,24 +171,26 @@ class _SourceAudit(HTMLParser):
             value = value or ""
             if name in ("src", "href", "xlink:href") and _REMOTE.search(value):
                 self.remotes.append(name)
-            if name == "style" and _URL.search(value):
-                self.remotes.append("style url()")
+            if name == "style" and _style_resource_issues(value):
+                self.remotes.append("style 속성")
         if tag == "style":
-            self.in_style = True
+            self.style_data = []
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag == "style":
-            self.in_style = False
+        if tag == "style" and self.style_data is not None:
+            if _style_resource_issues(''.join(self.style_data)):
+                self.remotes.append("CSS")
+            self.style_data = None
         elif tag == "svg":
             self.in_box = False
 
     def handle_data(self, data):
-        if self.in_style and _URL.search(data):
-            self.remotes.append("CSS url()")
+        if self.style_data is not None:
+            self.style_data.append(data)
 
 
 def _problem(problems, level, code, page, item, msg, fix):
@@ -201,16 +202,27 @@ def _page_for(report, item):
 
 
 _HANDWRITING_LINE_MM = 8
+_HANDWRITING_TOLERANCE_MM = _HANDWRITING_LINE_MM / 2
 
 
-def _grow_handwriting_height(key, width):
+def _handwriting_width(text):
+    width = 0
+    for char in unicodedata.normalize('NFC', text):
+        if char.isspace():
+            width += 2.25
+        elif unicodedata.category(char)[0] not in 'MC':  # 결합 기호와 서식 문자는 폭을 더하지 않는다.
+            width += 4.5 if unicodedata.east_asian_width(char) in ('W', 'F') else 3
+    return width
+
+
+def _handwriting_height(key, width, *, separate_sentences=False):
     available = width - 3.6
     if available <= 0:
         return float('inf')
-    # 문장마다 새 줄에서 쓰는 경우까지 여유를 둔다. 소수점 뒤에는 공백이 없다.
-    parts = re.split(r'(?<=[.!?。！？])\s+|\n', key.strip())
-    lines = sum(max(1, math.ceil(sum(2.25 if char.isspace() else 4.5 for char in part) / available))
-                for part in parts)
+    parts = key.strip().splitlines()
+    if separate_sentences:  # 늘이기 과다 검사에서는 문장마다 새 줄에 쓰는 경우도 허용한다.
+        parts = [sentence for line in parts for sentence in re.split(r'(?<=[.!?。！？])\s+', line)]
+    lines = sum(max(1, math.ceil(_handwriting_width(part) / available)) for part in parts)
     return lines * _HANDWRITING_LINE_MM + 2
 
 
@@ -225,7 +237,7 @@ def _audit_grow(teacher_report, student_report, problems):
         if not key.strip():
             continue
         height = box['height_mm']
-        required = _grow_handwriting_height(key, box.get('width_mm', 0))
+        required = _handwriting_height(key, box.get('width_mm', 0), separate_sentences=True)
         # 한 줄의 여유를 더 허용해 식을 여러 줄에 나눠 쓰는 답까지 과하게 잡지 않는다.
         if height > 3 * required + _HANDWRITING_LINE_MM:
             _problem(problems, 'warning', 'grow-excess', _page_for(student_report, item), item,
@@ -283,15 +295,17 @@ def _audit_report(report, role, problems):
                      f"{role}: {index}번 답 칸의 높이가 {height:.1f}mm입니다.", "답 칸을 7mm 이상으로 늘리세요.")
         key = box.get("key_text") or ""
         if role == "교사용" and box.get("kind") == "text" and key.strip():
-            required = math.ceil(len(key) * 4.5 / (width - 3.6)) * 8 + 2 if width > 3.6 else float("inf")
-            # 손글씨 한 줄짜리 답은 2줄 칸(10.2mm)에 맞는 정상 상태라 경고하지 않는다(정본 7.6).
-            if required > height or (required >= height * 0.85 and required > 10):
-                level = "error" if required > height else "warning"
-                code = "handwriting-overflow" if level == "error" else "handwriting-tight"
+            required = _handwriting_height(key, width)
+            # 한 줄은 10.2mm 칸에 들어간다. 반 줄 이내의 추정 초과는 눈으로 확인한다.
+            excess = required - height
+            if excess > 0 or (required >= height * 0.85 and required > 10):
+                level = "error" if excess > _HANDWRITING_TOLERANCE_MM else "warning"
+                code = "handwriting-overflow" if excess > 0 else "handwriting-tight"
                 amount = f"{required:.1f}mm" if math.isfinite(required) else "측정 불가"
                 _problem(problems, level, code, page, item,
                          f"{index}번 답 칸의 예상 필기 높이 {amount}, 실제 {height:.1f}mm.",
-                         "답 칸을 늘리거나 학생이 쓸 답안 분량을 줄이세요.")
+                         "쪽 그림에서 손으로 쓸 분량을 확인하세요. 부족하면 답 칸을 먼저 늘리거나 "
+                         "다른 칸·그림의 여유 높이를 옮기세요. 예시 답안의 추론·설명을 빼서 맞추지 마세요.")
     for split in report.get('print_word_splits', []):
         _problem(problems, 'warning', 'print-word-split', split['page'], split['item'],
                  f"{role}: 어절 중간에서 줄이 바뀝니다: {split['text']}",
@@ -304,22 +318,25 @@ def _audit_report(report, role, problems):
 
 def _audit_fill(report, problems):
     pages = [page for page in report.get("pages", []) if not page.get("teacher")]
+    grow_items = {box.get('item') for box in report.get('boxes', [])
+                  if box.get('kind') == 'text' and box.get('grow')}
     for index, page in enumerate(pages):
         for column, slot in enumerate(page.get("slots", []), 1):
             fill, base = slot.get("fill", 0), slot.get("base_fill", 0)
             last = index == len(pages) - 1
             if (not last and (fill < 0.95 or fill > 0.995)) or (last and fill < 0.90):
                 _problem(problems, "warning", "page-fill", page.get("n"), None,
-                         f"학생용 {column}번 칸 채움이 {fill * 100:.1f}%입니다.", "늘이기 설정이나 쪽 구성을 확인하세요.")
-            # 늘이기 전 채움이 낮으면 남는 높이가 모두 답칸으로 가서 한 문장 답에 반 쪽짜리 칸이 생긴다.
+                         f"학생용 {column}번 칸 채움이 {fill * 100:.1f}%입니다.",
+                         "쪽 그림에서 배치와 답 칸 높이를 확인하세요. 작도·필기용 공간이나 의도한 여백은 그대로 두고 "
+                         "검토에 까닭을 적으세요. 채움 수치 때문에 문항을 더하지 마세요.")
             # 여러 쪽의 마지막 쪽만 50%까지 허용하고, 한 쪽짜리·중간 쪽은 65%를 기준으로 본다.
             limit = 0.5 if (last and len(pages) > 1) else 0.65
-            if base < limit:
+            if base < limit and fill > base and grow_items.intersection(slot.get('items', [])):
                 _problem(problems, "warning", "base-fill", page.get("n"), None,
-                         f"{page.get('n')}쪽 {column}번 칸의 늘이기 전 채움이 {base * 100:.1f}%입니다. "
-                         "남는 높이가 모두 답칸으로 가서 칸이 지나치게 커집니다.",
-                         "학습 목표에 맞는 활동(예: 적용 문제, 수직선·표로 확인하기)을 보강해 한 쪽 분량을 맞추거나, "
-                         "여러 쪽이면 문항 배치(break)를 다시 정하세요. 쪽을 채우려고 안내 글을 늘리지는 마세요.")
+                         f"{page.get('n')}쪽 {column}번 칸의 늘이기 전 채움은 {base * 100:.1f}%, "
+                         f"늘이기로 실제 늘어난 채움은 {(fill - base) * 100:.1f}%p입니다.",
+                         "늘어난 서술 칸이 답의 분량에 맞는지 확인하세요. 필요한 필기·작도 공간과 여백은 "
+                         "그대로 두고 검토에 까닭을 적으세요. 지나치게 큰 칸만 늘이기나 배치를 조정하세요.")
 
 
 def _audit_source(teacher_text, student_text, keys, problems, teacher_public=""):
@@ -420,6 +437,23 @@ def _flat(text):
     return re.sub(r"\s+", "", text).lower()
 
 
+# 수식 표시 밖의 평문은 한글·문장부호·줄 경계에서 끊되, 식 안의 공백은 허용한다.
+_FORMULA_RUN = re.compile(r'(?:[a-z0-9α-ω=+*/×÷·−\-^_√<>≤≥≠()[\]{}%° \t]|(?<=\d)\.(?=\d))+')
+
+
+def _equations(text):
+    parts = re.split(r'(\$[^$\r\n]+\$)', str(text))
+    for index, part in enumerate(parts):
+        if index % 2:
+            yield _flat(part[1:-1])
+        else:
+            normalized = unicodedata.normalize('NFKC', part).lower()
+            # 소수점은 수식 안에 붙이고, 문장을 끝내는 마침표는 경계로 둔다.
+            for match in _FORMULA_RUN.finditer(normalized):
+                if '=' in match[0]:
+                    yield _flat(match[0])
+
+
 def _audit_later_answers(table, items, problems):
     """앞 문항에서 구하게 한 식이 뒤 문항의 학생용 글(상자·발문·표·힌트)에 그대로 보이면 경고한다.
 
@@ -429,24 +463,27 @@ def _audit_later_answers(table, items, problems):
         return
     entries = [entry for entry in items if isinstance(entry, dict) and isinstance(entry.get("id"), str)]
     order = [entry["id"] for entry in entries]
-    texts = {entry["id"]: _flat(entry.get("text", "")) for entry in entries}
+    equations = {entry['id']: set(_equations(entry.get('text', ''))) for entry in entries}
     for row in table["slots"]:
         right = row.get("right")
         if row.get("kind") != "text" or not isinstance(right, str):
             continue
         target = _flat(right)
-        if target.count("=") != 1 or len(target) < 3 or re.search(r"[<>≤≥≠]", target):
+        if target.count("=") != 1 or re.search(r"[<>≤≥≠]", target):
             continue
         left, rhs = target.split("=")
+        if not left or not rhs:
+            continue
         variants = {target, f"{rhs}={left}"}
         item = str(row.get("slot", "")).split(".")[0]
         if item not in order:
             continue
         for later in order[order.index(item) + 1:]:
-            if any(variant in texts[later] for variant in variants):
+            if variants & equations[later]:
                 _problem(problems, "warning", "later-answer-shown", None, later,
                          f"{row['slot']} 자리의 답 ‘{right}’이 뒤 문항 {later}의 학생용 글에 보입니다.",
-                         "뒤 문항·개념 상자·힌트에서 그 식을 빼고 ‘앞에서 구한 관계식’처럼 가리키세요.")
+                         "앞 답을 미리 주는지, 비교에 필요한 식인지 확인하세요. 정답 노출이라면 ‘앞에서 구한 관계식’으로 "
+                         "가리키고, 비교에 필요한 식이라면 그대로 둘 까닭을 검토에 적으세요.")
                 break
 
 
@@ -874,11 +911,30 @@ _RESTORED_JS = """(async()=>{
   return { ...sheet.report(), values: sheet.values(), clipped: [...new Set(clipped)].sort() };
 })()"""
 # 문항별 학생에게 보이는 글(정답·교사 전용·화면 단추 제외, 힌트 포함)
-_ITEM_TEXT_JS = """(() => [...document.querySelectorAll('.ws-item[data-id]')].map(item => {
-  const copy = item.cloneNode(true);
-  copy.querySelectorAll('.ws-key, .ws-teacher-only, [data-sheet-runtime], script, style').forEach(x => x.remove());
-  return {id: item.dataset.id, text: copy.textContent};
-}))()"""
+_ITEM_TEXT_JS = r"""(() => {
+  const group = text => /^[\wπ]+$/.test(text) ? text : `(${text})`;
+  const mathText = node => {
+    if (!node.children.length) return node.textContent;
+    const parts = [...node.children].map(mathText);
+    const [a, b, c] = parts;
+    switch (node.localName) {
+      case 'msup': return b === '°' ? a + b : `${a}^${group(b)}`;
+      case 'msub': return `${a}_${group(b)}`;
+      case 'msubsup': return `${a}_${group(b)}^${group(c)}`;
+      case 'mfrac': return `${group(a)}/${group(b)}`;
+      case 'msqrt': return `√${a?.length === 1 || /^\d+$/.test(a) ? a : `(${parts.join('')})`}`;
+      case 'mroot': return `√[${b}](${a})`;
+      default: return parts.join('');
+    }
+  };
+  return [...document.querySelectorAll('.ws-item[data-id]')].map(item => {
+    const copy = item.cloneNode(true);
+    copy.querySelectorAll('.ws-key, .ws-teacher-only, [data-sheet-runtime], script, style').forEach(x => x.remove());
+    copy.querySelectorAll('math').forEach(node => node.replaceWith(`$${mathText(node)}$`));
+    copy.querySelectorAll('p, li, td, th, figcaption, br').forEach(node => node.after('\n'));
+    return {id: item.dataset.id, text: copy.textContent};
+  });
+})()"""
 
 
 def _navigate(browser, path, teacher):
@@ -1348,6 +1404,7 @@ class _DeliveryMeta(ForeignCodeAudit):
         self.build = None
         self.sync = False
         self.interactive = False
+        self.kind = '수업'
         self.policy = ''
         self.has_reveal = False
         self.has_hash = False
@@ -1357,6 +1414,7 @@ class _DeliveryMeta(ForeignCodeAudit):
         attrs = dict(attrs)
         if tag == 'html':
             self.interactive = 'data-interactive' in attrs
+            self.kind = attrs.get('data-kind', '수업')
             self.policy = attrs.get('data-reveal', '시도 후')
         if tag == 'script' and attrs.get('id') == 'sheet-reveal':
             self.has_reveal = True
@@ -1403,6 +1461,90 @@ def _has_review_reason(reason):
     return len(letters) >= 2 and letters.casefold() not in {
         '까닭', '이유', '사유', '작성', '미정', '생략', 'todo', 'tbd', 'xx', 'xxx',
     }
+
+
+_REVEAL_RANK = {'없음': 0, '교사만': 1, '시도 후': 2, '바로': 2}
+_POLICY_MEANINGS = {
+    '시도 후': '답을 쓰고 확인한 칸의 정답과, 문항의 응답 칸을 다 채운 뒤의 풀이를 볼 수 있습니다.',
+    '바로': '시도하기 전에도 정답과 풀이를 볼 수 있습니다.',
+    '교사만': '학생은 맞음·틀림만 보고 정답과 풀이는 보지 못합니다.',
+    '없음': '학생은 답만 입력할 수 있고 자동 판별·정답·풀이를 보지 못합니다.',
+}
+
+
+def _education_changes(path, source, student, *, edited):
+    from sheet_build import EDUCATION_COUNT_LABELS, EDUCATION_FORM_KEYS, _Document, education_settings
+
+    def validated(settings):
+        meta = settings['meta']
+        forms = settings['forms']
+        if (type(settings['version']) is not int or settings['version'] != 1
+                or meta['kind'] not in ('수업', '연습', '평가') or type(meta['interactive']) is not bool
+                or meta['reveal'] not in _REVEAL_RANK
+                or any(type(settings[key]) is not int or settings[key] < 0 for key in EDUCATION_COUNT_LABELS)
+                or not isinstance(forms, dict)
+                or any(not isinstance(row, dict) or any(key not in EDUCATION_FORM_KEYS
+                       or not isinstance(value, str) or not value.strip() for key, value in row.items())
+                       for row in forms.values())):
+            raise ValueError('교육 설정 기록 형식이 올바르지 않습니다.')
+        return settings
+
+    first = validated(_json(path))
+    current = validated(education_settings(_json(source), _Document(student.read_text(encoding='utf-8-sig')), edited=edited))
+    before, after = first['meta'], current['meta']
+    changes = []
+    if _REVEAL_RANK[after['reveal']] < _REVEAL_RANK[before['reveal']]:
+        changes.append(('공개 정책', before['reveal'], after['reveal']))
+    if before['interactive'] and not after['interactive']:
+        changes.append(('화면 풀이', '켬', '끔'))
+    for key, label in EDUCATION_COUNT_LABELS.items():
+        if current[key] < first[key]:
+            changes.append((label, str(first[key]), str(current[key])))
+    old_forms, new_forms = first['forms'], current['forms']
+    for id_ in sorted(old_forms.keys() | new_forms.keys()):
+        for key in EDUCATION_FORM_KEYS:
+            old = old_forms.get(id_, {}).get(key)
+            new = new_forms.get(id_, {}).get(key)
+            if old != new:
+                changes.append((f'{id_} {key}', old or '미지정', new or '미지정'))
+    return changes
+
+
+def _education_review(text, changes):
+    if not changes:
+        return [], []
+    # 코드 예시나 HTML 주석은 검토 기록이 아니다.
+    text = re.sub(r'<!--.*?(?:-->|\Z)', '', text, flags=re.S)
+    in_section = found_section = False
+    fence = None
+    reasons = {}
+    for line in text.splitlines():
+        opening = re.match(r' {0,3}(`{3,}|~{3,})(.*)', line)
+        if fence:
+            if opening and opening[1].startswith(fence) and not opening[2].strip():
+                fence = None
+            continue
+        if opening:
+            fence = opening[1]
+            continue
+        if re.match(r'^#{1,2}[ \t]+', line):
+            in_section = bool(re.fullmatch(r'##[ \t]+교육 설정 변경[ \t]*', line))
+            found_section |= in_section
+        if not in_section:
+            continue
+        entry = re.fullmatch(r'[ \t]*-[ \t]+([^:]+):[ \t]*([^→]+)→([^—]+)—(.*)', line)
+        if entry and _has_review_reason(entry[4]):
+            key = tuple(value.strip().strip('`').strip() for value in entry.groups()[:3])
+            reasons[key] = entry[4].strip()
+    errors = [] if found_section else ['교육 설정 변경 절이 없습니다']
+    lines = []
+    for label, before, after in changes:
+        change = f'- {label}: {before} → {after}'
+        if (reason := reasons.get((label, before, after))) is None:
+            errors.append(f'{change} — 까닭이 없습니다')
+        else:
+            lines.append(f'{change} — {reason}')
+    return errors, lines
 
 
 def _review_errors(text, report, plan_warnings=()):
@@ -1566,7 +1708,7 @@ def _fonts_not_embedded(build, report):
 
 
 def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, edited_note='', unchecked=(),
-                    fonts_not_embedded=False):
+                    fonts_not_embedded=False, education_lines=()):
     print('\n전달 문안 초안 (경로·확인 범위는 다듬어도 되지만 맨 끝 ⭐ 줄은 답의 마지막 줄에 글자 그대로 붙이세요.)')
     print(f'학생용 HTML: {student}')
     print(f'학생용 PDF: {student.with_suffix(".pdf")}')
@@ -1610,6 +1752,20 @@ def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, e
     else:
         print('화면 크기·자동 판별·채움 인쇄 검사: 화면 풀이가 꺼져 있어 해당 없음.')
     print('확인하지 못한 것: 실제 인쇄, 실제 기기, 다른 브라우저.')
+    if education_lines:
+        print('교육 설정 변경:')
+        for line in education_lines:
+            print(line)
+    if metadata.interactive or report['student'].get('interactive'):
+        policy = metadata.policy
+        meaning = _POLICY_MEANINGS.get(policy, '정책의 뜻을 확인할 수 없습니다.')
+        print(f'공개 정책 `{policy}`: {meaning}')
+        # Renderer는 평가도 화면 풀이를 명시해 켜면 같은 공개 기본값을 쓴다.
+        if policy != '시도 후':
+            qualifier = '에서 화면 풀이를 켰을 때의' if metadata.kind == '평가' else ''
+            print(f'`{metadata.kind}`{qualifier} 기본 공개 정책은 `시도 후`입니다.')
+    else:
+        print('공개 정책: 화면 풀이가 꺼져 적용하지 않습니다.')
     if metadata.interactive or report['student'].get('interactive') or metadata.has_reveal or metadata.has_hash:
         if metadata.has_reveal:
             print('학생용에 정답과 풀이가 난독화되어 들어 있어 소스에서 찾을 수 있습니다.')
@@ -1725,6 +1881,18 @@ def cmd_status(folder: Path) -> int:
     elif not files_ok:
         check_note = "검사할 HTML이 없습니다"
 
+    from sheet_build import FIRST_SETTINGS_FILE
+    first_settings = out / FIRST_SETTINGS_FILE
+    education_note, education_error = '', ''
+    education_changes, education_lines = [], []
+    if not first_settings.exists():
+        education_note = f'{FIRST_SETTINGS_FILE}이 없어 교육 설정 비교를 건너뜁니다'
+    elif files_ok and report is not None:
+        try:
+            education_changes = _education_changes(first_settings, source, student, edited=edited)
+        except (OSError, ValueError, KeyError, AttributeError, TypeError, StopIteration) as exc:
+            education_error = f'{FIRST_SETTINGS_FILE}과 현재 교육 설정을 비교할 수 없습니다 ({exc})'
+
     review_path = out / "검토.md"
     review_ok, review_note = False, "검토.md가 없습니다"
     if review_path.is_file() and report is not None:
@@ -1734,7 +1902,10 @@ def cmd_status(folder: Path) -> int:
             interactive = bool(root and re.search(r"(?<![\w:-])data-interactive(?=[\s=/>])", root.group(), re.I))
             student_review = dict(report["student"], interactive=interactive or bool(report["student"].get("interactive")))
             review_report = dict(report, student=student_review)
-            errors = _review_errors(review_path.read_text(encoding='utf-8-sig'), review_report, plan_warnings)
+            review_text = review_path.read_text(encoding='utf-8-sig')
+            errors = _review_errors(review_text, review_report, plan_warnings)
+            education_errors, education_lines = _education_review(review_text, education_changes)
+            errors.extend(education_errors)
             if review_path.stat().st_mtime_ns <= report_path.stat().st_mtime_ns:
                 errors.insert(0, "검사 뒤에 검토하지 않았습니다")
             review_ok = not errors
@@ -1747,6 +1918,12 @@ def cmd_status(folder: Path) -> int:
         review_ok = False
         image_note = "쪽 그림이 없어 눈으로 검토할 수 없습니다. python -m pip install pymupdf pillow 후 check를 다시 실행하세요."
         review_note = image_note if review_note == "쪽별 검토와 내용 검산 확인" else review_note + "; " + image_note
+
+    if education_error:
+        review_ok = False
+        review_note += '; ' + education_error
+    elif education_note:
+        review_note += ' · ' + education_note
 
     ready = plan_ok and build_ok and check_ok and review_ok
     pdfs = [student.with_suffix(".pdf"), teacher.with_suffix(".pdf")] if files_ok else []
@@ -1769,7 +1946,7 @@ def cmd_status(folder: Path) -> int:
         _delivery_draft(student, teacher, report, student_meta,
                         plan_warnings if '원고 경고:' in plan_note else None,
                         edited_note=edited_note, unchecked=unchecked,
-                        fonts_not_embedded=_fonts_not_embedded(build, report))
+                        fonts_not_embedded=_fonts_not_embedded(build, report), education_lines=education_lines)
     else:
         action = next(label for label, ok, _ in gates if not ok)
         print(f"다음 할 일: {action} 관문을 확인하세요.")

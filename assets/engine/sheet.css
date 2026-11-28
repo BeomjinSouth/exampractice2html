@@ -465,13 +465,13 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 }
 :is(.ws-check-bar, .ws-pen-tools, .ws-order-tools, .ws-video-frame) button:disabled { opacity: .55; cursor: default; }
 :is(.ws-check-bar, .ws-pen-tools) button[aria-pressed="true"] { background: #e5e5e5; border-color: #555; }
-@media screen and (width < 720px) {
+@media screen and (max-width: 719.98px) {
   #sheet-flow :is(.ws-split, .ws-flow-cols) { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   #sheet-flow .ws-choices { grid-template-columns: repeat(auto-fit, minmax(min(100%, 95px), 1fr)); }
   #sheet-flow .ws-item { padding: 12px; }
 }
 /* 기존 기기에서도 잘림 방지 규칙이 적용되도록 고전 미디어 쿼리를 쓴다. */
-@media screen and (max-width: 719px) {
+@media screen and (max-width: 719.98px) {
   /* 좁은 화면에서는 표 칸의 입력 폭을 보장하고, 넘친 표만 옆으로 움직인다. */
   #sheet-flow .ws-data.ws-input-table { display: block; table-layout: auto; overflow-x: auto; }
   #sheet-flow .ws-data.ws-input-table col { width: auto !important; }

@@ -437,7 +437,7 @@ try {
   }));
   await test('JS 정규화·해시·난독화 기준 자료 전부 및 Node SHA-256 대조', () => usingTab(interactive, async tab => {
     const cases = JSON.parse(await fs.readFile(path.join(here, 'answer-cases.json'), 'utf8'));
-    for (const name of ['norm','num','number_parts','text_candidates','plain','points','line']) {
+    for (const name of ['norm','num','number_parts','text_candidates','plain','points','line','fraction_requirement']) {
       for (const [input, expected] of cases[name]) {
         assert.deepEqual(await tab.js(`__sheetCore.codec.${name}(${quote(input)})`), expected, `${name}: ${quote(input)}`);
       }
@@ -450,10 +450,10 @@ try {
     }
     for (const spec of cases.writing_results) {
       const result = await tab.js(`(() => {
-        const {kind, answer, unit, form, strict, cases} = ${quote(spec)};
+        const {kind, answer, accept = [], unit, form, cases} = ${quote(spec)};
         const codec = __sheetCore.codec;
-        const forms = codec.writing_forms(kind, [codec.plain(answer)], unit);
-        return cases.map(([value]) => codec.writing_result(kind, value, v => forms.includes(v), form, strict, !!unit));
+        const forms = codec.writing_forms(kind, [answer, ...accept].map(codec.plain), unit);
+        return cases.map(([value]) => codec.writing_result(kind, value, v => forms.includes(v), form, forms.some(v => v.includes('@'))));
       })()`);
       assert.deepEqual(result, spec.cases.map(([, expected]) => expected), quote(spec));
     }
@@ -1196,11 +1196,12 @@ assert 'q.2' in problems[1]['msg']
       for (const [id, value, expected] of [
         ['check.1','2',true], ['check.1','2분',true], ['check.1','2시간',false], ['check.1','3분',false],
         ['check.2','2x=y',true], ['units.1','30도',true], ['units.1','30°',true], ['units.1','30분',false],
-        ['units.2','5cm',true], ['units.3','60분',true], ['units.3','60시간',false], ['units.3','1',true],
+        ['units.2','5cm',false], ['units.3','60분',true], ['units.3','60시간',false], ['units.3','1',true],
         ['units.4','2',true], ['units.4','3분',true], ['units.4','3시간',false]
       ]) assert.equal(await answer(id, value), expected, `${id}: ${value}`);
       assert.deepEqual(await tab.js(`(() => { const el=document.querySelector('${slot('check.1')}'); return [el.dataset.checkUnit,el.dataset.checkHash.split(',')]; })()`),
-        ['1', [hash(salt,'number','2'), hash(salt,'number','2@분')]]);
+        ['1', ['2', '2@분', 'written:2분'].map(v => hash(salt,'number',v))]);
+      assert.equal(await tab.js(`__sheetCore.verdicts()['units.2']`), 'review');
       await tab.js('sheet.clearAnswers()');
       await setInput(tab, `${slot('check.1')} textarea`, '2분');
       await setInput(tab, `${slot('check.2')} textarea`, 'y=3x');
@@ -1594,12 +1595,12 @@ assert 'q.2' in problems[1]['msg']
     await editField(qText('q1'),newText);
     assert.equal(await tab.js(`document.querySelectorAll('${qText('q1')} math mtr').length`), 2);
     const hashes = (selector) => tab.js(`document.querySelector(${quote(selector)}).dataset.checkHash`);
-    assert.equal(await hashes(slot('q1.2')),hash(salt,'number','3/4'));
+    assert.equal(await hashes(slot('q1.2')), ['3/4', 'written:3/4', 'written:0.75'].map(v => hash(salt,'number',v)).join(','));
     assert.equal(await tab.js(`document.querySelector('${qText('q1')} .ws-blank[data-slot="q1.2"] .ws-key').textContent`),'34');
     await editField(`${slot('q1.4')} .ws-key`,'$2$분');
     const unitAttribute = () => tab.js(`document.querySelector(${quote(slot('q1.4'))}).getAttribute('data-check-unit')`);
     assert.equal(await unitAttribute(), '1');
-    assert.equal(await hashes(slot('q1.4')),[hash(salt,'number','2'),hash(salt,'number','2@분')].join(','));
+    assert.equal(await hashes(slot('q1.4')), ['2', '2@분', 'written:2분'].map(v => hash(salt,'number',v)).join(','));
     await tab.key('z',2);
     assert.equal(await hashes(slot('q1.4')),hash(salt,'number','1'));
     assert.equal(await unitAttribute(), null);
@@ -1621,8 +1622,8 @@ assert 'q.2' in problems[1]['msg']
     assert.doesNotMatch(exported,/앞칸 \{\{|data-check="\{/);
     await usingTab(await saveFile('edited-interactive-student',exported),async copy=>{
       assert.equal(await copy.js(`sheet.answer('q1.2','3/4')`),true);
-      await copy.js(`sheet.answer('q1.2','6/8')`);
-      assert.equal(await copy.js(`__sheetCore.verdicts()['q1.2']`),'review');
+      assert.equal(await copy.js(`sheet.answer('q1.2','6/8')`),true);
+      assert.match(await copy.js(`document.querySelector('${qText('q1')} .ws-verdict.ws-ok').textContent`), /약분해 보세요/);
       assert.equal(await copy.js(`sheet.answer('q1.2','1/2')`),false);
       assert.equal(await copy.js(`sheet.answer('q1.4','2')`),true);
       assert.equal(await copy.js(`sheet.answer('q1-copy-1.2','0.75')`),true);
@@ -1672,8 +1673,9 @@ assert 'q.2' in problems[1]['msg']
   const mathWriting = () => buildEditorCase('수식-답-판별', [
     {id:'symbols', blocks:[{type:'question', text:'길이 {{|$4\\pi$}} cm와 근호 {{|$2\\sqrt{3}$}}를 써 봅시다.'}]},
     {id:'strict', blocks:[{type:'situation', lines:['기약분수로 써 봅시다.']},
-      {type:'question', text:'비는 {{|$\\dfrac{3}{5}$}}입니다.'}]},
-    {id:'general', blocks:[{type:'question', text:'비는 {{|$\\frac{3}{5}$}}입니다.'},
+      {type:'question', text:'비는 {{|$\\dfrac{3}{5}$;;$\\frac{9}{15}$}}입니다.'}]},
+    {id:'fraction', fraction_form:'분수', blocks:[{type:'question', text:'기약분수로 쓰세요. 비는 {{|$\\frac{3} {5}$}}입니다.'}]},
+    {id:'general', blocks:[{type:'question', text:'기약분수로 나타내지 않아도 됩니다. 비는 {{|$\\frac{3}{5}$}}입니다.'},
       {type:'answer', rows:[{label:'짧은 답', lines:2, answer:'$4$'}, {label:'설명', lines:3, answer:'두 줄 답', check:'off'}]}]},
     {id:'unchecked', blocks:[{type:'question', text:'식은 {{|$x+x+x+x+x+x+x+x$}}입니다.'}]}
   ]);
@@ -1695,7 +1697,10 @@ assert 'q.2' in problems[1]['msg']
       await tab.click(action('check', item('symbols')));
       assert.deepEqual(await tab.js(`Object.values(__sheetCore.verdicts()).slice(0,2)`), [true,true]);
       const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el => el.getClientRects().length).length`);
-      assert.equal(await visible(), 2);
+      const groups = await tab.js(`[...document.querySelectorAll('#sheet-flow .ws-symbols')].map(group =>
+        [...group.children].map(button => button.dataset.symbol).join(''))`);
+      assert.deepEqual(groups, Array(6).fill('π√/'));
+      assert.equal(await visible(), 18);
       await tab.send('Emulation.setEmulatedMedia', {media:'print'});
       assert.equal(await visible(), 0);
       await tab.send('Emulation.setEmulatedMedia', {media:'screen'});
@@ -1734,23 +1739,56 @@ assert 'q.2' in problems[1]['msg']
     const files = mathWritingFiles ??= await mathWriting();
     await usingTab(files.open(files.student), async tab => {
       await tab.js('sheet.clearAnswers()');
-      for (const [id, value, expected] of [
-        ['strict','6/10',false], ['strict','0.6',false], ['strict','3/5',true],
-        ['general','6/10','review'], ['general','0.60',true]
+      for (const [id, value, expected, message] of [
+        ['strict','6/10',false,'다시 생각해 봐요 · 기약분수로 나타내세요'],
+        ['strict','0.6',false,'다시 생각해 봐요 · 기약분수로 나타내세요'],
+        ['strict','3/5',true,'✓'], ['strict',' 9 / 15 ',true,'✓'],
+        ['general','6/10',true,'✓ · 약분해 보세요'], ['general','0.60',true,'✓'],
+        ['fraction','6/10',true,'✓ · 약분해 보세요'], ['fraction','0.6','review','확인 필요 · 분수로 나타내세요']
       ]) {
         await setInput(tab, `${slot(id + '.1')} input`, value);
         await tab.click(action('check', item(id)));
         assert.equal(await tab.js(`__sheetCore.verdicts()[${quote(id + '.1')}]`), expected);
-        if (expected === 'review') {
-          const result = `${item(id)} .ws-verdict.ws-review`;
-          assert.match(await tab.js(`document.querySelector(${quote(result)}).textContent`), /기약분수로 나타냈는지/);
+        const result = `${item(id)} .ws-verdict:not([hidden])`;
+        assert.equal(await tab.js(`document.querySelector(${quote(result)}).textContent`), message);
+        assert.equal(await tab.js(`document.querySelector(${quote(result)}).getAttribute('role')`), 'status');
+        if (message === '✓ · 약분해 보세요') {
+          assert.equal(await tab.js(`document.querySelector(${quote(result)}).getAttribute('aria-label')`), '맞았어요. 약분해 보세요');
         }
       }
+      assert.equal((await tab.js('sheet.score()')).correct, 2);
       await setInput(tab, `${slot('symbols.2')} input`, '√12');
       await tab.click(action('check', item('symbols')));
       assert.equal(await tab.js(`__sheetCore.verdicts()['symbols.2']`), 'review');
       await tab.js('sheet.clearAnswers()');
     });
+  });
+  await test('발문 편집과 derive가 요구 꼴을 다시 읽고 명시 설정은 보존', async () => {
+    const files = await buildEditorCase('분수-요구-편집', [
+      {id:'infer', blocks:[{type:'question', text:'기약분수로 쓰세요: {{|$\\frac{3}{5}$}}.'}]},
+      {id:'fixed', fraction_form:'기약분수', blocks:[{type:'question', text:'비를 쓰세요: {{|$\\frac{3}{5}$}}.'}]}
+    ]);
+    const prompt = '기약분수가 아니어도 좋습니다. 분수로 쓰세요: {{|$\\frac{3}{5}$}}.';
+    const edited = await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      await editField(tab, qText('infer'), prompt);
+      await editField(tab, qText('fixed'), prompt);
+      return tab.js('[sheet.serialize(), sheet.exportStudent()]');
+    });
+    await fs.writeFile(files.teacher, edited[0]);
+    await fs.writeFile(files.student, edited[1]);
+    for (const derived of [false, true]) {
+      if (derived) {
+        // Change only the saved inferred cache so derive must recalculate it from the prompt.
+        await fs.writeFile(files.teacher, edited[0].replace('data-fraction-form="분수"', 'data-fraction-form="자유"'));
+        await files.derive();
+      }
+      await usingTab(files.open(files.student), async tab => {
+        await tab.js(`sheet.clearAnswers(); sheet.answer('infer.1','0.6'); sheet.answer('fixed.1','0.6');`);
+        assert.deepEqual(await tab.js('__sheetCore.verdicts()'), {'infer.1':'review', 'fixed.1':false});
+        await tab.js('sheet.clearAnswers()');
+      });
+    }
   });
   async function editField(tab, selector, value) {
     await tab.mouseClick(selector, 2);
@@ -1778,7 +1816,8 @@ assert 'q.2' in problems[1]['msg']
       await editField(tab, `${table} tbody tr:first-child td:first-child`, '1반 (명)');
       assert.deepEqual(await check(tab,'q1.2',['90명','90점']),[true,false]);
       await tab.click(action('undo'));
-      assert.deepEqual(await check(tab,'q1.2',['90명','90점']),[true,true]);
+      assert.deepEqual(await check(tab,'q1.2',['90','90명','90점']),[true,false,false]);
+      assert.equal(await tab.js(`__sheetCore.verdicts()['q1.2']`), 'review');
       await editField(tab, `${table} tbody tr:first-child td:first-child`, '1반 (명)');
       await tab.click(action('table-unit', item('q1')));
       await paste(tab, '점수'); await tab.key('Enter');

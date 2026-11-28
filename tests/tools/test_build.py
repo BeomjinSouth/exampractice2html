@@ -413,7 +413,7 @@ class BuildTest(unittest.TestCase):
                 for attrs, (number, unit) in zip(slots, expected):
                     self.assertEqual(attrs.get('data-check-unit'), '1')
                     self.assertEqual(set(attrs['data-check-hash'].split(',')),
-                                     {check_hash(salt, 'number', v) for v in (number, f'{number}@{unit}')})
+                                     {check_hash(salt, 'number', v) for v in (number, f'{number}@{unit}', f'written:{number}')})
 
     def test_plan_rejects_invalid_table_unit(self):
         data = {'version': 1, 'meta': {'title': self.title}, 'items': [{'id': 'q1', 'blocks': [
@@ -767,7 +767,9 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(table['slots'][1]['wrong'], '정답오답오답')
         teacher = Tags(self.teacher.read_text(encoding='utf-8')).tags
         attrs = [a for _, a in teacher if a.get('data-slot') in ('q1.1', 'q1.2')]
-        self.assertEqual(len(attrs[0]['data-check-hash'].split(',')), 3)
+        self.assertEqual(set(attrs[0]['data-check-hash'].split(',')),
+                         {check_hash('00112233445566778899aabbccddeeff', 'number', v)
+                          for v in ('5', '6', '7', 'written:5', 'written:6', 'written:7')})
         self.assertEqual(len(attrs[1]['data-check-hash'].split(',')), 2)
 
     def test_derive_rebuilds_edited_quartile_and_writing_slots_like_build(self):

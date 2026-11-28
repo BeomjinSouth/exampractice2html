@@ -38,6 +38,16 @@ class PlanTest(unittest.TestCase):
         self.assertTrue({'items[1].id', 'items[0].blocks[0].type',
                          'items[0].blocks[1].text', 'items[0].blocks[2].text'} <= self.errors(data))
 
+    def test_fraction_form_is_limited_to_supported_values(self):
+        data = document({'type': 'question', 'text': '값은 {{|$\\frac{3} {5}$}}입니다.'})
+        data['meta']['kind'] = '수업'
+        for value in ('기약분수', '분수', '자유'):
+            data['items'][0]['fraction_form'] = value
+            self.assertEqual(self.errors(data), set())
+        for value in ('소수', None, ['분수']):
+            data['items'][0]['fraction_form'] = value
+            self.assertIn('items[0].fraction_form', self.errors(data))
+
     def test_markup_and_image_errors(self):
         for source in ('수식 $x^{$', '두\n줄', '답: ___', 'https://example.test', '{{㉠}}', '{{㉡|값}}'):
             with self.subTest(source=source):

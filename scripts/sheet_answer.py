@@ -14,7 +14,39 @@ import unicodedata
 # The units are part of the public answer-cases contract, not a runtime test dependency.
 UNITS = ('cm2', 'km2', 'cm3', '마리', '개월', '시간', '그루', '송이', 'cm', 'mm', 'km', 'kg',
          'ml', 'm2', 'm3', '원', '개', '명', '권', '장', '쪽', '번', '회', '배', '살', '세',
-         '점', '일', '년', '분', '초', '시', '도', '칸', '줄', '대', 'm', 'g', 'l', '°', '%')
+         '점', '일', '년', '분', '초', '시', '도', '칸', '줄', '대', 'm', 'g', 'l', '°', '%',
+         '가지', '쌍', '켤레', '자루', '벌', '조각', '묶음', '상자', '봉지', '바퀴', '층', '곳', '군데', 'dl')
+_UNIT_SUFFIX = re.compile('(' + '|'.join(map(re.escape, sorted(UNITS, key=len, reverse=True))) + r'|[가-힣]{1,3})$')
+FRACTION_FORMS = ('기약분수', '분수', '자유')
+# Match a request, not a mention of the term. Keep negative clauses local to their own request.
+_FRACTION_REQUEST = re.compile(r'(기약분수|분수)\s*로|약분\s*하')
+_FORM_OPTIONAL = re.compile(r'지\s*(?:않|말)|(?:이|가)?\s*아니어도|안\s*(?:해도|하여도|써도|나타내도)|필요\s*없')
+
+
+def fraction_requirement(texts):
+    forms = set()
+    for text in texts:
+        for clause in re.split(r'[.!?。;\n]', text):
+            for match in _FRACTION_REQUEST.finditer(clause):
+                between = clause[match.end():]
+                following = _FRACTION_REQUEST.search(between)
+                if not _FORM_OPTIONAL.search(between[:following.start()] if following else between):
+                    forms.add(match[1] or '기약분수')
+    return next((form for form in FRACTION_FORMS if form in forms), '자유')
+
+
+def _with_unit(value, parse):
+    if value is None:
+        return None
+    text = re.sub(r'^[a-z]=', '', norm(value), count=1).removeprefix('+')
+    if parse is _number:
+        text = text.replace('파이', 'π')
+    if parts := parse(text):
+        return [*parts, '']
+    unit = _UNIT_SUFFIX.search(text)
+    if unit and unit[0] not in ('파이', '루트') and (parts := parse(text[:unit.start()])):
+        return [*parts, '°' if unit[0] == '도' else unit[0]]
+    return None
 
 
 def norm(value):
@@ -30,19 +62,10 @@ def text_candidates(value):
     return [text] if text else []
 
 
-def numeric_details(value):
-    text = re.sub(r'^[a-z]=', '', norm(value), count=1)
-    suffix = ''
-    for unit in sorted(UNITS, key=len, reverse=True):
-        if text.endswith(unit) and len(text) > len(unit):
-            text = text[:-len(unit)]
-            suffix = '°' if unit == '도' else unit
-            break
+def _number(text):
     if text.startswith('(') and text.endswith(')'):
-        text = text[1:-1]
-    if text.startswith('+'):
-        text = text[1:]
-    text = text.replace('pi', 'π').replace('파이', 'π')
+        text = text[1:-1].removeprefix('+')
+    text = text.replace('pi', 'π')
     pi = ''
     if text.endswith('π'):
         pi, text = 'π', text[:-1]
@@ -62,9 +85,14 @@ def numeric_details(value):
             form = 'reduced' if int(text.split('/')[1]) == value.denominator else 'unreduced'
         else:
             form = 'decimal' if '.' in text else 'integer'
-        return [str(value) + pi, suffix, form]
+        return [str(value) + pi, form]
     except (ValueError, ZeroDivisionError):
         return None
+
+
+def numeric_details(value):
+    parts = _with_unit(value, _number)
+    return [parts[0], parts[2], parts[1]] if parts else None
 
 
 def number_parts(value):
@@ -91,7 +119,8 @@ def inferred_unit(tail, column='', row='', table=''):
         if (unit == '도'
                 or (unit == '일' and re.match(r'일\s*(?:때|경우|수(?:\s|$)|지|까|것(?:\s|$))', text))
                 or (unit == '분' and re.match(r'분\s*의', text))
-                or (unit == '점' and re.match(r'점\s*에서\s*(?:만나|만난|만날|만났)', text))):
+                or (unit == '점' and re.match(r'점\s*에서\s*(?:만나|만난|만날|만났)', text))
+                or (unit == '가지' and re.match(r'가지\s*(?:말|않|못)', text))):
             continue
         if re.match(re.escape(unit) + particles + r'(?![\w])', text):
             return unit
@@ -106,48 +135,79 @@ def number_forms(values, unit=''):
     return list(dict.fromkeys([n for n, _ in parts] + [f'{n}@{u or inferred}' for n, u in parts if u or inferred]))
 
 
-def radical_parts(value):
-    text = norm(value).replace('루트', '√')
-    match = re.fullmatch(r'(-?)([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))', text)
-    if not match:
+_ROOT = r'([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))'
+_ROOT_NUMERATOR = re.compile(r'(-?)' + _ROOT + r'(?:/([0-9]{1,128}))?')
+_ROOT_DENOMINATOR = re.compile(r'(-?)([0-9]{1,128})/(?:' + _ROOT + r'|\(' + _ROOT + r'\))')
+
+
+def _radical(text):
+    text = text.replace('루트', '√')
+    if match := _ROOT_NUMERATOR.fullmatch(text):
+        sign, coefficient, bare, grouped, denominator = match.groups()
+        root = bare or grouped
+        top, bottom = int(coefficient or '1') ** 2 * int(root), int(denominator or '1') ** 2
+        shape = f'{sign}{coefficient}√{root}' + (f'/{denominator}' if denominator else '')
+    elif match := _ROOT_DENOMINATOR.fullmatch(text):
+        sign, numerator, c1, r1, g1, c2, r2, g2 = match.groups()
+        coefficient, root = c1 or c2 or '', r1 or g1 or r2 or g2
+        top, bottom = int(numerator) ** 2, int(coefficient or '1') ** 2 * int(root)
+        shape = f'{sign}{numerator}/{coefficient}√{root}'
+    else:
         return None
-    sign, coefficient, radicand, grouped = match.groups()
-    radicand = radicand or grouped
-    square = int(coefficient or '1') ** 2 * int(radicand)
-    # Keep the sign when comparing squares so √12 and −√12 never match.
-    return [f'{sign}{coefficient}√{radicand}', f'square:{-square if sign else square}']
+    if not bottom:
+        return None
+    # Signed exact squares compare even irrational values without rounding.
+    return [shape, f'square:{Fraction(-top if sign else top, bottom)}']
+
+
+def radical_parts(value):
+    return _with_unit(value, _radical)
 
 
 def writing_forms(kind, values, unit=''):
     if kind == 'number':
-        return number_forms(values, unit)
+        forms = number_forms(values, unit)
+        return forms + [f'written:{norm(value)}' for value in values] if forms else []
     if kind == 'radical':
-        return [form for value in values for form in radical_parts(value)]
+        parts = [radical_parts(value) for value in values]
+        if not all(parts):
+            return []
+        inferred = '' if any(u for _, _, u in parts) else unit
+        return list(dict.fromkeys(v for shape, square, u in parts for key in (shape, square)
+                                  for v in ((key, f'{key}@{u or inferred}') if u or inferred else (key,))))
     return [norm(value) for value in values]
 
 
-def writing_result(kind, value, matches, form='', strict=False, check_unit=False):
-    if value is None or value == '':
-        return None
+def writing_result(kind, value, matches, form='', check_unit=False):
+    """Return [verdict, notice] without changing the public sheet.answer verdict API."""
+    if value is None or not str(value).strip():
+        return [None, '']
     if kind == 'text':
-        return None if not str(value).strip() else True if any(map(matches, text_candidates(value))) else 'review'
+        return [True if any(map(matches, text_candidates(value))) else 'review', '']
+    if kind not in ('radical', 'number'):
+        return [None, '']
+    parts = radical_parts(value) if kind == 'radical' else numeric_details(value)
+    if not parts:
+        return [False, '']
+    key, alternate, unit = parts if kind == 'radical' else (parts[0], parts[2], parts[1])
+
+    def match_unit(candidate):
+        return matches(f'{candidate}@{unit}' if check_unit and unit else candidate)
+
+    exact_shape = match_unit(key)
+    if not exact_shape and (kind == 'number' or not match_unit(alternate)):
+        return [False, '']
+    if unit and not check_unit:
+        return ['review', 'unit']
     if kind == 'radical':
-        parts = radical_parts(value)
-        return False if not parts else True if matches(parts[0]) else 'review' if matches(parts[1]) else False
-    if kind == 'number':
-        parts = numeric_details(value)
-        if not parts:
-            return False
-        number, unit, written = parts
-        if not matches(f'{number}@{unit}' if check_unit and unit else number):
-            return False
-        if form == 'fraction':
-            if strict:
-                return written == 'reduced'
-            if written == 'unreduced':
-                return 'review'
-        return True
-    return None
+        return [True, ''] if exact_shape else ['review', 'radical']
+    if matches(f'written:{norm(value)}'):
+        return [True, '']
+    if form == '기약분수' and alternate != 'reduced':
+        return [False, 'reduced']
+    if form == '분수' and alternate != 'reduced' and alternate != 'unreduced':
+        return ['review', 'fraction']
+    return [True, 'reduce' if alternate == 'unreduced' else '']
 
 
 def input_mode(values):
@@ -163,35 +223,14 @@ def num(value):
 
 
 def plain(source):
-    """Turn author markup into the plain-text convention in answer-cases.json."""
+    """Use the same math parse that produces the rendered answer."""
+    from sheet_markup import MarkupError, inspect_markup
     text = str(source)
-    escapes = []
-
-    def protect(match):
-        escapes.append(match.group(1))
-        return f'\ue000{len(escapes)-1}\ue001'
-
-    text = re.sub(r'\\([$\{\}\\])', protect, text)
-    text = text.replace('$', '').replace('**', '').replace('~', '')
-    text = re.sub(r'\\(?:,| )', '', text)
-    commands = {'times': '×', 'div': '÷', 'le': '≤', 'ge': '≥', 'ne': '≠', 'pi': 'π',
-                'angle': '∠', 'circ': '°', 'pm': '±', 'cdot': '⋅', 'approx': '≈',
-                'triangle': '△', 'square': '□', 'perp': '⊥', 'parallel': '⫽',
-                'equiv': '≡', 'sim': '∽', 'therefore': '∴', 'because': '∵', 'cdots': '⋯',
-                'left': '', 'right': '', 'quad': ' ', 'sin': 'sin ', 'cos': 'cos ', 'tan': 'tan '}
-    # TeX command names consume the whitespace immediately following the name.
-    text = re.sub(r'\\([A-Za-z]+)\s*', lambda m: commands.get(m.group(1), '\\' + m.group(1)), text)
-    text = re.sub(r'\^(?:\{°\}|°)', '°', text)
-    fraction = re.compile(r'\\(?:d?frac)\{([^{}]*)\}\{([^{}]*)\}')
-    while fraction.search(text):
-        text = fraction.sub(r'\1/\2', text)
-    group = re.compile(r'\\(sqrt|text|mathit|mathrm|overline|overarc|overgroup)\{([^{}]*)\}')
-    while group.search(text):
-        text = group.sub(lambda m: ('√' + (m[2] if re.fullmatch(r'[0-9]+', m[2]) else f'({m[2]})')
-                                    if m[1] == 'sqrt' else m[2]), text)
-    text = re.sub(r'\\sqrt\[([^\[\]]*)\]\{([^{}]*)\}', r'√[\1](\2)', text)
-    text = re.sub(r'\\[A-Za-z]+', '', text).replace('{', '').replace('}', '')
-    return re.sub(r'\ue000([0-9]+)\ue001', lambda m: escapes[int(m.group(1))], text)
+    try:
+        return inspect_markup(text, answer=True).plain.replace('−', '-')
+    except MarkupError:
+        # Plan also inspects invalid fields to give a location; don't invent a value.
+        return text
 
 
 def snapped(value, snap=None):

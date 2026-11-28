@@ -581,11 +581,11 @@ class Validator:
                 self.check_expressions(text, path)
         limit = self.limits.get(field)
         if limit is not None and len(parsed.plain) > limit:
-            self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.')
+            self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.', 'text-length')
         if '□' in parsed.outside_math:
-            self.warn(path, '점검 줄 기호(□)가 있습니다.', '학생이 해야 할 행동을 문장으로 쓰세요.')
+            self.warn(path, '점검 줄 기호(□)가 있습니다.', '학생이 해야 할 행동을 문장으로 쓰세요.', 'checklist-mark')
         if re.search(r'(?<![A-Za-z0-9])[A-Z]+(?![A-Za-z0-9])', parsed.outside_math):
-            self.warn(path, '수식 밖에 영문 대문자 낱말이 있습니다.', '점은 $A$, 평면은 $\\mathit{A}$처럼 쓰세요.')
+            self.warn(path, '수식 밖에 영문 대문자 낱말이 있습니다.', '점은 $A$, 평면은 $\\mathit{A}$처럼 쓰세요.', 'latin-outside-math')
         for blank in parsed.blanks:
             if not blank.answer:
                 self.error(path, '빈칸에 교사용 정답이 없습니다.', '예: {{㉠|정답}}처럼 정답을 써 넣으세요.')
@@ -594,7 +594,7 @@ class Validator:
                     if num(plain(alternate)) is None:
                         self.error(path, '수로 판별할 수 없는 빈칸 대안입니다.', '수나 분수로 쓴 대안을 사용하세요.')
             if ambiguous_answer(blank.answer) and not blank.alternatives:
-                self.warn(path, '학생 입력과 정답 표기가 다를 수 있습니다.', '다른 표현을 허용하려면 ;; 뒤에 대안을 추가하세요.')
+                self.warn(path, '학생 입력과 정답 표기가 다를 수 있습니다.', '다른 표현을 허용하려면 ;; 뒤에 대안을 추가하세요.', 'answer-notation')
             if blank.mark and not private:
                 expected = MARKS[self.blank_index:self.blank_index + 1]
                 if blank.mark != expected:
@@ -703,7 +703,7 @@ class Validator:
                 value = plain(source)
                 if (row.get('grow') is True and row.get('kind', 'text') == 'text' and
                         source.splitlines() == [source] and 0 < len(value.strip()) <= 20):
-                    self.warn(where + '.grow', '짧은 답 칸이 쪽 채움으로 커집니다.', 'grow를 빼고 lines로 정하세요.')
+                    self.warn(where + '.grow', '짧은 답 칸이 쪽 채움으로 커집니다.', 'grow를 빼고 lines로 정하세요.', 'short-answer-grow')
                 if check == 'number' and num(value) is None:
                     self.error(where + '.answer', '수로 판별할 수 없는 정답입니다.', '숫자나 분수로 쓰세요.')
                 if check in ('number', 'auto') and num(value) is not None and isinstance(row.get('accept', []), list):
@@ -711,7 +711,7 @@ class Validator:
                         if isinstance(alternate, str) and num(plain(alternate)) is None:
                             self.error(f'{where}.accept[{j}]', '수로 판별할 수 없는 대안입니다.', '같은 종류의 수나 분수를 쓰세요.')
                 if check != 'off' and ambiguous_answer(value):
-                    self.warn(where + '.answer', '학생 입력과 정답 표기가 다를 수 있습니다.', '다른 표현을 허용하려면 accept 추가를 검토하세요.')
+                    self.warn(where + '.answer', '학생 입력과 정답 표기가 다를 수 있습니다.', '다른 표현을 허용하려면 accept 추가를 검토하세요.', 'answer-notation')
             kind = row.get('kind', 'text')
             if kind not in ('text', 'draw'):
                 self.error(where + '.kind', '답 칸 종류를 알 수 없습니다.', 'text 또는 draw를 쓰세요.')
@@ -939,7 +939,7 @@ class Validator:
                     ymin = ymax - 1
                 if ymin < 0:
                     self.warn(path + '.plot', '음수 막대는 현재 화면 엔진의 막대 기준선과 일치하지 않을 수 있습니다.',
-                              '엔진 수정 전에는 음수가 아닌 자료를 사용하거나 화면을 별도로 확인하세요.')
+                              '엔진 수정 전에는 음수가 아닌 자료를 사용하거나 화면을 별도로 확인하세요.', 'negative-bar')
                 self.plot(block['plot'], path + '.plot', [(ymin, ymax)], 'bars', len(values))
 
     def block(self, block, path, item_id, pending_marks, inside_split=False):
@@ -971,7 +971,7 @@ class Validator:
                 text('tag')
             parsed = text('text', local=kind in ('question', 'ask'))
             if kind in ('question', 'ask') and parsed and re.match(r'^\s*[0-9]+[.)](?![0-9])', parsed.plain):
-                self.warn(path + '.text', '발문 첫머리가 문항 번호처럼 보입니다.', '직접 쓴 번호를 빼고 발문만 남기세요.')
+                self.warn(path + '.text', '발문 첫머리가 문항 번호처럼 보입니다.', '직접 쓴 번호를 빼고 발문만 남기세요.', 'manual-number')
             if kind == 'question':
                 self.bools(block, path, 'number')
                 if block.get('number', True) is True:
@@ -1302,7 +1302,7 @@ class Validator:
                     solutions.add(item)
                 if not entry.get('steps'):
                     self.warn(path + '.steps', '교사용 풀이에 풀이 과정이 없습니다.',
-                              '정답만 두지 말고 steps에 풀이 과정을 쓰세요(필요하면 rubric·misconceptions도).')
+                              '정답만 두지 말고 steps에 풀이 과정을 쓰세요(필요하면 rubric·misconceptions도).', 'solution-steps-missing')
                 self.text(entry.get('answer'), path + '.answer', private=True, term_visible=self.public_solution,
                           expression_visible=True)
                 for key in groups:
@@ -1316,7 +1316,7 @@ class Validator:
                     self.video(entry['video'], path + '.video', solution=True)
         for item, path in self.numbered.items():
             if item not in solutions:
-                self.warn(path, '번호 있는 발문의 교사용 풀이가 없습니다.', 'teacher.solutions에 이 item의 풀이를 쓰세요.')
+                self.warn(path, '번호 있는 발문의 교사용 풀이가 없습니다.', 'teacher.solutions에 이 item의 풀이를 쓰세요.', 'solution-missing')
 
     def assessment(self, data):
         if self.kind != '평가':
@@ -1420,7 +1420,7 @@ class Validator:
             for where, mark in marks:
                 if mark not in self.local_marks:
                     self.warn(where, '같은 item의 상황·발문에 이 빈칸 기호가 없습니다.',
-                              'mark를 같은 item의 빈칸과 맞추거나 필요 없으면 지우세요.')
+                              'mark를 같은 item의 빈칸과 맞추거나 필요 없으면 지우세요.', 'blank-mark-unused')
         self.meta(meta)
         self.teacher(data.get('teacher', {}))
         self.assessment(data)

@@ -602,3 +602,19 @@ class PlanTest(unittest.TestCase):
         self.assertEqual({i.level for i in result}, {'warning'})
         self.assertEqual(len(result), 6)
         self.assertTrue(all(i.hint for i in result))
+
+
+class PlanWarningCodeTest(unittest.TestCase):
+    def test_every_plan_warning_has_a_code(self):
+        # 전달 관문(status)은 원고 경고를 코드별로 판단하게 하므로, 코드 없는 경고가 다시 생기지 않게 막는다.
+        source = (Path(__file__).resolve().parents[2] / 'scripts' / 'sheet_plan.py').read_text(encoding='utf-8')
+        missing = []
+        for match in re.finditer(r'self\.warn\(', source):
+            end, depth = match.end(), 1
+            while depth:
+                depth += {'(': 1, ')': -1}.get(source[end], 0)
+                end += 1
+            body = source[match.end():end - 1].strip()
+            if not re.search(r"(?:'[a-z]+(?:-[a-z0-9]+)*'|\bcode\b[^,]*)\s*$", body):
+                missing.append(source.count(chr(10), 0, match.start()) + 1)
+        self.assertEqual(missing, [], f'코드 없는 원고 경고 행: {missing}')

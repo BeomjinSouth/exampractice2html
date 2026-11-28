@@ -363,27 +363,75 @@ def checked_svg(source):
 # Keep a decimal point inside a sentence even when math and prose touch.
 SENTENCE_BREAK = re.compile(r'[!?。！？\n]|\.(?!\d)')
 QUADRATIC_MATH = re.compile(r'<msup><mi>x</mi><mn>2</mn></msup>')
+# A correction applies only to the occurrence it directly negates, not the whole sentence.
+EXPRESSION_CORRECTION = re.compile(
+    r'\s*(?:(?:하면|면|해서는|해선|하여서는)\s*안\s*[되된돼됩]|'
+    r'(?:하|열리|리)?지\s*(?:않|말|마)|'
+    r'(?:하는\s*(?:것은|것이)|한다는\s*말은)\s*(?:(?:옳|맞|올바르)지\s*않|아니)|'
+    r'[’”\'\"]?\s*(?:(?:라는|이라는)\s*(?:말|표현)(?:은|을)|라고)?\s*(?:쓰지|사용하지)\s*(?:않|말|마))')
 INLINE_PARTS = re.compile(r'\\[\\${]|\$((?:\\[\\$]|[^$])*)\$')
 UPRIGHT_MATH = re.compile(r'\\(?:text|mathrm)\s*\{[^{}]*\}')
 UNIT_BASES = '|'.join([*(unit for unit in UNITS if re.fullmatch('[a-z]{2,}', unit)), 'mL'])
 UNIT_EXPONENT = r'(?:[²³]|\^\s*(?:[23]|\{\s*[23]\s*\})|[23])'
+MATH_NUMBER = r'(?:\d+(?:\{,\}\d+)*(?:\.\d*)?|\.\d+)'
+NUMBER_IN_FORMULA = rf'(?<![A-Za-z0-9_.^]){MATH_NUMBER}'
 BARE_MATH_UNIT = re.compile(
-    rf'(?<![A-Za-z0-9_.^])(?:\d+(?:\{{,\}}\d+)*(?:\.\d*)?|\.\d+)\s*'
-    rf'(?:m{UNIT_EXPONENT}|(?:{UNIT_BASES})(?:{UNIT_EXPONENT})?)(?![A-Za-z0-9_^])',
+    rf'{NUMBER_IN_FORMULA}\s*(?:m{UNIT_EXPONENT}|(?:{UNIT_BASES})(?:{UNIT_EXPONENT})?)(?![A-Za-z0-9_^])',
     re.ASCII)
-SEGMENT_NAME = r'(?:[A-Z]{2}|\\overline\s*\{\s*[A-Z]{2}\s*\})'
+BARE_METRE = re.compile(rf'{NUMBER_IN_FORMULA}\s+m(?!\s*[A-Za-z0-9_^²³])', re.ASCII)
+LENGTH_CONTEXT = re.compile(r'길이|거리|높이|너비|반지름|지름|둘레|깊이|두께')
+LENGTH_UNIT = r'(?:mm|cm|km|m|㎜|㎝|㎞|밀리미터|센티미터|킬로미터|미터)'
+LENGTH_UNIT_AFTER_MATH = re.compile(rf'(?:\*\*)?\s*{LENGTH_UNIT}(?![A-Za-z0-9_^²³])')
+LENGTH_NUMBER = re.compile(
+    rf'-?{MATH_NUMBER}(?P<unit>(?:\s|\\[,;:! ])*'
+    rf'(?:{LENGTH_UNIT}|\\(?:text|mathrm)\s*\{{\s*{LENGTH_UNIT}\s*\}}))?')
+NON_LENGTH_OBJECT_BEFORE = re.compile(r'(?:행렬|집합)\s*(?:\*\*)?\s*$')
+NON_LENGTH_OBJECT_AFTER = re.compile(r'\s*(?:인\s*)?(?:행렬|집합)')
+BARE_SEGMENT_NAME = r'[A-Z]{2}'
+SEGMENT_NAME = rf'(?:{BARE_SEGMENT_NAME}|\\overline\s*\{{\s*{BARE_SEGMENT_NAME}\s*\}})'
 SEGMENT_COMPARISON = re.compile(
     rf'(?<![A-Za-z0-9_^\\])({SEGMENT_NAME})\s*(?:[=<>≤≥≠]|\\(?:leq?|geq?|ne)(?![a-z]))\s*'
     rf'(?=({SEGMENT_NAME})(?![A-Za-z0-9_^]))')
 GEOMETRY_PREFIX = re.compile(r'(?:\\(?:angle|triangle|square|overarc)[\s{]*|[∠△□]\s*)$')
+GRAPH_TARGET = r'상자\s*그림|히스토그램|도수분포\s*다각형|(?:막대\s*|꺾은선\s*)?그래프'
 DRAW_ACTION = re.compile(
-    r'(?<![가-힣])(?:그[어려](?![가-힣]|\s+(?:놓[은았]|둔|두었))|그으(?:시오|세요)|그읍시다|'
-    r'그리(?:시오|세요|자|고\s+나서)|그립시다|작도\s*(?:하시오|하세요|하자|하고|하여|해)|'
-    r'표시\s*(?:하시오|하세요|하자|하고|하여|해))'
+    r'(?<![가-힣])(?:그[어려](?:서)?(?![가-힣]|\s+(?:놓[은았]|둔|두었))|그으(?:시오|세요)|그읍시다|'
+    r'그리(?:시오|세요|자|고\s+나서)|그립시다|그린\s*(?:후|뒤|다음)(?![가-힣])|'
+    r'작도\s*(?:하시오|하세요|하자|하고|하여|해|한\s*(?:후|뒤|다음)(?![가-힣]))|'
+    r'(?P<mark>표시\s*(?:하시오|하세요|하자|하고|하여|해))|'
+    rf'(?:(?:{GRAPH_TARGET})(?:으)?로|'
+    r'(?P<numberline>수직선\s*(?:위\s*)?에))\s+나타내(?:시오|세요|자|고|어?\s*보))'
     r'|[을를]\s+그리고(?![가-힣])')
 PAPER_LOCATION = re.compile(r'(?:종이(?:\s*\(인쇄본\))?|인쇄본|공책)(?:\s*위)?\s*에(?:서)?')
-MARK_LOCATION = re.compile(r'좌표|선분|직선|교점|외심|내심|중점|그래프|수직선|모눈|'
+MARK_LOCATION = re.compile(r'좌표|선분|직선|교점|외심|내심|중점|그래프|수직선|모눈|상자그림|히스토그램|도수분포다각형|'
                            r'(?<![가-힣])(?:점|각|원|변)(?=[을를에]|\s+[A-Z]|$)')
+CATEGORY_HEADER_UNIT = re.compile(r'\s*(?:모둠|학급|반|구분|항목|이름|번호|종류)\s*\(\s*단위\s*:\s*[^()]+\)\s*')
+
+
+def math_contexts(value):
+    # Mask formulas before finding sentence ends; punctuation in TeX is not prose.
+    prose = INLINE_PARTS.sub(lambda part: '@' * len(part[0]), value)
+    ends = iter(SENTENCE_BREAK.finditer(prose))
+    start, end = 0, next(ends, None)
+    for part in INLINE_PARTS.finditer(value):
+        if part[1] is None:
+            continue
+        while end and end.start() < part.start():
+            start, end = end.end(), next(ends, None)
+        yield part[1], prose[start:part.start()], prose[part.end():end.start() if end else len(prose)]
+
+
+def numeric_segment_equality(formula, after, length_context):
+    left, equal, right = (part.strip() for part in formula.partition('='))
+    if not equal:
+        return False
+    if not re.fullmatch(BARE_SEGMENT_NAME, left):
+        left, right = right, left
+    if not re.fullmatch(BARE_SEGMENT_NAME, left):
+        return False
+    number = LENGTH_NUMBER.fullmatch(right)
+    return number is not None and (length_context or number['unit'] is not None or
+                                   LENGTH_UNIT_AFTER_MATH.match(after) is not None)
 
 
 def visible_text(parsed):
@@ -433,6 +481,12 @@ class Validator:
         self.numbered = {}
         self.limits = {}
         self.local_marks = set()
+        self.set_text_context({})
+
+    def set_text_context(self, meta):
+        """Set the grade and unit context before checking manuscript or edited text."""
+        self.grade = grade_level(meta.get('grade'))
+        self.unit_context = '\n'.join(meta[key] for key in ('unit', 'title') if isinstance(meta.get(key), str))
 
     def error(self, path, message, hint, code=''):
         self.issues.append(Issue('error', path, message, hint, code))
@@ -451,10 +505,11 @@ class Validator:
                 continue
             term = entry['term']
             prefixes = entry.get('skip_if_preceded_by', [])
-            if isinstance(prefixes, str):
-                prefixes = [prefixes]
+            prefixes = (prefixes,) if isinstance(prefixes, str) else tuple(prefixes)
+            suffix = entry.get('skip_if_followed_by')
             context = entry.get('context')
-            if any(not any(sentence[:match.start()].endswith(prefix) for prefix in prefixes)
+            if any(not sentence[:match.start()].endswith(prefixes) and
+                   not (suffix and re.match(suffix, sentence[match.end():]))
                    for sentence in sentences if not context or re.search(context, sentence)
                    for match in re.finditer(re.escape(term), sentence)):
                 hint = '일상어가 아니라면 이 학년에서 배운 말로 바꾸세요.'
@@ -465,24 +520,40 @@ class Validator:
     def check_expressions(self, text, path):
         sentences = SENTENCE_BREAK.split(text)
         for entry in load_expressions():
+            unit = entry.get('unit')
+            if unit and not re.search(unit, self.unit_context):
+                continue
             context = entry.get('context')
-            if any(entry['avoid'] in sentence and (not context or any(word in sentence for word in context))
-                   for sentence in sentences):
-                self.warn(path, f'교과서 표현을 확인하세요: ‘{entry["avoid"]}’.',
+            pattern = entry.get('pattern') or re.escape(entry['avoid'])
+            match = next((match for sentence in sentences
+                          if not context or any(word in sentence for word in context)
+                          for match in re.finditer(pattern, sentence)
+                          if not EXPRESSION_CORRECTION.match(sentence[match.end():])), None)
+            if match:
+                self.warn(path, f'교과서 표현을 확인하세요: ‘{entry.get("avoid", match[0])}’.',
                           f'{entry["reason"]} 문맥에 맞게 ‘{entry["preferred"]}’ 표현으로 이으세요.',
                           'textbook-expression')
 
     def check_math_notation(self, value, path):
-        maths = [UPRIGHT_MATH.sub('@', match[1]) for match in INLINE_PARTS.finditer(value) if match[1] is not None]
-        if any(BARE_MATH_UNIT.search(math_source) for math_source in maths):
+        bad_unit = bad_segment = False
+        for formula, before, after in math_contexts(value):
+            math_source = UPRIGHT_MATH.sub('@', formula)
+            length_context = bool(LENGTH_CONTEXT.search(before) or LENGTH_CONTEXT.search(after))
+            if BARE_MATH_UNIT.search(math_source) or (length_context and BARE_METRE.search(math_source)):
+                bad_unit = True
+            if NON_LENGTH_OBJECT_BEFORE.search(before) or NON_LENGTH_OBJECT_AFTER.match(after):
+                continue
+            if numeric_segment_equality(formula, after, length_context) or any(
+                    not (match[1].startswith('\\') and match[2].startswith('\\')) and
+                    not GEOMETRY_PREFIX.search(math_source[:match.start()])
+                    for match in SEGMENT_COMPARISON.finditer(math_source)):
+                bad_segment = True
+        if bad_unit:
             self.warn(path, '수식 안의 단위가 변수처럼 기울어 보입니다.',
                       r'$12$ cm 또는 $12\text{ cm}$처럼 단위를 정체로 쓰세요.', 'math-unit-upright')
-        if any(not (left.startswith('\\') and right.startswith('\\')) and
-               not GEOMETRY_PREFIX.search(math_source[:match.start()])
-               for math_source in maths for match in SEGMENT_COMPARISON.finditer(math_source)
-               for left, right in [match.groups()]):
-            self.warn(path, '비교하는 선분 길이에 윗줄이 빠졌습니다.',
-                      r'$\overline{OA}=\overline{OB}$처럼 각 선분 이름 위에 윗줄을 쓰세요.',
+        if bad_segment:
+            self.warn(path, '선분 길이 표기에 윗줄이 빠졌습니다.',
+                      r'$\overline{OA}=\overline{OB}$, $\overline{AB}=6$ cm처럼 선분 이름 위에 윗줄을 쓰세요.',
                       'segment-length-overline')
 
     def check_screen_drawing(self, blocks, path):
@@ -490,6 +561,7 @@ class Validator:
         tools = set(screen_drawing_tools(located))
         if 'pen' in tools:
             return
+        numberline_plot = any(b.get('type') == 'numberline' and isinstance(b.get('plot'), dict) for b, _ in located)
         for block, where in located:
             source = block.get('text')
             if block.get('type') not in ('question', 'ask') or not isinstance(source, str):
@@ -499,20 +571,23 @@ class Validator:
             except MarkupError:
                 continue
             for sentence in SENTENCE_BREAK.split(text):
-                if any(DRAW_ACTION.search(sentence, location.end()) for location in PAPER_LOCATION.finditer(sentence)):
-                    continue
                 for action in DRAW_ACTION.finditer(sentence):
-                    clause = re.split(r'[,，]', sentence[:action.start()])[-1]
-                    marking = action[0].startswith(('표시', '표기'))
-                    if marking and not MARK_LOCATION.search(clause):
+                    before = re.split(r'[,，]', sentence[:action.start()])[-1]
+                    if PAPER_LOCATION.search(before):
                         continue
+                    marking = action.group('mark') is not None
+                    if marking and not MARK_LOCATION.search(before):
+                        continue
+                    clause = before + action[0]
                     if ('bars' in tools and any(word in clause for word in ('막대', '히스토그램')) or
-                        'line' in tools and any(word in clause for word in ('직선', '일차함수의 그래프', '정비례 관계의 그래프')) or
-                        'points' in tools and marking and re.search(r'(?:점|좌표|교점|꼭짓점)', clause)):
+                        'line' in tools and re.search(r'(?<!수)직선|일차함수의 그래프|정비례 관계의 그래프', clause) or
+                        'points' in tools and marking and re.search(r'점|좌표', before) or
+                        numberline_plot and action.group('numberline') and not re.search(GRAPH_TARGET, before)):
                         continue
                     self.warn(where + '.text', '화면 풀이의 작도·그리기 지시에 화면에서 그릴 곳이 없습니다.',
-                              '펜(pen: true)이나 그리기 칸을 넣거나, 종이(인쇄본)에 그리라고 발문에 쓰세요. '
-                              '교사 확인용 완성 그림은 teacher_only로 두세요.', 'interactive-drawing-missing')
+                              '같은 문항에 펜(pen: true)이나 그리기 칸을 넣거나, 종이(인쇄본)에 그리라고 쓰세요. '
+                              '밑그림에 겹칠 정답은 그림의 answer에 같은 viewBox의 SVG로, 그리기 칸의 정답은 행의 answer에 그림 객체로 넣으세요. '
+                              '상자그림에는 chart의 kind: "box"를 쓰세요.', 'interactive-drawing-missing')
                     break
                 else:
                     continue
@@ -1008,6 +1083,10 @@ class Validator:
                 self.integer(block['cols'], path + '.cols', 1, limit)
         elif kind == 'table':
             header = self.texts(block.get('header'), path + '.header', field='header[]')
+            for i, label in enumerate(header or []):
+                if isinstance(label, str) and CATEGORY_HEADER_UNIT.fullmatch(label):
+                    self.warn(f'{path}.header[{i}]', '범주를 나타내는 표 머리에 단위가 붙었습니다.',
+                              '단위는 양을 나타내는 머리(예: 시간(분))나 표 위 안내에 쓰세요.', 'table-category-unit')
             self.matrix(block.get('rows'), path + '.rows', len(header) if header else None, empty=True, field='rows[][]')
             if 'widths_mm' in block:
                 n = len(header) if header else None
@@ -1374,9 +1453,9 @@ class Validator:
         self.integer(data.get('version'), 'version', 1, 1)
         meta = data.get('meta')
         self.kind = meta.get('kind', '수업') if isinstance(meta, dict) else '수업'
-        self.grade = grade_level(meta.get('grade')) if isinstance(meta, dict) else None
         self.columns = meta.get('columns', 1) if isinstance(meta, dict) else 1
         settings = meta if isinstance(meta, dict) else {}
+        self.set_text_context(settings)
         self.interactive = settings.get('interactive', self.kind in ('수업', '연습')) is True
         self.public_solution = self.interactive and settings.get('reveal', '시도 후') in ('시도 후', '바로')
         if isinstance(meta, dict):

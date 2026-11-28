@@ -236,6 +236,39 @@ class BuildTest(unittest.TestCase):
                 for path in (self.teacher, self.student):
                     self.assertIn(note, path.read_text(encoding='utf-8'))
 
+    def test_table_uses_widest_blank_in_header_and_body_only(self):
+        from sheet_build import Renderer
+        block = {'type': 'table', 'header': ['{{㉠|둘}}', '값'],
+                 'rows': [['{{|짧음}}', '{{㉡|$5$;;다섯|30}}'], ['전: {{㉢|둘}}', '—']]}
+        renderer = Renderer({'meta': {'title': '표 시험', 'interactive': False}}, self.folder, [])
+        tags = Tags(renderer.block(block, 'q1')).tags
+        self.assertEqual([attrs['style'] for _, attrs in tags if attrs.get('class') == 'ws-blank'],
+                         ['--ws-blank-min:30mm'] * 4)
+        self.assertIn('--ws-blank-min:9mm', renderer.block({'type': 'text', 'text': '{{㉣|둘}}'}, 'q1'))
+
+    def test_coordinate_names_clear_tick_labels(self):
+        from itertools import combinations
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': '축 시험', 'interactive': False}}, self.folder, [])
+        for x, y in [([0, 5], [0, 10]), ([-3, 3], [-6, 6]), ([0, 10], [-5, 5]), ([-5, 0], [0, 8])]:
+            with self.subTest(x=x, y=y):
+                svg = ET.fromstring(renderer.grid({'mode': 'coord', 'x': x, 'y': y, 'unit_mm': 6})).find('svg')
+                labels = {}
+                for node in svg.findall('text'):
+                    left, base, size = map(float, (node.get('x'), node.get('y'), node.get('font-size')))
+                    width = sum(.8 if c == 'O' else .65 for c in node.text) * size
+                    anchor = {'start': 0, 'middle': .5, 'end': 1}[node.get('text-anchor', 'start')]
+                    left -= width * anchor
+                    labels[node.text, left, base] = (left, base - .85 * size, left + width, base + .25 * size)
+                self.assertTrue({'x', 'y', 'O'} <= {key[0] for key in labels})
+                for a, b in combinations(labels, 2):
+                    if not {a[0], b[0]} & {'x', 'y', 'O'}:
+                        continue
+                    l, t, r, d = labels[a]
+                    bl, bt, br, bd = labels[b]
+                    self.assertTrue(r <= bl or br <= l or d <= bt or bd <= t, (a, b))
+
     def test_chart_kinds_and_histogram_bin_widths(self):
         charts = [
             {'type': 'chart', 'kind': 'line', 'labels': ['가', '나'], 'values': [1, 2]},

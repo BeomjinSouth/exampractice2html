@@ -43,11 +43,11 @@ async function start() {
   child = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
     '--window-size=1200,900', '--no-first-run', '--disable-background-networking', '--disable-breakpad', 'about:blank'],
   { windowsHide: true, stdio: 'ignore', env: { ...process.env, TEMP: work, TMP: work, TMPDIR: work } });
-  exit = new Promise(resolve => {
-    for (const event of ['error', 'exit']) child.once(event, error => { if (event === 'error') processError = error; exited = true; resolve(); });
-  });
+  child.on('error', error => { processError = error; });
+  exit = new Promise(resolve => child.once('exit', () => { exited = true; resolve(); }));
   const port = await eventually(async () => {
-    if (exited) throw processError || new Error('Chrome이 일찍 종료됐습니다.');
+    if (processError) throw processError;
+    if (exited) throw new Error(`Chrome이 일찍 종료됐습니다 (${child.exitCode ?? child.signalCode}).`);
     const file = await fs.readFile(portFile, 'utf8').catch(() => '');
     return file !== previous && Number(file.split('\n')[0]);
   }, 'Chrome 디버깅 포트');
@@ -71,17 +71,25 @@ async function start() {
   });
 }
 async function stop() {
+  let treeKillError;
   try {
-    if (child && !exited && socket?.readyState === WebSocket.OPEN) {
+    if (!child?.pid || exited) return;
+    if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ id: ++serial, method: 'Browser.close' }));
+      socket.close();
       await Promise.race([exit, once(AbortSignal.timeout(2500), 'abort')]);
     }
-    if (child && !exited) {
-      if (process.platform === 'win32' && child.pid) await run('taskkill', ['/PID', String(child.pid), '/T', '/F']).catch(() => child.kill());
-      else child.kill();
+    if (!exited && process.platform === 'win32') {
+      const taskkill = path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'taskkill.exe');
+      try { await run(taskkill, ['/PID', String(child.pid), '/T', '/F'], { timeout: 3000, windowsHide: true }); }
+      catch (error) { treeKillError = error; }
+    }
+    if (!exited) {
+      // taskkill's return isn't confirmation that Node's own Chrome process exited.
+      child.kill('SIGKILL');
       await Promise.race([exit, once(AbortSignal.timeout(3000), 'abort')]);
     }
-    assert(!child || exited, 'Chrome이 종료되지 않았습니다.');
+    assert(exited, `Chrome이 종료되지 않았습니다 (PID ${child.pid}, ${processError?.message ?? treeKillError?.message ?? '종료 이벤트 없음'}).`);
   } finally {
     socket?.close();
     for (const call of pending.values()) clearTimeout(call.timer);
@@ -492,6 +500,22 @@ try {
     await tab.send('Input.dispatchMouseEvent', { type:'mousePressed', x,y, button:'left', clickCount:1 });
     await tab.send('Input.dispatchMouseEvent', { type:'mouseReleased', x,y, button:'left', clickCount:1 });
     assert.deepEqual((await valuesOf(tab))['q4.1'], { strokes:[] });
+    await tab.click(action('pen', slot('q4.1')));
+    // Replay the failing event order: Chrome lost capture with the button still held.
+    await tab.js(`{
+      const canvas = document.querySelector(${quote(penSelector)});
+      const r = canvas.getBoundingClientRect();
+      const event = (type, left, top, buttons) => new PointerEvent(type, {
+        pointerId: 91, pointerType: 'mouse', clientX: r.left + left, clientY: r.top + top, buttons, bubbles: true
+      });
+      canvas.dispatchEvent(event('pointerdown', 20, 20, 1));
+      canvas.dispatchEvent(event('lostpointercapture', 70, 40, 1));
+      document.body.dispatchEvent(event('pointermove', 70, 40, 1));
+      document.body.dispatchEvent(event('pointerup', 90, 60, 0));
+    }`);
+    const completedStroke = (await valuesOf(tab))['q4.1'].strokes[0];
+    assert.equal(completedStroke.length, 3);
+    assert(completedStroke[2][0] > completedStroke[1][0]);
     await tab.click(action('pen', slot('q3.1')));
     await tab.mouseClick(`${slot('q3.1')} canvas`);
     assert.deepEqual((await valuesOf(tab))['q3.1'], [0], '펜 필기가 판별용 점을 바꾸지 않음');
@@ -572,7 +596,7 @@ try {
       {id:'units', blocks:[{type:'answer', rows:[{label:'각도', answer:'$30^\\circ$'}, {label:'길이', answer:'$5$'},
         {label:'다른 정답', answer:'$1$시간', accept:['$60$분', '$1$']},
         {label:'단위 있는 대안', answer:'$2$', accept:['$3$분']}]}]},
-      {id:'explore', break:true, blocks:[{...explore, print:[{a:2},{a:-1}]}, { ...explore, unit_mm:3 }]},
+      {id:'explore', break:true, blocks:[{...explore, print:[{a:2},{a:-1}]}, { ...explore, unit_mm:3, params: [{ ...explore.params[0], label:'$a$의 값' }] }]},
       {id:'screen-check', break:true, blocks:[{type:'split', left:[{type:'checklist', title:'화면전용 점검', items:['하나']}],
         right:[{type:'checklist', items:['둘'], print:false}]}]},
       {id:'paper-check', blocks:[{type:'checklist', title:'인쇄허용 점검', items:['확인했어요.'], print:true},
@@ -613,6 +637,9 @@ try {
     assert.equal(await tab.js(`document.querySelectorAll('${slider}').length`), 1);
     assert.equal(await visible(`${first} .ws-explore-snapshots`), false);
     assert.equal(await visible(`${first} .ws-explore-table`), true);
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('${exploreItem} .ws-explore-ctrl label')].map(x=>[x.querySelector('math mi').textContent,x.querySelector('input').ariaLabel])`),
+      [['a','a의 값'], ['a','a의 값']]);
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-table th math mi')].map(x=>x.textContent)`), ['x','y']);
     assert.equal(await visible(`${item('screen-check')} .ws-checklist`), true);
     assert.equal(await visible('.ws-order .ws-print-only'), false);
     for (const [input, expected, text] of [['0','-0.5','−0.5'], ['0','0.5','0.5'], ['1','1.5','1.5'],
@@ -630,12 +657,15 @@ try {
     assert.equal(await tab.js(`document.querySelector('#sheet-pages ${item('screen-check')}') === null`), true);
     assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-snapshots figcaption')].map(x=>x.textContent)`), ['a=2','a=−1']);
     assert.equal(await tab.js(`document.querySelector('${first} .ws-print-only [data-map], ${first} .ws-print-only [data-y-for]') === null`), true);
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-snapshots figcaption math, ${first} .ws-explore-print-table th math')].map(x=>x.textContent)`),
+      ['a=2','a=−1','x','y','a=2','y','a=−1']);
     assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-print-table tr')].map(row=>[...row.cells].map(c=>c.textContent))`),
       [['x','−1','0','1'], ['y (a=2)','−2','0','2'], ['y (a=−1)','1','0','−1']]);
     const report = await tab.report();
     assert.deepEqual(report.issues, []);
     const printed = await pdf(tab, 'snapshot-worksheet', report.pages.length, true);
-    assert.match(printed, /a=2/); assert.match(printed, /a=−1/);
+    const equations = printed.normalize('NFKC').replace(/\s/g, '');
+    assert.match(equations, /a=2/); assert.match(equations, /a=−1/);
     assert.match(printed, /인쇄허용\s*점검/); assert.doesNotMatch(printed, /화면전용\s*점검/);
     assert.match(printed, /안에\s*순서대로\s*1,\s*2,\s*3,/);
     assert.match(printed, /화면에서는\s*값을\s*바꾸며\s*살펴볼\s*수\s*있습니다/);
@@ -650,8 +680,13 @@ try {
     assert.equal(await width(), '69mm');
     const a4 = await tab.report();
     assert.deepEqual(a4.issues, []);
+    const inlineFields = [slot('q1.1'), slot('head.이름')];
+    const fieldWidths = () => tab.js(`${quote(inlineFields)}.map(sel => document.querySelector(sel).getBoundingClientRect().width)`);
+    const before = await fieldWidths();
     await tab.js(`sheet.view('solve')`, true);
-    const fill = [...examples.map(([s,,,v]) => [s,v]), ['q1.2','오답 예시'], ['head.이름','시험학생'],
+    const longAnswer = '길게 입력한 답도 빠짐없이 보여요';
+    const longName = '인쇄시험용으로길게쓴이름';
+    const fill = [...examples.map(([s,,,v]) => [s,v]), ['q1.1',longAnswer], ['q1.2','오답 예시'], ['head.이름',longName],
       ['q1.4','분자와 분모를 같은 수로 나누면 값이 같아요.\n두 수에 똑같이 적용했어요.'],
       ['q1.5',{strokes:[[[.12,.72],[.25,.35],[.38,.67],[.52,.22]]]}],
       ['q4.1',{strokes:[[[.16,.25],[.38,.41],[.65,.65],[.79,.79]]]}], ['q4.2',[true,false]]];
@@ -674,11 +709,22 @@ try {
     await tab.js(`window.dispatchEvent(new Event('beforeprint'))`);
     assert.equal(await tab.js('sheet.view()'), 'a4', 'beforeprint는 동기');
     const report = await tab.report();
-    assert.equal(report.print_leaks, 0); assert.deepEqual(report.pages, a4.pages);
+    assert.equal(report.print_leaks, 0);
+    const placement = layout => layout.pages.map(page => page.slots.map(s => s.items));
+    assert.deepEqual(placement(report), placement(a4));
+    assert.deepEqual(report.issues, []);
     assert.equal(await width(), '69mm');
+    assert((await fieldWidths()).every((w,i) => w > before[i]), '채운 한 줄 칸은 원래 칸보다 늘어남');
+    assert(await tab.js(`${quote(inlineFields)}.every(sel => {
+      const ink = document.querySelector(sel + ' .ws-ink');
+      return ink.scrollWidth <= ink.clientWidth + 1 && ink.scrollHeight <= ink.clientHeight + 1;
+    })`), '채운 답의 실제 영역이 너비·높이를 넘지 않음');
+    assert.equal(await tab.js(`getComputedStyle(document.querySelector('${slot('q1.1')} .ws-blank-mark')).display`), 'none');
     await fullShot('a4');
     const text = await pdf(tab,'interactive-filled',a4.pages.length,true);
-    assert.match(text, /시험학생/); assert.match(text, /두 수에 똑같이 적용했어요/);
+    const flat = value => value.replace(/\s/g, '');
+    assert(flat(text).includes(flat(longAnswer))); assert(flat(text).includes(longName));
+    assert.match(text, /두 수에 똑같이 적용했어요/);
     assert.doesNotMatch(text, /다시 생각해 봐요|공약수를 찾아|0.5를 10분의 5로/);
     await tab.js(`window.dispatchEvent(new Event('afterprint'))`);
     assert.equal(await tab.js('sheet.view()'), 'solve');

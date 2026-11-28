@@ -28,13 +28,13 @@ def mm(value):
     return f'{value:.12g}'
 
 
-def editable(tag, value, cls='', attrs=''):
+def editable(tag, value, cls='', attrs='', *, table_blank_mm=None):
     if cls:
         attrs = f' class="{cls}"' + attrs
     # Blanks inside teacher answers are not student input positions.
     token = blank_hook.set(None) if set(cls.split()) & {'ws-key', 'ws-teacher-only'} else None
     try:
-        rendered = render_markup(value)
+        rendered = render_markup(value, table_blank_mm=table_blank_mm)
     finally:
         if token is not None:
             blank_hook.reset(token)
@@ -420,6 +420,7 @@ class Renderer:
         edges = ''.join(f'M{mm(px(x))} 0V{h}' for x in range(xmin, xmax + 1))
         edges += ''.join(f'M0 {mm(py(y))}H{w}' for y in range(ymin, ymax + 1))
         body = f'<path d="{edges}" fill="none" stroke="#999" stroke-width="0.1"/>'
+        pad_left = pad_top = pad_right = 0
         if coord:
             x_axis = ymin <= 0 <= ymax
             y_axis = xmin <= 0 <= xmax
@@ -437,7 +438,9 @@ class Renderer:
                         align = 'start' if x == xmin else 'end' if x == xmax else 'middle'
                         ticks.append(label(xx, oy + 3.3 if oy + 3.5 < height else oy - 1.1, str(x),
                                            f' text-anchor="{align}"'))
-                ticks.append(label(width - 2, oy - 1 if oy > 4 else oy + 3.2, 'x', ' font-style="italic"'))
+                # Reserve a label lane beyond the final tick, without changing the grid scale.
+                pad_right = 4
+                ticks.append(label(width + 1.1, max(2.8, min(height - .8, oy + .9)), 'x', ' font-style="italic"'))
             if y_axis:
                 ox = px(0)
                 axes += f'M{mm(ox)} 0V{h}'
@@ -448,9 +451,16 @@ class Renderer:
                         right = ox < 6
                         ticks.append(label(ox + 1 if right else ox - 1.1, min(height - .2, max(2.8, yy + .9)), str(y),
                                            ' text-anchor="start"' if right else ' text-anchor="end"'))
-                ticks.append(label(ox + 1 if ox + 3 < width else ox - 2.3, 3.1, 'y', ' font-style="italic"'))
+                pad_top = 4.5
+                ticks.append(label(ox, -1.0, 'y', ' text-anchor="middle" font-style="italic"'))
             if x_axis and y_axis:
-                ticks.append(label(max(.3, px(0) - 3.2), py(0) + 3.3 if py(0) + 3.5 < height else py(0) - 1.1, 'O'))
+                # At the left edge, O belongs outside the grid, opposite the y tick labels.
+                origin_x = px(0) - .9
+                pad_left = 3.7 if xmin == 0 else 0
+                ticks.append(label(origin_x, py(0) + 3.3 if py(0) + 3.5 < height else py(0) - 1.1,
+                                   'O', ' text-anchor="end"'))
+            elif y_axis and xmin == 0:
+                pad_left = 1.5  # Keep the centered y label inside the viewBox.
             body += f'<path d="{axes}" fill="none" stroke="black" stroke-width="0.3"/>' + ''.join(ticks)
             body += f'<defs><clipPath id="{clip}"><rect width="{w}" height="{h}"/></clipPath></defs>'
             for entry in block.get('draw', []):
@@ -492,10 +502,12 @@ class Renderer:
         if plot:
             body += '<g class="ws-plot"></g>'
         mapping = f' data-map="{mm(xmin)} {mm(xmax)} {mm(ymin)} {mm(ymax)} 0 0 {mm(unit)}"' if coord and live_map else ''
-        scale = min(1, fit[0] / width, fit[1] / height) if fit else 1
+        svg_width, svg_height = width + pad_left + pad_right, height + pad_top
+        scale = min(1, fit[0] / svg_width, fit[1] / svg_height) if fit else 1
         alt = '좌표평면' if coord else f'가로 {xmax}칸, 세로 {ymax}칸 모눈'
-        return (f'<figure class="ws-fig ws-grid"{slot}><svg width="{mm(width * scale)}mm" height="{mm(height * scale)}mm" '
-                f'viewBox="0 0 {w} {h}"{mapping} role="img" aria-label="{alt}">{body}</svg></figure>')
+        return (f'<figure class="ws-fig ws-grid"{slot}><svg width="{mm(svg_width * scale)}mm" height="{mm(svg_height * scale)}mm" '
+                f'viewBox="{mm(-pad_left)} {mm(-pad_top)} {mm(svg_width)} {mm(svg_height)}"{mapping} '
+                f'role="img" aria-label="{alt}">{body}</svg></figure>')
 
     @staticmethod
     def private_markup(value):
@@ -525,14 +537,13 @@ class Renderer:
         left, right = block['left'], block['right']
         order = self.shuffle_indices(len(right), item_id, 'match')
         answer = {f'l{i+1}': f'r{order.index(i)+1}' for i in range(len(left))}
-        answer_html = '<ol>' + ''.join(f'<li>{self.private_markup(a)} – {self.private_markup(b)}</li>'
-                                       for a, b in zip(left, right)) + '</ol>'
+        pairs = ''.join(f'<li>{self.private_markup(a)} ↔ {self.private_markup(b)}</li>' for a, b in zip(left, right))
+        answer_html = f'<ol>{pairs}</ol>'
         slot = self.slot('match', answer, answer_html=answer_html)
         prompt = editable('p', block['prompt'], 'ws-match-prompt') if 'prompt' in block else ''
         lhs = ''.join(f'<li data-token="l{i+1}">{editable("span", text)}</li>' for i, text in enumerate(left))
         rhs = ''.join(f'<li data-token="r{i+1}">{editable("span", right[j])}</li>' for i, j in enumerate(order))
-        key = '<ol class="ws-key ws-match-key">' + ''.join(f'<li>{self.private_markup(a)} – {self.private_markup(b)}</li>'
-                                                            for a, b in zip(left, right)) + '</ol>'
+        key = f'<ol class="ws-key ws-match-key">{pairs}</ol>'
         return (f'<div class="ws-match"{slot}>{prompt}<div class="ws-match-cols"><ol class="ws-match-l">{lhs}</ol>'
                 f'<div class="ws-match-gap"></div><ol class="ws-match-r">{rhs}</ol></div>{key}</div>')
 
@@ -688,7 +699,7 @@ class Renderer:
         group = 'class="ws-plot"' if live else f'clip-path="url(#ws-grid-clip-{self.grid_index})"'
         graph = f'<g {group}><path d="{"".join(path)}" fill="none" stroke="currentColor" stroke-width="0.4"/></g>'
         figure = figure.replace('</svg>', graph + '</svg>')
-        return figure if live else figure.replace('</figure>', f'<figcaption>{escape(caption)}</figcaption></figure>')
+        return figure if live else figure.replace('</figure>', f'<figcaption>{render_markup(caption)}</figcaption></figure>')
 
     @staticmethod
     def explore_table(xs, tree, rows, *, live):
@@ -698,10 +709,10 @@ class Renderer:
         def cell(value, attr=''):
             return f'<td{attr}>{escape(value.replace("-", "−"))}</td>'
 
-        header = '<th>x</th>' + ''.join(cell(mm(x), f' data-x="{mm(x)}"' if live else '') for x in xs)
+        header = '<th><math><mi>x</mi></math></th>' + ''.join(cell(mm(x), f' data-x="{mm(x)}"' if live else '') for x in xs)
         body = []
         for label, params in rows:
-            cells = [f'<th>{escape(label)}</th>']
+            cells = [f'<th>{render_markup(label)}</th>']
             for x in xs:
                 try:
                     value = mm(function_value(tree, x, params) or 0)
@@ -717,15 +728,15 @@ class Renderer:
         tree = function_tree(block['fn'], params)
         xs = block.get('table', [])
         figure = self.explore_figure(block, tree, params)
-        values = self.explore_table(xs, tree, [('y', params)], live=True)
+        values = self.explore_table(xs, tree, [('$y$', params)], live=True)
         if block.get('print'):
             snapshots, rows = [], []
             fit = (min(44, (self.content_mm - 1.5) / 2), 45)
             for overrides in block['print']:
                 scope = {**params, **overrides}
-                label = ', '.join(f'{name}={mm(value)}' for name, value in scope.items()).replace('-', '−')
+                label = ', '.join(f'${name}={mm(value)}$' for name, value in scope.items())
                 snapshots.append(self.explore_figure(block, tree, scope, label, fit))
-                rows.append((f'y ({label})', scope))
+                rows.append((f'$y$ ({label})', scope))
             content = (f'<div class="ws-solve-only">{figure}{values}</div><div class="ws-print-only">'
                        f'<div class="ws-explore-snapshots">{"".join(snapshots)}</div>'
                        f'{self.explore_table(xs, tree, rows, live=False)}</div>')
@@ -810,11 +821,13 @@ class Renderer:
             widths = block.get('widths_mm', [self.content_mm / len(header)] * len(header))
             if self.columns == 1 and self.content_mm != 188 and sum(widths) > self.content_mm:
                 widths = [width * self.content_mm / sum(widths) for width in widths]
-            head = '<thead>' + tr(''.join(editable('th', text) for text in header)) + '</thead>'
+            widest = max((blank.width_mm for row in (header, *block['rows']) for text in row
+                          for blank in inspect_markup(text).blanks if blank.width_mm is not None), default=None)
+            head = '<thead>' + tr(''.join(editable('th', text, table_blank_mm=widest) for text in header)) + '</thead>'
             # 칸 전체가 빈칸 하나뿐이면 칸 자체가 답 자리이므로 밑줄을 겹쳐 긋지 않는다(ws-fill).
             def cell(text):
-                whole = re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', str(text)) is not None
-                return editable('td', text, 'ws-fill' if whole else '')
+                whole = re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', text) is not None
+                return editable('td', text, 'ws-fill' if whole else '', table_blank_mm=widest)
             body = ''.join(tr(''.join(cell(text) for text in row)) for row in block['rows'])
             return table('ws-data', widths, body, head)
         if kind == 'figure':
@@ -952,6 +965,7 @@ def font_chars(data):
     chars.update(chr(i) for i in range(0x2460, 0x2474))
     chars.update(MARKS + '□○△·…°′″−√⌒⏜̅‘’“”–—₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹')
     chars.update(SYMBOLS.values())
+    chars.add('↔')
     # Includes generated interface and header labels, even on a tiny manuscript.
     chars.update('수행평가영역단원학년도학기점수학생확인교사용메모예시답안채점요소다른타당한답예상오개념이름학번짝활동좌표평면모눈'
                  '확인 정답 보기 풀이 보기 힌트 맞음 다시 생각해 봐요 답을 넣어 저장 내 답 지우기 학생 화면 미리보기 교사 화면으로 '

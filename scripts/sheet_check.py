@@ -446,7 +446,11 @@ _FILL_LINES = ("검사 서술 첫째 줄", "검사 서술 둘째 줄")
 _RESTORED_JS = """(async()=>{
   await sheet.view('a4');
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  return Object.assign({}, sheet.report(), {values: sheet.values()});
+  const clipped = [...document.querySelectorAll('#sheet-pages .ws-ink, #sheet-pages .ws-name-slot.ws-filled')]
+    .filter(el => el.getClientRects().length &&
+      (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1))
+    .map(el => el.closest('[data-slot]')?.dataset.slot).filter(Boolean);
+  return { ...sheet.report(), values: sheet.values(), clipped: [...new Set(clipped)].sort() };
 })()"""
 # 문항별 학생에게 보이는 글(정답·교사 전용·화면 단추 제외, 힌트 포함)
 _ITEM_TEXT_JS = """(() => [...document.querySelectorAll('.ws-item[data-id]')].map(item => {
@@ -598,6 +602,13 @@ def _interactive_check(protocol, out, table, problems):
                 _problem(problems, "error", "print-leak", None, None,
                          f"학생용 채움 인쇄에 화면 전용 요소 {leaks}개가 보입니다.",
                          "A4 보기의 화면 전용 요소를 숨기세요.")
+            clipped = info["filled_print_clipped"] = filled.get("clipped")
+            if not isinstance(clipped, list) or any(not isinstance(slot, str) for slot in clipped):
+                raise CheckError("채움 인쇄의 답 잘림을 확인할 수 없습니다.")
+            if clipped:
+                _problem(problems, "error", "filled-print-clipped", None, None,
+                         "A4 보기에서 채운 답이 잘리는 자리: " + ", ".join(clipped),
+                         "빈칸·이름 칸의 너비와 서술 칸의 높이를 확인하세요.")
             filled_pdf = base64.b64decode(protocol.call("Page.printToPDF", {
                 "preferCSSPageSize": True, "printBackground": True, "displayHeaderFooter": False
             })["data"], validate=True)

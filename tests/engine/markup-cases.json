@@ -1,14 +1,14 @@
 [
   {"src":"$\\frac{1}{2}+\\sqrt{9}=x^2$","html":"<math><mfrac><mn>1</mn><mn>2</mn></mfrac><mo>+</mo><msqrt><mn>9</mn></msqrt><mo>=</mo><msup><mi>x</mi><mn>2</mn></msup></math>"},
   {"src":"$-3<x\\le 4$","html":"<math><mo form=\"prefix\" lspace=\"0em\" rspace=\"0em\">−</mo><mn>3</mn><mo>&lt;</mo><mi>x</mi><mo>≤</mo><mn>4</mn></math>"},
-  {"src":"$\\overline{AB}$와 $\\angle ABC$","html":"<math><mrow class=\"seg\"><mrow><mi mathvariant=\"normal\">A</mi><mi mathvariant=\"normal\">B</mi></mrow></mrow></math>와 <math><mo>∠</mo><mi mathvariant=\"normal\">A</mi><mi mathvariant=\"normal\">B</mi><mi mathvariant=\"normal\">C</mi></math>"},
+  {"src":"$\\overline{AB}$와 $\\angle ABC$","html":"<span class=\"ws-math-word\"><span><math><mrow class=\"seg\"><mrow><mi mathvariant=\"normal\">A</mi><mi mathvariant=\"normal\">B</mi></mrow></mrow></math>와</span></span> <math><mo>∠</mo><mi mathvariant=\"normal\">A</mi><mi mathvariant=\"normal\">B</mi><mi mathvariant=\"normal\">C</mi></math>"},
   {"src":"$a_1^{2}+\\sqrt[3]{8}+90\\circ$","html":"<math><msubsup><mi>a</mi><mn>1</mn><mn>2</mn></msubsup><mo>+</mo><mroot><mn>8</mn><mn>3</mn></mroot><mo>+</mo><mn>90°</mn></math>"},
   {"src":"{{㉠}}","html":"<span class=\"ws-blank\" data-mark=\"㉠\"><span class=\"ws-blank-mark\">㉠</span></span>"},
-  {"src":"{{㉠|꼬인 위치}}","html":"<span class=\"ws-blank\" data-mark=\"㉠\"><span class=\"ws-blank-mark\">㉠</span><span class=\"ws-key\">꼬인 위치</span></span>"},
-  {"src":"{{|3}}","html":"<span class=\"ws-blank\" style=\"min-width:18mm\"><span class=\"ws-key\">3</span></span>"},
-  {"src":"{{|3|30}}","html":"<span class=\"ws-blank\" style=\"min-width:30mm\"><span class=\"ws-key\">3</span></span>"},
-  {"src":"**굵게 $x$**와 *고도 : 높이*","html":"<strong>굵게 <math><mi>x</mi></math></strong>와 *고도 : 높이*"},
+  {"src":"{{㉠|꼬인 위치}}","html":"<span class=\"ws-blank\" data-mark=\"㉠\" style=\"--ws-blank-min:22.5mm\"><span class=\"ws-blank-mark\">㉠</span><span class=\"ws-key\">꼬인 위치</span></span>"},
+  {"src":"{{|3}}","html":"<span class=\"ws-blank\" style=\"--ws-blank-min:18mm\"><span class=\"ws-key\">3</span></span>"},
+  {"src":"{{|3|30}}","html":"<span class=\"ws-blank\" style=\"--ws-blank-min:30mm\"><span class=\"ws-key\">3</span></span>"},
+  {"src":"**굵게 $x$**와 *고도 : 높이*","html":"<strong>굵게 </strong><span class=\"ws-math-word\"><span><strong><math><mi>x</mi></math></strong>와</span></span> *고도 : 높이*"},
   {"src":"\\$ \\{ \\\\ [[그대로]] {식} & <제목>","html":"$ { \\ [[그대로]] {식} &amp; &lt;제목&gt;"},
-  {"src":"{{|**값** $|x|$|30}}","html":"<span class=\"ws-blank\" style=\"min-width:30mm\"><span class=\"ws-key\"><strong>값</strong> <math><mrow><mo>|</mo><mi>x</mi><mo>|</mo></mrow></math></span></span>"},
-  {"src":"평면 $\\mathit{A}$와 점 $A$","html":"평면 <math><mi>A</mi></math>와 점 <math><mi mathvariant=\"normal\">A</mi></math>"}
+  {"src":"{{|**값** $|x|$|30}}","html":"<span class=\"ws-blank\" style=\"--ws-blank-min:30mm\"><span class=\"ws-key\"><strong>값</strong> <math><mrow><mo>|</mo><mi>x</mi><mo>|</mo></mrow></math></span></span>"},
+  {"src":"평면 $\\mathit{A}$와 점 $A$","html":"평면 <span class=\"ws-math-word\"><span><math><mi>A</mi></math>와</span></span> 점 <math><mi mathvariant=\"normal\">A</mi></math>"}
 ]

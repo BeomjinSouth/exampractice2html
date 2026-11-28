@@ -219,6 +219,7 @@ class Blank:
     answer: str
     alternatives: tuple = ()
     source: str = ''
+    width_mm: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,45 @@ class Markup:
     blanks: tuple
 
 
-def inspect_markup(source, *, interactive=False):
+def join_inline_parts(parts):
+    """Keep math and its directly attached text together, but never bind an input slot."""
+    rendered, word = [], []
+    bold = False
+
+    def set_bold(active):
+        nonlocal bold
+        if active != bold:
+            rendered.append('<strong>' if active else '</strong>')
+            bold = active
+
+    def emit(part):
+        set_bold(part[3])
+        rendered.append(part[0])
+
+    def flush():
+        grouped = len(word) > 1 and any(part[2] == 'math' for part in word)
+        if grouped:
+            set_bold(False)
+            rendered.append('<span class="ws-math-word"><span>')
+        for part in word:
+            emit(part)
+        if grouped:
+            set_bold(False)
+            rendered.append('</span></span>')
+        word.clear()
+
+    for part in parts:
+        if part[2] == 'boundary':
+            flush()
+            emit(part)
+        else:
+            word.append(part)
+    flush()
+    set_bold(False)
+    return ''.join(rendered), ''.join(part[1] for part in parts)
+
+
+def inspect_markup(source, *, interactive=False, table_blank_mm=None):
     """Parse once; return rendered markup and the facts plan needs to check."""
     if NEWLINE.search(source):
         raise MarkupError('한 필드에는 줄을 바꾸지 마세요.')
@@ -243,7 +282,7 @@ def inspect_markup(source, *, interactive=False):
     def fail(token, start):
         raise MarkupError(f'{start + 1}번째 글자: 닫는 {token}가 없습니다.')
 
-    def sequence(stops=(), in_blank=False):
+    def sequence(stops=(), in_blank=False, bold=False):
         nonlocal pos
         parts = []
         while pos < len(source) and not any(map(at, stops)):
@@ -254,23 +293,22 @@ def inspect_markup(source, *, interactive=False):
             if c == '\\' and next_char in ('$', '\\', '{'):
                 pos += 1
                 outside_math.append(next_char)
-                parts.append((html.escape(next_char), next_char))
+                parts.append((html.escape(next_char), next_char, 'text', bold))
             elif c == '$':
                 begin = pos
                 while pos < len(source) and not at('$'):
                     pos += 2 if at('\\$') or at('\\\\') else 1
                 if not at('$'):
                     fail('$', start)
-                parts.append(MathParser(source[begin:pos]).parse())
+                parts.append((*MathParser(source[begin:pos]).parse(), 'math', bold))
                 pos += 1
                 outside_math.append(' ')
             elif c == '*' and at('*'):
                 pos += 1
-                rendered, plain = sequence(('**', *stops), in_blank)
+                parts.extend(sequence(('**', *stops), in_blank, bold=True))
                 if not at('**'):
                     fail('**', start)
                 pos += 2
-                parts.append((f'<strong>{rendered}</strong>', plain))
             elif c == '{' and at('{') and not in_blank:
                 pos += 1
                 begin = pos
@@ -278,15 +316,20 @@ def inspect_markup(source, *, interactive=False):
                     pos += 1
                 mark = source[begin:pos].strip()
                 rendered = plain = ''
-                answers = []
-                width: Optional[str] = None
+                answers, lengths = [], []
+                width = None
                 if at('|'):
                     pos += 1
-                    answer_start = pos
-                    rendered, plain = sequence(('|', '}}'), True)
-                    answers = source[answer_start:pos].split(';;')
-                    rendered = rendered.split(';;', 1)[0]
-                    plain = plain.split(';;', 1)[0]
+                    while True:
+                        answer_start = pos
+                        answer_html, answer_text = join_inline_parts(sequence(('|', '}}', ';;'), True))
+                        answers.append(source[answer_start:pos])
+                        lengths.append(len(answer_text.strip()))
+                        if len(answers) == 1:
+                            rendered, plain = answer_html, answer_text
+                        if not at(';;'):
+                            break
+                        pos += 2
                     if at('|'):
                         pos += 1
                         end = source.find('}}', pos)
@@ -296,7 +339,7 @@ def inspect_markup(source, *, interactive=False):
                         number = float(raw) if DECIMAL.fullmatch(raw) else 0
                         if not (number > 0 and math.isfinite(number)):
                             raise MarkupError('빈칸 너비를 양수(mm)로 쓰세요.')
-                        width = js_number(number)
+                        width = number
                         pos = end
                 if not at('}}'):
                     fail('}}', start)
@@ -305,23 +348,25 @@ def inspect_markup(source, *, interactive=False):
                 pos += 2
                 if answers and any(not answer.strip() for answer in answers):
                     raise MarkupError('빈칸의 대안 정답을 비워 둘 수 없습니다.')
-                blanks.append(Blank(mark, plain.strip(), tuple(answers[1:]), answers[0] if answers else ''))
-                if width is None and not mark:
-                    width = js_number(max(18, len(plain.strip()) * 4.5))
+                if width is None and lengths:
+                    # A marked blank can be two handwriting cells wide; unmarked lines keep the 18 mm minimum.
+                    width = max(9 if mark else 18, max(lengths) * 4.5)
+                blanks.append(Blank(mark, plain.strip(), tuple(answers[1:]), answers[0] if answers else '', width))
+                width = table_blank_mm if table_blank_mm is not None else width
                 mark_attr = f' data-mark="{html.escape(mark)}"' if mark else ''
-                style = '' if width is None else f' style="min-width:{width}mm"'
+                style = '' if width is None else f' style="--ws-blank-min:{js_number(width)}mm"'
                 mark_node = f'<span class="ws-blank-mark">{html.escape(mark)}</span>' if mark else ''
                 key = f'<span class="ws-key">{rendered}</span>' if plain.strip() else ''
                 hook = blank_hook.get() if interactive else None
                 slot = hook(answers, rendered) if hook and answers else ''
-                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', plain or mark))
+                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', plain or mark, 'boundary', bold))
             else:
                 outside_math.append(c)
-                parts.append((html.escape(c), c))
-        return join_parts(parts)
+                parts.append((html.escape(c), c, 'boundary' if c.isspace() else 'text', bold))
+        return parts
 
     try:
-        rendered, plain = sequence()
+        rendered, plain = join_inline_parts(sequence())
     except RecursionError as error:
         raise MarkupError('수식이나 강조의 중첩을 줄이세요.') from error
     return Markup(rendered, plain, ''.join(outside_math), tuple(blanks))
@@ -337,5 +382,5 @@ def js_number(value):
     return re.sub(r'e([+-])0+(\d)', r'e\1\2', raw)
 
 
-def render_markup(source):
-    return inspect_markup(source, interactive=True).html
+def render_markup(source, *, table_blank_mm=None):
+    return inspect_markup(source, interactive=True, table_blank_mm=table_blank_mm).html

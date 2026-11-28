@@ -173,8 +173,9 @@ class SourceAuditTest(unittest.TestCase):
 
 
 class FakeInteractiveProtocol:
-    def __init__(self, reveal='시도 후', overflow=0, leaks=0, items=(), lose=None):
+    def __init__(self, reveal='시도 후', overflow=0, leaks=0, items=(), lose=None, clipped=()):
         self.reveal, self.overflow, self.leaks = reveal, overflow, leaks
+        self.clipped = list(clipped)
         self.items, self.lose = list(items), lose
         self.values = {'q1.1': '정답', 'q2.1': '검사 서술 첫째 줄\n검사 서술 둘째 줄',
                        'q2.2': {'strokes': [[[0.15, 0.25], [0.5, 0.75], [0.85, 0.35]]]}, 'head.이름': '검사'}
@@ -207,7 +208,8 @@ class FakeInteractiveProtocol:
             return {'kinds': {'open_box': 1, 'open_blank': 0, 'draw': 1, 'name': 1}, 'values': dict(self.values)}
         if 'values: sheet.values()' in expression:
             values = {k: v for k, v in self.values.items() if k != self.lose}
-            return {'view': 'a4', 'print_leaks': self.leaks, 'values': values}
+            return {'view': 'a4', 'print_leaks': self.leaks, 'values': values,
+                    'clipped': self.clipped if 'scrollWidth' in expression and 'scrollHeight' in expression else None}
         if "sheet.view('solve')" in expression:
             return {'view': 'solve', 'overflow_x': self.overflow}
         return None
@@ -292,6 +294,17 @@ class CheckBoundaryTest(unittest.TestCase):
         self.assertFalse(info['filled_restored'])
         lost = [p for p in problems if p['code'] == 'filled-restore-failed']
         self.assertTrue(lost and 'q2.2' in lost[0]['msg'])
+
+    def test_filled_print_reports_clipped_blank_and_name(self):
+        out = TRIALS / ('clipped-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
+        protocol = FakeInteractiveProtocol(clipped=['head.이름', 'q1.1'])
+        problems = []
+        info, _, _ = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertEqual(info['filled_print_clipped'], ['head.이름', 'q1.1'])
+        self.assertEqual([(i['level'], i['code']) for i in problems], [('error', 'filled-print-clipped')])
+        self.assertIn('head.이름, q1.1', problems[0]['msg'])
 
     def test_later_item_showing_an_earlier_equation_warns(self):
         table = {'slots': [{'slot': 'q3.1', 'kind': 'text', 'right': 'y=2x'},

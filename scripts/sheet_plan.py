@@ -743,7 +743,9 @@ class Validator:
                 else:
                     self.error(where + '.name', '매개변수 이름이 맞지 않습니다.', 'x를 제외한 서로 다른 영문 소문자 한 글자를 쓰세요.')
                 if 'label' in param:
-                    self.text(param['label'], where + '.label')
+                    parsed = self.text(param['label'], where + '.label', private=True)
+                    if parsed and parsed.blanks:
+                        self.error(where + '.label', '슬라이더 이름에는 빈칸을 넣을 수 없습니다.', '$a$의 값처럼 글과 수식으로 쓰세요.')
                 low, high, step, value = (param.get(k) for k in ('min', 'max', 'step', 'value'))
                 bounded = is_number(low) and is_number(high) and low < high
                 if not (bounded and is_number(step) and step > 0 and is_number(value) and low <= value <= high):

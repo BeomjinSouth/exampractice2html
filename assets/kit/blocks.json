@@ -126,7 +126,7 @@
   "explore": {
     "description": "매개변수 슬라이더로 함수 탐구", "fields": {"prompt": "안내", "fn": "x와 매개변수 식", "params": "name·label·min·max·step·value 객체 1~3개, 건너뛸 값은 except 배열(예: 정비례의 a는 [0])", "x": "x 정수 범위", "y": "y 정수 범위", "unit_mm": "한 칸 크기", "table": "표의 x값 배열", "print": "인쇄에 그릴 매개변수 값 묶음 배열(최대 4개, 예: [{\"a\": 2}, {\"a\": -2}])"},
     "required": ["fn", "params", "x", "y", "unit_mm"], "limits": {"prompt": 160},
-    "example": {"type": "explore", "fn": "a*x", "params": [{"name": "a", "label": "a의 값", "min": -2, "max": 2, "step": 1, "value": 1, "except": [0]}], "x": [-3, 3], "y": [-3, 3], "unit_mm": 6, "table": [-1, 0, 1], "print": [{"a": 1}, {"a": -1}]}
+    "example": {"type": "explore", "fn": "a*x", "params": [{"name": "a", "label": "$a$의 값", "min": -2, "max": 2, "step": 1, "value": 1, "except": [0]}], "x": [-3, 3], "y": [-3, 3], "unit_mm": 6, "table": [-1, 0, 1], "print": [{"a": 1}, {"a": -1}]}
   },
   "video": {
     "description": "YouTube 영상 또는 20MB 이하 로컬 mp4", "fields": {"url": "YouTube 주소", "src": "로컬 mp4 경로", "title": "영상 제목", "start": "시작 초", "caption": "설명"},

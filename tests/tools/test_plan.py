@@ -129,8 +129,10 @@ class PlanTest(unittest.TestCase):
                  'params': [{'name': 'a', 'min': -2, 'max': 2, 'step': .5, 'value': 1, 'except': [0]},
                             {'name': 'b', 'min': -1, 'max': 1, 'step': 1, 'value': 0}],
                  'print': [{'a': 2}, {'a': -2, 'b': 1}]}
+        block['params'][0]['label'] = '$a$의 값'
         self.assertEqual(self.errors(document(block)), set())
-        for updates, field in [({'value': 0}, 'value'), ({'except': [3]}, 'except[0]'),
+        for updates, field in [({'label': '$a^{$의 값'}, 'label'), ({'label': '{{|값}}'}, 'label'),
+                               ({'value': 0}, 'value'), ({'except': [3]}, 'except[0]'),
                                ({'except': [False]}, 'except[0]'), ({'except': 0}, 'except')]:
             with self.subTest(updates=updates):
                 invalid = deepcopy(block)

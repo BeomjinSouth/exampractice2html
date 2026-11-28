@@ -331,8 +331,8 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 .ws-flow-arrow::after { content: '⟶'; font-size: 13pt; }
 .ws-explore figure, .ws-explore .ws-data { margin-block: 0 1.5mm; }
 .ws-explore-note { font-size: 9pt; }
-.ws-explore-snapshots { display: grid; gap: 1.5mm; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.ws-explore-snapshots > :only-child { grid-column: 1 / -1; }
+.ws-explore-snapshots { display: grid; gap: 1.5mm; grid-template-columns: repeat(var(--ws-snapshot-cols, 2), minmax(0, 1fr)); }
+.ws-explore-snapshots > figure { min-width: 0; margin-inline: 0; }
 .ws-explore-snapshots svg { height: auto; }
 .ws-explore .ws-explore-print-table :is(th, td) { overflow-wrap: anywhere; }
 .ws-video { box-sizing: border-box; text-align: center; padding: 1.5mm 2.5mm; border: var(--ws-rule); }

@@ -99,8 +99,10 @@ def figure_svg(source):
         if text.tag.rsplit('}', 1)[-1] != 'text':
             continue
         label = ''.join(text.itertext()).strip()
-        italic = re.fullmatch(r'[A-Za-z](?:[′₀-₉]*)', label)
-        upright = re.fullmatch(r'[-−+]?\d+(?:[.,]\d+)?(?:\s*[\w°%²³]+)?', label) or label in ('°', '%')
+        italic = re.fullmatch(r'[a-z][′₀-₉]*', label)
+        upright = (re.fullmatch(r'[A-Z][′₀-₉]*', label)
+                   or re.fullmatch(r'[-−+]?\d+(?:[.,]\d+)?(?:\s*[\w°%²³]+)?', label)
+                   or label in ('°', '%'))
         if not (italic or upright):
             upright = label in ('cm', 'mm', 'km', 'kg', 'ml', 'cm²', 'cm³', 'm²', 'm³')
         if not (italic or upright):
@@ -121,7 +123,12 @@ def figure_svg(source):
                     continue
                 break
         changed = True
-    return ET.tostring(root, encoding='unicode', default_namespace=None) if changed else source
+    if not changed:
+        return source
+    # Keep the SVG default namespace and xlink references when ElementTree serializes.
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    ET.register_namespace('xlink', 'http://www.w3.org/1999/xlink')
+    return ET.tostring(root, encoding='unicode')
 
 
 def data_image(mime, data):
@@ -311,7 +318,8 @@ class Renderer:
             ext = file.suffix.lower()
             if ext == '.svg':
                 mime = 'image/svg+xml'
-                data = checked_svg(file.read_text(encoding='utf-8-sig')).encode('utf-8')
+                svg = figure_svg if math_labels else checked_svg
+                data = svg(file.read_text(encoding='utf-8-sig')).encode('utf-8')
             else:
                 mime = RASTER_MIMES[ext]
                 data, mime = self.raster(file, width, mime)
@@ -352,7 +360,7 @@ class Renderer:
     def two_pictures(self, block):
         width = self.content_mm / 2
         figures = block['items']
-        images = ''.join(f'<td>{self.wrap_private(figure, self.image(figure, width - 3.6))}</td>' for figure in figures)
+        images = ''.join(f'<td>{self.wrap_private(figure, self.image(figure, width - 3.6, math_labels=True))}</td>' for figure in figures)
         caps = ''.join(f'<td class="ws-cap">{self.wrap_private(figure, private_editable("span", figure["caption"]))}</td>'
                        if figure.get('teacher_only') else editable('td', figure['caption'], 'ws-cap') for figure in figures)
         cls = 'ws-figs' + (' ' + TEACHER_ONLY if all(figure.get('teacher_only') for figure in figures) else '')
@@ -374,7 +382,7 @@ class Renderer:
         pic_mm = round(self.content_mm * min(.36, max(.31, (fig['width_mm'] + 3.6) / self.content_mm)), 1)
         make_caption = private_editable if fig.get('teacher_only') else editable
         caption = make_caption('p', fig['caption'], 'ws-cap') if 'caption' in fig else ''
-        picture = self.wrap_private(fig, self.image(fig, pic_mm - 3.6) + caption)
+        picture = self.wrap_private(fig, self.image(fig, pic_mm - 3.6, math_labels=True) + caption)
         return table('ws-box ws-sit ws-sit--fig', (self.content_mm - pic_mm, pic_mm),
                      tr(text_cell + f'<td class="ws-sit-fig">{picture}</td>'))
 
@@ -549,6 +557,10 @@ class Renderer:
         mapping = f' data-map="{mm(xmin)} {mm(xmax)} {mm(ymin)} {mm(ymax)} 0 0 {mm(unit)}"' if coord and live_map else ''
         svg_width, svg_height = width + pad_left + pad_right, height + pad_top
         scale = min(1, fit[0] / svg_width, fit[1] / svg_height) if fit else 1
+        if fit and coord:
+            # The viewBox shrinks the geometry, not the physical size of axis labels.
+            font_size = max(2.8, (6.2 * 25.4 / 72) / scale)
+            body = body.replace('font-size="2.8"', f'font-size="{mm(font_size)}"')
         alt = '좌표평면' if coord else f'가로 {xmax}칸, 세로 {ymax}칸 모눈'
         return (f'<figure class="ws-fig ws-grid"{slot}><svg width="{mm(svg_width * scale)}mm" height="{mm(svg_height * scale)}mm" '
                 f'viewBox="{mm(-pad_left)} {mm(-pad_top)} {mm(svg_width)} {mm(svg_height)}"{mapping} '
@@ -652,7 +664,11 @@ class Renderer:
             plot_values = block.get('plot', {}).get('answer', [])
             y0 = min([0, *values, *plot_values])
             y1 = block.get('y_max', max([1, *values, *plot_values]))
-            if y0 >= y1:
+            if kind in ('histogram', 'polygon'):
+                y0 = 0
+                if y1 <= 0:
+                    y1 = max([1, *values, *plot_values])
+            elif y0 >= y1:
                 y0 = y1 - 1
             bins = block.get('bins', [])
             if kind == 'polygon':
@@ -792,14 +808,24 @@ class Renderer:
         values = self.explore_table(xs, tree, [('$y$', params)], live=True)
         if block.get('print'):
             snapshots, rows = [], []
-            fit = (min(44, (self.content_mm - 1.5) / 2), 45)
+            count = len(block['print'])
+            graph_width = (block['x'][1] - block['x'][0]) * block['unit_mm'] + 4
+            graph_height = (block['y'][1] - block['y'][0]) * block['unit_mm'] + 4.5
+            # Use as many columns as can retain a usable graph, including narrow split columns.
+            columns = 1
+            for candidate in range(2, min(count, 4) + 1):
+                available = (self.content_mm - (candidate - 1) * 1.5) / candidate
+                scale = min(1, available / graph_width, 70 / graph_height)
+                if graph_width * scale >= 28 and graph_height * scale >= 30:
+                    columns = candidate
+            fit = ((self.content_mm - (columns - 1) * 1.5) / columns, 70)
             for overrides in block['print']:
                 scope = {**params, **overrides}
                 label = ', '.join(f'${name}={mm(value)}$' for name, value in scope.items())
                 snapshots.append(self.explore_figure(block, tree, scope, label, fit))
                 rows.append((f'$y$ ({label})', scope))
             content = (f'<div class="ws-solve-only">{figure}{values}</div><div class="ws-print-only">'
-                       f'<div class="ws-explore-snapshots">{"".join(snapshots)}</div>'
+                       f'<div class="ws-explore-snapshots" style="--ws-snapshot-cols:{columns}">{"".join(snapshots)}</div>'
                        f'{self.explore_table(xs, tree, rows, live=False)}</div>')
         else:
             note = '<p class="ws-print-only ws-explore-note">화면에서는 값을 바꾸며 살펴볼 수 있습니다.</p>'

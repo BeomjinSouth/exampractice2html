@@ -11,5 +11,9 @@
   {"src":"\\$ \\{ \\\\ [[그대로]] {식} & <제목>","html":"$ { \\ [[그대로]] {식} &amp; &lt;제목&gt;"},
   {"src":"{{|**값** $|x|$|30}}","html":"<span class=\"ws-blank\" style=\"--ws-blank-min:30mm\"><span class=\"ws-key\"><strong>값</strong> <math><mrow><mo>|</mo><mi>x</mi><mo>|</mo></mrow></math></span></span>"},
   {"src":"평면 $\\mathit{A}$와 점 $A$","html":"평면 <span class=\"ws-math-word\"><span><math><mi>A</mi></math>와</span></span> 점 <math><mi mathvariant=\"normal\">A</mi></math>"},
-  {"src":"$\\begin{cases}x+y&=3 \\\\ x-y&=1\\end{cases}$","html":"<math><mrow><mo stretchy=\"true\">{</mo><mtable columnalign=\"left\"><mtr><mtd><mi>x</mi><mo>+</mo><mi>y</mi><mo>=</mo><mn>3</mn></mtd></mtr><mtr><mtd><mi>x</mi><mo>−</mo><mi>y</mi><mo>=</mo><mn>1</mn></mtd></mtr></mtable></mrow></math>"}
+  {"src":"$\\begin{cases}x+y&=3 \\\\ x-y&=1\\end{cases}$","html":"<math><mrow><mo stretchy=\"true\">{</mo><mtable columnalign=\"left\"><mtr><mtd><mi>x</mi><mo>+</mo><mi>y</mi><mo>=</mo><mn>3</mn></mtd></mtr><mtr><mtd><mi>x</mi><mo>−</mo><mi>y</mi><mo>=</mo><mn>1</mn></mtd></mtr></mtable></mrow></math>"},
+  {"src":"$6{,}000$원","html":"<span class=\"ws-math-word\"><span><math><mn>6,000</mn></math>원</span></span>"},
+  {"src":"$1{,}234{,}567.89$","html":"<math><mn>1,234,567.89</mn></math>"},
+  {"src":"$(1,000)$","html":"<math><mrow><mo stretchy=\"false\">(</mo><mrow><mn>1</mn><mo>,</mo><mn>000</mn></mrow><mo stretchy=\"false\">)</mo></mrow></math>"},
+  {"src":"$a{,}b$","html":"<math><mi>a</mi><mo>,</mo><mi>b</mi></math>"}
 ]

@@ -55,16 +55,17 @@
   }
   const num = s => number_parts(s)?.[0] ?? null;
   function inferred_unit(tail, column = '', row = '') {
-    // '5 cm'처럼 띄어 쓴 단위도 읽고, '1일 때'·'1일 경우'의 '일'은 날짜가 아니라 '이다'로 본다.
-    const text = tail.normalize('NFKC').toLowerCase().replace(/^[ \t]+/, '');
-    const particles = '(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?';
-    for (const unit of [...units].sort((a, b) => b.length - a.length)) {
-      if (unit === '도' || (unit === '일' && /^일\s*(?:때|경우)/u.test(text))) continue;
-      if (new RegExp(`^${unit}${particles}(?![\\p{L}\\p{N}_])`, 'u').test(text)) return unit;
-    }
+    // 표의 명시 단위가 문장 뒤의 모호한 단위보다 우선한다.
     for (const heading of [column, row]) {
       const unit = norm(/\(([^()]*)\)\s*$/.exec(heading.normalize('NFKC'))?.[1] ?? '');
       if (units.includes(unit)) return unit === '도' ? '°' : unit;
+    }
+    const text = tail.normalize('NFKC').toLowerCase().replace(/^[ \t]+/, '');
+    const particles = '(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?';
+    for (const unit of [...units].sort((a, b) => b.length - a.length)) {
+      if (unit === '도' || (unit === '일' && /^일\s*(?:때|경우|수(?:\s|$)|지|까|것(?:\s|$))/u.test(text)) ||
+          (unit === '분' && /^분\s*의/u.test(text)) || (unit === '점' && /^점\s*에서\s*(?:만나|만난|만날|만났)/u.test(text))) continue;
+      if (new RegExp(`^${unit}${particles}(?![\\p{L}\\p{N}_])`, 'u').test(text)) return unit;
     }
     return '';
   }

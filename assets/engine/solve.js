@@ -530,7 +530,13 @@
     const { el, kind } = row, multiline = el.matches('.ws-ans');
     const input = runtime(make(multiline ? 'textarea' : 'input', 'ws-in'));
     const ink = runtime(make('span', 'ws-ink ws-print-only'));
+    const fillTable = el.matches('.ws-blank') && el.parentElement?.matches('td.ws-fill') && el.closest('table.ws-data');
+    const sizer = fillTable ? runtime(make('span', 'ws-input-sizer')) : null;
     ink.setAttribute('aria-hidden', 'true');
+    if (sizer) {
+      sizer.setAttribute('aria-hidden', 'true');
+      toggle(fillTable, 'ws-input-table', true);
+    }
     if (!multiline) input.type = 'text';
     const headings = tableHeadings(el);
     const label = [headings.row, headings.column].filter(Boolean).join(', ');
@@ -551,12 +557,14 @@
       attr(el, 'style', style.getAttribute('style'));
     }
     el.append(input, ink);
+    if (sizer) el.append(sizer);
     input.addEventListener('input', () => setValue(row, input.value));
     return { paint(value) {
       const text = value ?? '';
       if (input.value !== text) input.value = text;
       if (multiline && el.style.height) input.style.setProperty('--ws-input-height', el.style.height);
       ink.textContent = text;
+      if (sizer) sizer.textContent = text;
       toggle(el, 'ws-filled', text.length > 0);
     } };
   }

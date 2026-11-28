@@ -707,6 +707,93 @@ try {
       await tab.js('sheet.clearAnswers()');
     },metrics(390,844,true));
   });
+  await test('채운 휴대폰 표의 정답과 학번이 잘리지 않음', async () => {
+    const folder = path.join(work, 'filled-mobile-table');
+    const source = JSON.parse(await fs.readFile(path.join(here, '../../examples/대여소-요금-비교/구성.json'), 'utf8'));
+    source.meta.sync = false;
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+    await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+      {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+    await usingTab(pathToFileURL(path.join(folder, `${source.meta.title}.html`)).href, async tab => {
+      const answers = ['5000','7000','9000','11000','4000','7000','10000','13000'];
+      await tab.js(`${quote(answers)}.forEach((value,i)=>sheet.answer('q1.'+(i+1),value)); sheet.answer('head.학번','20315')`);
+      await tab.click(action('check',item('q1')));
+      await tab.click(action('reveal-answer',item('q1')));
+      for (const width of [390,360,320]) {
+        await tab.send('Emulation.setDeviceMetricsOverride',metrics(width,844,true));
+        await tab.js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',true);
+        const result = await tab.js(`(() => {
+          const main=document.querySelector('#sheet-flow');
+          const clipped=[...main.querySelectorAll('td,th,.ws-flow-node,.ws-in')]
+            .filter(el=>el.getClientRects().length && el.scrollWidth>el.clientWidth+1)
+            .map(el=>el.dataset.slot || el.closest('[data-slot]')?.dataset.slot || el.textContent.trim());
+          const cells=['q1.4','q1.7','q1.8'].map(id=>{
+            const input=main.querySelector('[data-slot="'+id+'"] .ws-in');
+            const reveal=input.parentElement.parentElement.querySelector('.ws-reveal');
+            const r=reveal.getBoundingClientRect(), content=reveal.querySelector('math').getBoundingClientRect();
+            return {value:input.value, answer:reveal.textContent.trim(), visible:reveal.checkVisibility(),
+              fits:content.left>=r.left-1 && content.right<=r.right+1};
+          });
+          return {clipped,cells,identity:main.querySelector('[data-slot="head.학번"] input').value};
+        })()`);
+        assert.equal((await tab.report()).overflow_x,0,`${width}px 문서 가로 넘침`);
+        assert.deepEqual(result.clipped,[],`${width}px 채운 표와 학번 잘림`);
+        assert.equal(result.identity,'20315');
+        assert.deepEqual(result.cells.map(cell=>[cell.value,cell.answer,cell.visible,cell.fits]),
+          ['11000','10000','13000'].map(value=>[value,value,true,true]),`${width}px 정답 표시`);
+      }
+      await tab.js('sheet.clearAnswers()');
+    },metrics(390,844,true));
+  });
+  await test('긴 표 답은 입력 때부터 표 안에서 밀어 모두 읽음', async () => {
+    const folder = path.join(work, 'long-mobile-table');
+    const source = JSON.parse(await fs.readFile(path.join(here, '../../examples/대여소-요금-비교/구성.json'), 'utf8'));
+    const longAnswer = '12345678901234567890';
+    source.meta.sync = false;
+    source.items[0].blocks.find(block=>block.type === 'table').rows[0][4] = `{{|$${longAnswer}$}}`;
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+    await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+      {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+    await usingTab(pathToFileURL(path.join(folder, `${source.meta.title}.html`)).href, async tab => {
+      await setInput(tab, '#sheet-flow [data-slot="q1.4"] input', longAnswer);
+      const geometry = () => tab.js(`(() => {
+        const input=document.querySelector('#sheet-flow [data-slot="q1.4"] .ws-in');
+        const table=input.closest('table'), cell=input.closest('td');
+        const reveal=cell.querySelector('.ws-reveal:not([hidden])');
+        const math=reveal?.querySelector('math');
+        return {input:[input.clientWidth,input.scrollWidth], table:[table.clientWidth,table.scrollWidth],
+          cell:[cell.clientWidth,cell.scrollWidth], cue:getComputedStyle(table,'::after').content,
+          reveal:reveal && [reveal.clientWidth,reveal.scrollWidth], math:math && [math.getBoundingClientRect().width,reveal.getBoundingClientRect().width]};
+      })()`);
+      let size = await geometry();
+      assert(size.input[1] <= size.input[0]+1, `입력할 때 잘림: ${quote(size)}`);
+      assert(size.table[1] > size.table[0], `긴 답은 표 안 가로 스크롤: ${quote(size)}`);
+      assert.match(size.cue,/좌우/);
+      assert.equal((await tab.report()).overflow_x,0);
+      // 짧은 오답을 썼더라도 긴 정답 전체가 들어갈 폭이 필요하다.
+      await setInput(tab, '#sheet-flow [data-slot="q1.4"] input', '1');
+      await tab.click(action('check',item('q1'))); await tab.click(action('reveal-answer',item('q1')));
+      size = await geometry();
+      assert(size.reveal[1] <= size.reveal[0]+1 && size.math[0] <= size.math[1]+1 && size.cell[1] <= size.cell[0]+1,
+        `짧은 오답 뒤 긴 정답 잘림: ${quote(size)}`);
+      await setInput(tab, '#sheet-flow [data-slot="q1.4"] input', longAnswer);
+      size = await geometry();
+      assert(size.input[1] <= size.input[0]+1 && size.cell[1] <= size.cell[0]+1, `공개 뒤 입력·표 칸 잘림: ${quote(size)}`);
+      assert(size.reveal[1] <= size.reveal[0]+1 && size.math[0] <= size.math[1]+1, `정답 표시 잘림: ${quote(size)}`);
+      assert.equal(await tab.js(`(() => {
+        const input=document.querySelector('#sheet-flow [data-slot="q1.4"] .ws-in'), table=input.closest('table');
+        table.scrollLeft=table.scrollWidth;
+        const a=input.getBoundingClientRect(), b=table.getBoundingClientRect();
+        return table.scrollLeft>0 && a.left>=b.left-1 && a.right<=b.right+1;
+      })()`),true,'표를 밀면 긴 입력 전체를 볼 수 있음');
+      await tab.js(`sheet.view('a4')`,true);
+      assert.equal((await tab.report()).print_leaks,0);
+      assert.equal(await tab.js(`!!new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('.ws-input-sizer,.ws-input-table')`),false);
+      await tab.js('sheet.clearAnswers()');
+    },metrics(390,844,true));
+  });
   await test('탐구 제외값·인쇄 스냅숏·점검표와 순서 안내', () => usingTab(contractStudent, async tab => {
     const exploreItem = item('explore'), first = `${exploreItem} .ws-explore:first-child`;
     const visible = selector => tab.js(`document.querySelector(${quote(selector)}).checkVisibility()`);
@@ -1483,6 +1570,7 @@ try {
       const url = await saveFile(`mobile-${theme}`,themed);
       await usingTab(url, async tab => {
         await tab.js('sheet.clearAnswers()'); await tab.js(`sheet.view('solve')`,true);
+        await tab.js(`sheet.answer('head.반','12'); sheet.answer('head.번','123')`);
         for (const width of [360,390,1024]) {
           await tab.send('Emulation.setDeviceMetricsOverride',metrics(width,width===1024?768:844,width!==1024));
           await tab.js('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',true);
@@ -1492,6 +1580,7 @@ try {
             assert.fail(`${theme} ${width}: 넘침 ${report.overflow_x}px ${quote(outside)}`);
           }
           assert.equal(await tab.js(`(() => {const cell=document.querySelector('.ws-head-name'), r=cell.getBoundingClientRect();return [...cell.querySelectorAll('.ws-name-slot')].every(el=>{const b=el.getBoundingClientRect();return b.left>=r.left && b.right<=r.right;})})()`),true);
+          if (width < 720) assert.equal(await tab.js(`['head.반','head.번'].every(id=>{const input=document.querySelector('#sheet-flow [data-slot="'+id+'"] input'); return input.scrollWidth<=input.clientWidth+1;})`),true,`${theme} ${width} 반·번 입력`);
           const ox = await tab.js(`(() => {const cells=[...document.querySelectorAll('.ws-ox-n,.ws-ox-o,.ws-ox-x')];
             const single=cells.every(el=>{const r=document.createRange();r.selectNodeContents(el);return [...r.getClientRects()].filter(x=>x.width&&x.height).length===1});
             const picks=[...document.querySelectorAll('.ws-ox-o,.ws-ox-x')].map(el=>el.getBoundingClientRect().top);

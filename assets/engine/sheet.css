@@ -376,7 +376,7 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 /* The shortest writing box is 10.18 mm; two printed lines and padding must fit. */
 .ws-ans[data-lines="2"] > .ws-ink { line-height: min(5.64mm, 1.25em); }
 .ws-in:not(:focus) { text-overflow: ellipsis; }
-.ws-ink { display: none; pointer-events: none; white-space: nowrap; }
+.ws-ink, .ws-input-sizer { display: none; pointer-events: none; white-space: nowrap; }
 .ws-blank.ws-filled > .ws-blank-mark { visibility: hidden; }
 #sheet-pages .ws-filled > :is(.ws-blank-mark, .ws-name-space) { display: none; }
 #sheet-pages .ws-filled > .ws-ink { display: block; }
@@ -469,6 +469,21 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
   #sheet-flow :is(.ws-split, .ws-flow-cols) { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   #sheet-flow .ws-choices { grid-template-columns: repeat(auto-fit, minmax(min(100%, 95px), 1fr)); }
   #sheet-flow .ws-item { padding: 12px; }
+}
+/* 기존 기기에서도 잘림 방지 규칙이 적용되도록 고전 미디어 쿼리를 쓴다. */
+@media screen and (max-width: 719px) {
+  /* 좁은 화면에서는 표 칸의 입력 폭을 보장하고, 넘친 표만 옆으로 움직인다. */
+  #sheet-flow .ws-data.ws-input-table { display: block; table-layout: auto; overflow-x: auto; }
+  #sheet-flow .ws-data.ws-input-table col { width: auto !important; }
+  #sheet-flow .ws-data.ws-input-table :is(th, td) { padding-inline: .6mm; }
+  #sheet-flow .ws-data .ws-fill > .ws-blank { min-width: 4.5em !important; }
+  #sheet-flow .ws-data .ws-input-sizer { display: inline-block; visibility: hidden; font-size: max(16px, 1em); }
+  #sheet-flow .ws-data.ws-input-table::after {
+    content: '↔ 표를 좌우로 밀어 볼 수 있어요'; position: sticky; left: 0; display: block;
+    width: fit-content; padding: 2px 4px; color: #475467; font: 12px/1.4 var(--sheet-sans);
+  }
+  #sheet-flow .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]),
+  #sheet-flow .ws-head-name .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]) { min-width: min(100%, 5em); }
 }
 @media print {
   .ws-solve-only, .ws-in, .ws-verdict, .ws-check-bar, .ws-reveal, .ws-solution { display: none !important; }

@@ -46,6 +46,12 @@
       write(local(), `${prefix}:client`, client);
     }
     const queueKey = `${prefix}:queue`;
+    function scoped(row) {
+      if (row.event !== 'check') return row;
+      const slots = values => Object.fromEntries(Object.entries(values || {}).filter(([slot]) =>
+        typeof row.item === 'string' && !slot.startsWith('head.') && slot.startsWith(`${row.item}.`)));
+      return { ...row, answers: slots(row.answers), verdicts: slots(row.verdicts) };
+    }
     const initial = parse(read(local(), queueKey, '[]'), []);
     const queue = Array.isArray(initial) ? initial.slice(-50) : [];
     const status = core.button('', 'sync-retry', () => void flush());
@@ -56,7 +62,7 @@
     });
     core.addToolbar(submit, status);
     const notice = runtime(make('div', 'ws-sync-notice ws-solve-only'));
-    notice.append(make('p', '', '이 활동지는 이름과 답을 선생님께 보냅니다.'));
+    notice.append(make('p', '', "이 활동지는 이름과 답을 선생님께 보냅니다. 이름을 쓰고 '확인'을 누르면 그 문항의 답이, '선생님께 제출'을 누르면 모든 답이 전송됩니다."));
     const warning = make('p', 'ws-sync-warning', '이름을 쓰면 선생님께 기록이 전송돼요');
     warning.hidden = true; warning.setAttribute('role', 'status'); notice.append(warning);
     document.querySelector('#sheet-flow, #sheet-pages')?.before(notice);
@@ -76,7 +82,7 @@
           try {
             const response = await fetch(endpoint, { method: 'POST', headers: {
               ...apiHeaders(anonToken), 'Content-Type': 'application/json', Prefer: 'return=minimal',
-            }, body: JSON.stringify(queue[0]), keepalive: true });
+            }, body: JSON.stringify(scoped(queue[0])), keepalive: true });
             if (!response.ok) throw new Error('전송 실패');
             queue.shift(); persist();
           } catch { markFailed(); return; }
@@ -104,7 +110,7 @@
         answers: Object.fromEntries(Object.entries(values).filter(([slot]) => !slot.startsWith('head.'))),
         verdicts: core.verdicts(),
       };
-      queue.push(row);
+      queue.push(scoped(row));
       // Do not evict the in-flight head: its successful response removes that exact row.
       if (queue.length > 50) queue.splice(sending ? 1 : 0, queue.length - 50);
       persist(); void flush();
@@ -145,7 +151,8 @@
     actions.append(refresh, csv, logout);
     const summary = make('div', 'ws-records-summary'), rates = make('div', 'ws-records-rates');
     const tableWrap = make('div', 'ws-records-table-wrap'), detail = make('section', 'ws-records-detail');
-    content.append(actions, summary, rates, tableWrap, detail);
+    const groupingNote = make('small', '', '같은 이름·반·번호는 한 학생으로 묶습니다');
+    content.append(actions, summary, groupingNote, rates, tableWrap, detail);
     shell.append(header, message, login, content); panel.append(shell); document.body.append(panel);
     const opener = core.button('학생 기록', 'student-records', () => {
       panel.hidden = false; message.textContent = '';
@@ -202,31 +209,50 @@
         return { ...slot, label: `${q || slot.item}.${slot.slot.split('.').at(-1)}`, el };
       });
     }
-    function grouped() {
-      const map = new Map();
-      for (const row of records) {
-        if (!row.client_id) continue;
-        if (!map.has(row.client_id)) map.set(row.client_id, { latest: row, submitted: false });
-        if (row.event === 'submit') map.get(row.client_id).submitted = true;
-      }
-      return [...map.values()];
-    }
     function identity(row) {
       const s = row.student || {};
       return [s['이름'] ?? s['성명'] ?? '', s['반'] ?? '', s['번'] ?? s['학번'] ?? ''].map(String);
     }
+    function grouped() {
+      const map = new Map();
+      // Postgres timestamps can carry more precision than Date's milliseconds.
+      const fraction = row => (/\.(\d+)/.exec(row.created_at || '')?.[1] || '').padEnd(6, '0').slice(3);
+      const ordered = records.map((row, index) => ({ row, index })).sort((a, b) =>
+        (Date.parse(a.row.created_at) - Date.parse(b.row.created_at)) || fraction(a.row).localeCompare(fraction(b.row)) ||
+        ((Number(a.row.id) || 0) - (Number(b.row.id) || 0)) || b.index - a.index);
+      for (const [order, { row }] of ordered.entries()) {
+        if (!row.client_id) continue;
+        const key = JSON.stringify(identity(row).map(value => value.normalize('NFC').replace(/[\s\p{White_Space}]+/gu, ' ').trim()));
+        if (!map.has(key)) map.set(key, { submitted: false, modified: false, answers: Object.create(null), verdicts: Object.create(null) });
+        const student = map.get(key);
+        student.lastRecord = row; student.order = order;
+        if (row.event === 'submit') {
+          student.submitted = true; student.modified = false; student.submission = row;
+        } else if (row.event === 'check') {
+          Object.assign(student.answers, row.answers || {}); Object.assign(student.verdicts, row.verdicts || {});
+          if (student.submitted) student.modified = true;
+        }
+      }
+      return [...map.values()].sort((a, b) => b.order - a.order).map(student => ({ ...student,
+        latest: student.submitted ? student.submission : { ...student.lastRecord, answers: student.answers, verdicts: student.verdicts },
+      }));
+    }
+    const state = student => student.submitted ? student.modified ? '제출 후 수정' : '제출' : '미제출';
+    const verdict = value => value === true ? '✓' : value === false ? '✗' : value === 'review' ? '?' : '';
     function render() {
       const cols = columns(), students = grouped();
       summary.replaceChildren(); rates.replaceChildren(); tableWrap.replaceChildren(); detail.replaceChildren();
-      for (const [label, value] of [['학생 수', students.length], ['제출 수', students.filter(s => s.submitted).length]]) {
+      const devices = new Set(records.map(row => row.client_id).filter(Boolean)).size;
+      for (const [label, value] of [['학생(이름 기준)', students.length], ['제출', students.filter(s => s.submitted).length], ['기기', devices]]) {
         const box = make('div', 'ws-records-stat'); box.append(make('span', '', label), make('strong', '', String(value))); summary.append(box);
       }
       rates.append(make('h2', '', '자리별 정답률'));
       const list = make('div', 'ws-records-rate-list');
       for (const col of cols) {
-        const judged = students.map(s => s.latest.verdicts?.[col.slot]).filter(v => v === true || v === false);
-        const correct = judged.filter(Boolean).length;
-        list.append(make('span', '', `${col.label} · ${judged.length ? Math.round(100 * correct / judged.length) + '%' : '—'} (${correct}/${judged.length})`));
+        const values = students.map(s => s.latest.verdicts?.[col.slot]);
+        const judged = values.filter(v => v === true || v === false), review = values.filter(v => v === 'review').length;
+        const correct = judged.filter(v => v === true).length;
+        list.append(make('span', '', `${col.label} · ${judged.length ? Math.round(100 * correct / judged.length) + '%' : '—'} (${correct}/${judged.length}) · 확인 필요 ${review}`));
       }
       if (!cols.length) list.append(make('span', '', '자동 판별 자리가 없습니다.'));
       rates.append(list);
@@ -239,10 +265,10 @@
       for (const student of students) {
         const row = student.latest, score = row.score || {}, line = make('tr');
         line.tabIndex = 0; line.setAttribute('role', 'button'); line.setAttribute('aria-label', `${identity(row)[0] || '이름 없음'}의 답 보기`);
-        const result = cols.map(c => row.verdicts?.[c.slot] === true ? '✓' : row.verdicts?.[c.slot] === false ? '✗' : '');
-        for (const value of [...identity(row), clock(row.created_at), student.submitted ? '제출' : '미제출',
+        const result = cols.map(c => verdict(row.verdicts?.[c.slot]));
+        for (const value of [...identity(row), clock(row.created_at), state(student),
           `${score.correct ?? 0}/${score.checked ?? 0}`, ...result]) line.append(make('td', '', String(value)));
-        const open = () => showDetail(row, cols);
+        const open = () => showDetail(student, cols);
         line.addEventListener('click', open);
         line.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
         body.append(line);
@@ -253,8 +279,10 @@
       if (value == null || value === '') return '—';
       return typeof value === 'string' ? value : JSON.stringify(value);
     }
-    function showDetail(row, cols) {
+    function showDetail(student, cols) {
+      const row = student.latest;
       detail.replaceChildren(make('h2', '', `${identity(row)[0] || '이름 없음'}의 답`));
+      if (student.modified) detail.append(make('p', '', `제출 뒤 바뀐 답이 있습니다(마지막 기록 시각: ${clock(student.lastRecord.created_at)})`));
       const table = make('table', 'ws-records-detail-table'), head = make('tr');
       for (const label of ['자리', '학생 답', '교사용 정답']) head.append(make('th', '', label));
       table.append(head);
@@ -280,10 +308,10 @@
     function downloadCSV() {
       const cols = columns(), students = grouped();
       const rows = [['이름', '반', '번/학번', '마지막 기록', '제출', '맞음', '판별', ...cols.map(c => c.label), '답 전체']];
-      for (const { latest: row, submitted } of students) {
-        const score = row.score || {};
-        rows.push([...identity(row), clock(row.created_at), submitted ? '제출' : '미제출', score.correct ?? 0, score.checked ?? 0,
-          ...cols.map(c => row.verdicts?.[c.slot] === true ? '✓' : row.verdicts?.[c.slot] === false ? '✗' : ''), JSON.stringify(row.answers || {})]);
+      for (const student of students) {
+        const row = student.latest, score = row.score || {};
+        rows.push([...identity(row), clock(row.created_at), state(student), score.correct ?? 0, score.checked ?? 0,
+          ...cols.map(c => verdict(row.verdicts?.[c.slot])), JSON.stringify(row.answers || {})]);
       }
       const cell = value => {
         let text = String(value ?? '');

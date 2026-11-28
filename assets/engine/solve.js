@@ -866,6 +866,7 @@
     }
     const anchor = figure ? el.querySelector('svg:not(.ws-match-lines), img') : runtime(make('div', 'ws-draw-frame'));
     if (!anchor) return;
+    const answer = figure ? el.querySelector('.ws-fig-answer') : null;
     if (!figure) {
       el.append(anchor);
       const table = el.closest('.ws-ans-table');
@@ -925,10 +926,12 @@
       if (zoom) {
         anchor.before(viewport);
         stage.append(anchor);
+        if (answer) stage.append(answer);
         if (figure) stage.append(canvas);
         viewport.scrollLeft = viewport.scrollTop = 0;
       } else {
         viewport.replaceWith(anchor);
+        if (answer) anchor.after(answer);
         if (figure) ink.before(canvas);
       }
     }

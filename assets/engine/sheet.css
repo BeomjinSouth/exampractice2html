@@ -359,7 +359,7 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 /* Only filled inline fields reserve new space on the A4 page. */
 :root:not([data-view="solve"]) .ws-solve-only,
 :root[data-view="solve"] .ws-print-only,
-:root[data-role="teacher"]:not([data-sheet-preview]) :is(.ws-in, .ws-pen, .ws-check-bar, .ws-solution, .ws-reveal, .ws-verdict) { display: none !important; }
+:root[data-role="teacher"]:not([data-sheet-preview]) :is(.ws-in, .ws-pen, .ws-pen-ink, .ws-check-bar, .ws-solution, .ws-reveal, .ws-verdict) { display: none !important; }
 [data-sheet-runtime][hidden], .ws-hint[hidden], #sheet-toolbar [hidden] { display: none !important; }
 :root[data-sheet-preview] #sheet-toolbar > :not(.ws-score, [data-sheet-action="print"], [data-sheet-action="return-teacher"]) { display: none; }
 .ws-name-slot, .ws-answer-live:is(.ws-blank, .ws-ans, figure) { position: relative; }
@@ -388,7 +388,13 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   #sheet-pages .ws-in:not(:focus) { color: transparent; }
   #sheet-pages .ws-in:focus + .ws-ink { visibility: hidden; }
 }
-.ws-pen { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+:is(canvas.ws-pen, svg.ws-pen-ink) { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ws-pen { touch-action: none; cursor: crosshair; }
+.ws-item svg.ws-pen-ink { display: none; margin: 0; pointer-events: none; }
+.ws-pen-ink polyline {
+  fill: none; stroke: #161616; stroke-width: 1.8px; stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
 .ws-pen-pass-through { pointer-events: none; }
 .ws-pen-tools { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-block-start: 4px; }
 .ws-ans > .ws-pen-tools { position: absolute; right: 4px; bottom: 4px; padding: 2px; background: #fff; }
@@ -476,18 +482,21 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
   #sheet-flow .ws-data.ws-input-table { display: block; table-layout: auto; overflow-x: auto; }
   #sheet-flow .ws-data.ws-input-table col { width: auto !important; }
   #sheet-flow .ws-data.ws-input-table :is(th, td) { padding-inline: .6mm; }
+  #sheet-flow .ws-data.ws-input-table :is(th, td):not(.ws-fill) { min-width: 2.5em; overflow-wrap: normal; }
   #sheet-flow .ws-data .ws-fill > .ws-blank { min-width: 4.5em !important; }
   #sheet-flow .ws-data .ws-input-sizer { display: inline-block; visibility: hidden; font-size: max(16px, 1em); }
-  #sheet-flow .ws-data.ws-input-table::after {
+  #sheet-flow .ws-data.ws-table-overflow::after {
     content: '↔ 표를 좌우로 밀어 볼 수 있어요'; position: sticky; left: 0; display: block;
-    width: fit-content; padding: 2px 4px; color: #475467; font: 12px/1.4 var(--sheet-sans);
+    box-sizing: border-box; width: fit-content; max-width: 100%; padding: 2px 4px;
+    color: #475467; font: 12px/1.4 var(--sheet-sans);
   }
   #sheet-flow .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]),
   #sheet-flow .ws-head-name .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]) { min-width: min(100%, 5em); }
 }
 @media print {
-  .ws-solve-only, .ws-in, .ws-verdict, .ws-check-bar, .ws-reveal, .ws-solution { display: none !important; }
-  .ws-pen, .ws-match-lines { print-color-adjust: exact; }
+  .ws-solve-only, .ws-in, .ws-verdict, .ws-check-bar, .ws-reveal, .ws-solution, canvas.ws-pen { display: none !important; }
+  .ws-item svg.ws-pen-ink { display: block; }
+  .ws-match-lines { print-color-adjust: exact; }
 }
 
 /* 풀이 화면의 학생 기록 안내와 교사용 기록 패널은 인쇄 원고 밖에 둔다. */
@@ -545,5 +554,5 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
   #sheet-flow .ws-ox :is(.ws-ox-n, .ws-ox-pick) { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
   .ws-records-shell { padding: 20px 16px 36px; }
 }
-@media print { .ws-records, .ws-sync-notice { display: none !important; } }
+@media print { .ws-records, .ws-sync-notice, .ws-math-notice { display: none !important; } }
 

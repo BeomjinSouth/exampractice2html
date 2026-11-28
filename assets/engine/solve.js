@@ -536,6 +536,7 @@
     if (sizer) {
       sizer.setAttribute('aria-hidden', 'true');
       toggle(fillTable, 'ws-input-table', true);
+      resizeObserver.observe(fillTable);
     }
     if (!multiline) input.type = 'text';
     const headings = tableHeadings(el);
@@ -815,7 +816,9 @@
     if (!anchor) return;
     const canvas = runtime(make('canvas', 'ws-pen'));
     canvas.setAttribute('aria-label', '그리기 칸');
-    el.append(canvas);
+    const ink = runtime(svgNode('svg', { class: 'ws-pen-ink', 'aria-hidden': 'true',
+      viewBox: '0 0 1 1', preserveAspectRatio: 'none' }));
+    el.append(canvas, ink);
     const tools = solveOnly('div', 'ws-pen-tools');
     let selected = alongsidePlot ? 'plot' : 'ink', gesture;
     const modes = [];
@@ -829,12 +832,29 @@
     tool(selected);
     tools.append(...modes.map(([,button]) => button), uiButton('모두 지우기', 'pen-clear', () => setDrawing([])));
     el.append(tools);
+    let printedStrokes;
     function paint(value) {
+      // Print can hide the canvas before layout; size both layers from the figure, not the canvas.
       if (figure) {
         const f = el.getBoundingClientRect(), r = anchor.getBoundingClientRect();
-        if (!r.width || !r.height) return;
-        Object.assign(canvas.style, { left: `${r.left-f.left}px`, top: `${r.top-f.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+        if (r.width && r.height) {
+          const box = { left: `${r.left-f.left-el.clientLeft}px`, top: `${r.top-f.top-el.clientTop}px`,
+            width: `${r.width}px`, height: `${r.height}px` };
+          Object.assign(canvas.style, box);
+          Object.assign(ink.style, box);
+        }
       }
+      const strokes = value?.strokes;
+      if (strokes !== printedStrokes) {
+        printedStrokes = strokes;
+        ink.replaceChildren(...(strokes ?? []).map(path => svgNode('polyline', {
+          // A tap is a zero-length stroke with a round cap.
+          points: (path.length === 1 ? [path[0], path[0]] : path).join(' '),
+        })));
+      }
+      paintCanvas(value);
+    }
+    function paintCanvas(value) {
       const { width, height } = canvas.getBoundingClientRect();
       if (!width || !height) return;
       const ratio = Math.min(3, Math.max(2, devicePixelRatio || 1));
@@ -886,7 +906,7 @@
       window.addEventListener('pointercancel', finish, options);
       window.addEventListener('blur', finish, { signal: listeners.signal });
       if (event.isTrusted) canvas.setPointerCapture(event.pointerId);
-      paint(gesture);
+      paintCanvas(gesture);
     });
     function move(event) {
       if (gesture?.id !== event.pointerId) return;
@@ -898,7 +918,7 @@
         else gesture.strokes.at(-1).push(p);
         gesture.last = p;
       }
-      paint(gesture);
+      paintCanvas(gesture);
     }
     function stopTracking() {
       gesture?.listeners.abort();
@@ -1114,13 +1134,15 @@
         panel.emptyAttempt ? '' : guidance].filter(Boolean).join(' · ');
       if (panel.result.textContent !== label) panel.result.textContent = label;
     }
+    updateTableOverflow(item);
   }
   function updateScore() {
     if (!scoreLabel) return;
     const { correct, total } = score();
     const open = [...records.values()].filter(row => row.kind === 'open').length;
-    const label = `맞힌 수 ${correct} / 자동 판별 ${total}${open ? ` · 서술 ${open}칸은 직접 확인` : ''}`;
+    const label = total ? `맞힌 수 ${correct} / 자동 판별 ${total}${open ? ` · 서술 ${open}칸은 직접 확인` : ''}` : '';
     if (scoreLabel.textContent !== label) scoreLabel.textContent = label;
+    scoreLabel.hidden = !total;
   }
 
   // Arithmetic-only recursive descent. Exponentiation is right-associative; unary minus binds less tightly.
@@ -1339,11 +1361,20 @@
     }
     updateScore();
   }
+  const narrowTableScreen = window.matchMedia('screen and (max-width: 719.98px)');
+  function updateTableOverflow(scope) {
+    const narrow = mode === 'solve' && narrowTableScreen.matches;
+    for (const table of all(scope, 'table.ws-input-table')) {
+      const overflow = narrow && table.clientWidth > 0 && table.scrollWidth > table.clientWidth + 1;
+      if (table.classList.contains('ws-table-overflow') !== overflow) toggle(table, 'ws-table-overflow', overflow);
+    }
+  }
   function schedulePaint() {
     if (delayedPaint) return;
     delayedPaint = requestAnimationFrame(() => {
       delayedPaint = null;
       if (usable()) for (const row of records.values()) if (row.control?.resize) row.control.paint(row.value);
+      if (mainNode) updateTableOverflow(mainNode);
     });
   }
   const resizeObserver = new ResizeObserver(schedulePaint);
@@ -1391,15 +1422,6 @@
     changeView(before);
   }
   function beforePrintButton() { printing ??= mode; return restorePrint; }
-  function mathLayoutWorks() {
-    const probe = make('div');
-    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;font-size:32px';
-    probe.innerHTML = '<math><mfrac><mn>1</mn><mn>2</mn></mfrac><msup><mi>x</mi><mn>2</mn></msup></math>';
-    document.body.append(probe);
-    const [numerator, denominator, base, exponent] = all(probe, 'mn, mi').map(el => el.getBoundingClientRect());
-    probe.remove();
-    return numerator.width > 0 && numerator.top < denominator.top && exponent.width > 0 && exponent.top < base.top;
-  }
   function init() {
     const build = core.buildMeta();
     storageKey = `pbj-sheet:${build.edition || build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
@@ -1416,11 +1438,6 @@
     // An explicitly emptied device snapshot can still differ from a filled answer file.
     if (!teacher && (hasDevice || (file.size && device.size && when > 0))) pendingRestore = { device, file };
     else restoreSnapshot(file.size ? file : device);
-    if (!mathLayoutWorks()) {
-      const warning = solveOnly('p', 'ws-math-notice', '이 브라우저에서는 수식이 제대로 보이지 않아요. 최신 브라우저로 열어 보세요.');
-      warning.setAttribute('role', 'status');
-      mainNode.before(warning);
-    }
     scoreLabel = solveOnly('span', 'ws-score'); scoreLabel.setAttribute('role', 'status');
     if (teacher) {
       previewButton = core.button('학생 화면 미리보기', 'preview-student', () => {
@@ -1447,6 +1464,7 @@
       core.addToolbar(viewButton, saveButton, clearButton, prompt);
     }
     core.addToolbar(scoreLabel);
+    narrowTableScreen.addEventListener('change', schedulePaint);
     window.addEventListener('beforeprint', () => {
       printing ??= mode;
       // An inline answer entered in A4 view may have wrapped since its last layout.

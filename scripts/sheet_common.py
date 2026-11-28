@@ -191,8 +191,8 @@ _REVEAL_DATA = re.compile(r'[A-Za-z0-9+/]+={0,2}')
 _STYLE_IDS = frozenset(('sheet-css', 'sheet-fonts', 'sheet-theme', 'sheet-user'))
 _CSS_ESCAPE = r'\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f0-9a-fA-F])'
 _CSS_IDENT = rf'(?:[-_a-zA-Z0-9]|[^\x00-\x7f]|{_CSS_ESCAPE})+'
-_CSS_TOKEN = re.compile(rf'''/\*[\s\S]*?(?:\*/|\Z)|"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?
-                            |@(?P<at>{_CSS_IDENT})|(?P<ident>{_CSS_IDENT})''', re.X)
+_CSS_TOKEN = re.compile(rf'''/\*[\s\S]*?(?:\*/|\Z)|(?P<string>"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?)
+                            |@(?P<at>{_CSS_IDENT})|(?P<ident>{_CSS_IDENT})|(?P<paren>[()])''', re.X)
 _CSS_URL = re.compile(r'''\s*\(\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^\\)])*))\s*(?:\)|\Z)''')
 _CSS_UNESCAPE = re.compile(r'\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|(\r\n|[\r\n\f])|([\s\S]))')
 
@@ -206,21 +206,48 @@ def _css_unescape(value):
     return _CSS_UNESCAPE.sub(replace, value)
 
 
+def _external_css_resource(value):
+    value = _css_unescape(value).strip(_URL_LEADING)
+    return bool(value and not value.lower().startswith(('data:', '#')))
+
+
 def _style_resource_issues(css):
-    """Inspect CSS tokens, ignoring comments, strings and the inside of data URLs."""
-    problems, skip_until = [], 0
+    """Inspect CSS tokens without mistaking comments or ordinary strings for resources."""
+    problems, skip_until, functions, last_ident = [], 0, [], None
+    image_sets = ('image-set', '-webkit-image-set')
     for token in _CSS_TOKEN.finditer(css):
         if token.start() < skip_until:
             continue
         if token['at'] and _css_unescape(token['at']).lower() == 'import':
             problems.append('<style>에 @import가 있습니다.')
-        if token['ident'] and _css_unescape(token['ident']).lower() == 'url':
-            url = _CSS_URL.match(css, token.end())
-            if url:
-                skip_until = url.end()
-                value = _css_unescape(next(part for part in url.groups() if part is not None)).strip(_URL_LEADING)
-                if value and not value.lower().startswith(('data:', '#')):
-                    problems.append('<style>의 url()이 외부 자원을 가리킵니다.')
+        if token['ident']:
+            name = _css_unescape(token['ident']).lower()
+            if functions and functions[-1] in image_sets and name == 'var' and re.match(r'\s*\(', css[token.end():]):
+                problems.append('<style>의 image-set()에 외부 주소일 수 있는 변수가 있습니다.')
+            if name == 'url':
+                url = _CSS_URL.match(css, token.end())
+                if url:
+                    skip_until = url.end()
+                    value = next(part for part in url.groups() if part is not None)
+                    if _external_css_resource(value):
+                        problems.append('<style>의 url()이 외부 자원을 가리킵니다.')
+                    last_ident = None
+                    continue
+            last_ident = (name, token.end())
+        elif token['paren']:
+            if token['paren'] == '(':
+                name = last_ident[0] if last_ident and not css[last_ident[1]:token.start()].strip() else ''
+                functions.append(name)
+            elif functions:
+                functions.pop()
+            last_ident = None
+        else:
+            if token['string'] and functions and functions[-1] in image_sets:
+                text = token['string']
+                value = text[1:-1] if len(text) > 1 and text[-1] == text[0] else text[1:]
+                if _external_css_resource(value):
+                    problems.append('<style>의 image-set()이 외부 자원을 가리킵니다.')
+            last_ident = None
     return problems
 
 

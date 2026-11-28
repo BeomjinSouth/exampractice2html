@@ -370,6 +370,9 @@ class SourceAuditTest(unittest.TestCase):
             'p {background: url(file:///C:/outside.png)}',
             'p {background: url(https://example.invalid/a',
             'p {background: url("https://example.invalid/a"',
+            'p {background: image-set("https://example.invalid/a.png" 1x)}',
+            'p {background: -webkit-image-set("../outside.png" 1x)}',
+            'p {--source:"https://example.invalid/a.png"; background:image-set(var(--source) 1x)}',
         )
         for ident in ('sheet-css', 'sheet-fonts', 'sheet-theme', 'sheet-user'):
             for css in dangerous:
@@ -379,7 +382,8 @@ class SourceAuditTest(unittest.TestCase):
     def test_foreign_code_accepts_local_styles_video_and_svg_across_chunks(self):
         source = ("<style id='sheet-fonts'>@font-face{src:url(data:font/woff;base64,YWJj)}</style>"
                   '<style id="sheet-css">/* @import "ignored.css" */'
-                  'p::after{content:"url(https://example.invalid)"} .a{clip-path:url(#clip)}</style>'
+                  'p::after{content:"url(https://example.invalid)"} .a{clip-path:url(#clip)}'
+                  '.b{background:image-set("data:image/png;base64,YWJj" type("image/png") 1x)}</style>'
                   '<style id="sheet-theme">p{color:red}</style>'
                   '<style id="sheet-user">p{font-size:12pt}</style>'
                   '<figure class="ws-video" data-yt="abcdefghijk">영상</figure>'

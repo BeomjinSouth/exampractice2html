@@ -457,6 +457,42 @@ class PlanTest(unittest.TestCase):
                 data['meta'].update(unit=unit, title=title)
                 self.assertEqual({i.path for i in validate(data, ROOT) if i.code == 'textbook-expression'}, expected)
 
+    def test_circular_arc_has_one_unit_specific_recommendation(self):
+        examples = ('원호를 남겨 봅시다.', '첫 원호 위에 점을 찍는다.', '이 원호만으로 점이 정해질까?',
+                    '원호를 그려 반직선과 만나게 한다.', '두 원호가 만나는 점을 찾는다.', '다른 원호와의 교점을 찾는다.',
+                    '그린 부분을 원호라고 부른다.')
+        controls = ('타원호를 그린다.', '원호형 무늬를 살펴본다.', '원호라는 표현을 쓰지 않는다.')
+        data = document(*({'type': 'text', 'text': text} for text in (*examples, *controls)))
+        data['meta']['grade'] = '중1'
+        for unit, title, construction in (('작도와 합동', '길이 옮기기', True), ('기본 도형', '도형 탐구', True),
+                                          ('', '삼각형의 합동', True), ('원과 부채꼴', '부채꼴의 작도', False),
+                                          ('평면도형', '둘레를 구하는 방법', False), ('', '도형 탐구', False)):
+            with self.subTest(unit=unit, title=title):
+                data['meta'].update(unit=unit, title=title)
+                warnings = [i for i in validate(data, ROOT) if i.code == 'textbook-expression']
+                self.assertEqual([i.path for i in warnings], [f'items[0].blocks[{i}].text' for i in range(len(examples))])
+                for warning in warnings:
+                    self.assertIn('‘원호’', warning.message)
+                    self.assertIn('컴퍼스로 그린 원의 흔적을 남긴다' if construction else '‘호’', warning.hint)
+                    self.assertNotIn('틀린 말', warning.hint)
+
+    def test_radius_and_diameter_expression_only_suggests_length_for_values(self):
+        examples = ('반지름이 $8$ cm이고 중심각의 크기가 같다.', '지름은 3.5cm이다.',
+                    '반지름은 $r$이다.', r'지름이 $\sqrt{3}$인 원을 그린다.', '반지름이 $a+1$인 원을 그린다.',
+                    r'지름이 $\frac{1}{2}$인 원을 그린다.', '반지름이 $R$일 때 넓이를 구한다.',
+                    r'반지름이 $8\text{ cm}$이고 중심각의 크기가 같다.', '지름이 $8$이다. 빈칸 {{|답}}을 채운다.',
+                    '반지름이 $r$보다 큰 원을 그린다.', '지름이 1,000mm인 원을 그린다.', '지름이 $8$ 이상이다.')
+        controls = ('반지름 $OA$', '반지름을 그린다.', '반지름이 접선과 수직이다.', '반지름이 같은 두 원을 그린다.',
+                    '반지름의 길이가 $8$ cm이다.', '반지름이 $OA$와 겹친다.', '반지름이 2개 표시되어 있다.',
+                    '지름이 {{|$8$}} cm이다.')
+        data = document(*({'type': 'text', 'text': text} for text in (*examples, *controls)))
+        data['meta'].update(grade='중1', unit='원과 부채꼴')
+        warnings = [i for i in validate(data, ROOT) if i.code == 'textbook-expression']
+        self.assertEqual([i.path for i in warnings], [f'items[0].blocks[{i}].text' for i in range(len(examples))])
+        for example, warning in zip(examples, warnings):
+            term = '반지름' if example.startswith('반지름') else '지름'
+            self.assertIn(f'‘{term}의 길이가’', warning.hint)
+
     def test_variance_uses_statistical_context_in_the_same_sentence(self):
         fields = ('자료의 분산을 구하시오.', '분산과 평균을 비교하시오.', '편차의 제곱으로 분산을 알아보자.',
                   '분산을 구해 봅시다.', '분산 투자로 위험을 줄인다.', '평균 수익률과 분산 투자를 비교한다.',
@@ -468,6 +504,22 @@ class PlanTest(unittest.TestCase):
                 warnings = {i.path for i in validate(data, ROOT) if i.code == 'term-beyond-grade'}
                 self.assertEqual(warnings, {f'items[0].blocks[{i}].text' for i in expected})
 
+    def test_variance_uses_statistics_unit_or_title_and_ignores_everyday_verbs(self):
+        fields = ('분산은 얼마인가요?', '자료를 분산하여 보관한다.', '자료를 분산해 보관한다.', '분산한 자료를 읽는다.',
+                  '자료를 분산시키는 방법을 고른다.', '자료를 분산시켜 보관한다.', '분산된 자료를 살펴본다.',
+                  '자료가 분산되었다.', '분산될 자료를 고른다.', '자료를 분산할 방법을 찾는다.',
+                  '분산 투자와 분산처리를 비교한다.', '자료를 분산 배치한다.', '자료를 분산했다. 분산은 얼마인가요?')
+        data = document(*({'type': 'text', 'text': text} for text in fields))
+        expected = {'items[0].blocks[0].text', 'items[0].blocks[12].text'}
+        for grade, unit, title, paths in (('중1', '자료의 정리', '활동', expected), ('중1', '', '대푯값 알아보기', expected),
+                                           ('중2', '도수분포표', '활동', expected), ('중1', '통계', '활동', expected),
+                                           ('중1', '산포도', '활동', expected | {'meta.unit'}),
+                                           ('중3', '', '산포도 살펴보기', set()),
+                                           ('중1', '도형', '활동', set())):
+            with self.subTest(grade=grade, unit=unit, title=title):
+                data['meta'].update(grade=grade, unit=unit, title=title)
+                self.assertEqual({i.path for i in validate(data, ROOT) if i.code == 'term-beyond-grade'}, paths)
+
     def test_terms_ignore_unrelated_compounds_but_keep_math_compounds(self):
         controls = ('성적분포를 비교한다.', '누적분포를 살핀다.', '미분양과 미분류 자료를 살핀다.', '소인수분해를 한다.')
         examples = ('함수의 미분법을 살핀다.', '정적분과 부정적분을 구한다.', '함수의 적분을 구한다.',
@@ -478,13 +530,16 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(warnings, {f'items[0].blocks[{i}].text' for i in range(len(controls), len(controls) + len(examples))})
 
     def test_textbook_expression_ignores_explicit_correction_not_other_occurrences(self):
-        fields = ('분모를 이항하면 안 됩니다.', '분모를 이항하지 말고 양변에 같은 수를 곱하시오.',
-                  '분모를 이항해서는 안 된다.', '분모를 이항하는 것은 올바르지 않다.',
-                  '분모를 이항하면 양변이 같지 않다.', '분모를 이항하지 마세요. 그런데 여기서는 분모를 이항한다.',
-                  '분모를 이항하지 말고, 분모를 이항하시오.', '포물선은 위로 열리지 않고 아래로 열린다.')
-        data = document(*({'type': 'text', 'text': text} for text in fields))
+        controls = ('분모를 이항하면 안 됩니다.', '분모를 이항하지 말고 양변에 같은 수를 곱하시오.',
+                    '분모를 이항해서는 안 된다.', '분모를 이항하는 것은 올바르지 않다.', '분모를 이항할 수 없다.',
+                    '분모를 이항할 수는 없다.', '분모를 이항할 수 없습니다.', '포물선은 위로 열릴 수 없다.')
+        examples = ('분모를 이항하면 양변이 같지 않다.', '분모를 이항하지 마세요. 그런데 여기서는 분모를 이항한다.',
+                    '분모를 이항하지 말고, 분모를 이항하시오.', '분모를 이항할 수 있다.',
+                    '분모를 이항할 수 없지만 분모를 이항해 보자.', '포물선은 위로 열리지 않고 아래로 열린다.')
+        data = document(*({'type': 'text', 'text': text} for text in (*controls, *examples)))
         issues = [i for i in validate(data, ROOT) if i.code == 'textbook-expression']
-        self.assertEqual([i.path for i in issues], [f'items[0].blocks[{i}].text' for i in range(4, 8)])
+        self.assertEqual([i.path for i in issues],
+                         [f'items[0].blocks[{i}].text' for i in range(len(controls), len(controls) + len(examples))])
         self.assertIn('아래로 열', issues[-1].message)
 
     def test_grade_long_and_short_simultaneous_equations(self):
@@ -703,7 +758,9 @@ class PlanTest(unittest.TestCase):
                        '교사 메모와 문항별 채점 요소에 같은 말', '$a=0.5$일 때의 모양',
                        '허용 눈금이 61개', '$x=\\pm1,\\pm2$', '학생의 관찰 표현',
                        '활동 제목·꼬리표·그림 설명', '두 양 사이 관계를 옳은 등식으로 나타냄',
-                       '16상자일 때의 비교 결과와 근거', '짧은 까닭 칸은 `lines`로 맞추고 `grow`를 피한다'):
+                       '16상자일 때의 비교 결과와 근거',
+                       '짧은 판단이나 까닭을 받는 칸은 `lines`로 높이를 정하고 `grow`를 주지 않는다',
+                       '남는 높이는 긴 서술 칸에만 `grow: true`로 나누거나 쪽 아래 여백으로 둔다', '`grow-excess` 경고'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, design)
         for phrase in ('⭐ 안내 줄을 답의 마지막 줄에 글자 그대로', '사용자가 빼 달라고 하면 뺀다',
@@ -719,7 +776,11 @@ class PlanTest(unittest.TestCase):
         design = (ROOT / 'references/내용-설계.md').read_text(encoding='utf-8')
         authoring = (ROOT / 'references/구성-쓰기.md').read_text(encoding='utf-8')
         for phrase in ('같은 `viewBox`의 SVG', '그 행의 `answer`에 그림 객체', '`viewBox` 1단위 = 1mm',
-                       '현의 길이', '새 반직선의 방향을 정한 교점', 'kind: "box"', '가운데 약 절반',
+                       '현의 길이', '셋째 단계의 원과 둘째 단계의 원이 만나는 점',
+                       '교사용 정답 그림과 풀이에 그 점을 같은 이름으로 표시한다',
+                       '원 전체를 기준으로 다른 원이나 주어진 그림과 만나는 점도 계산한다',
+                       '기준 반직선의 위치와 방향, 정답 반직선의 방향을 모두 바꾼다', '앞 문항에서 그린 획을 그대로 옮겨 보고',
+                       'kind: "box"', '가운데 약 절반',
                        '상자 바깥 두 구간', '채점 요소에도 그림과 해석', '20~25mm', '쪽 아래 여백'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, design)

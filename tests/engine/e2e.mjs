@@ -567,7 +567,8 @@ try {
   const penState = (tab, id = 'q1.5') => tab.js(`sheet.values()[${quote(id)}]?.strokes ?? []`);
   async function penGesture(tab, selector, [x0, y0], moves = [], during) {
     const [left, top] = await tab.js(`(() => {
-      const c = document.querySelector(${quote(selector)}); c.scrollIntoView({block:'center'});
+      const c = document.querySelector(${quote(selector)});
+      (c.closest('.ws-pen-viewport') || c).scrollIntoView({block:'center'});
       const r = c.getBoundingClientRect(); return [r.left, r.top];
     })()`);
     const send = (type, x, y, extra) => tab.send('Input.dispatchMouseEvent', {type, x:left+x, y:top+y, ...extra});
@@ -576,7 +577,7 @@ try {
     if (during) await during();
     await send('mouseReleased', ...(moves.at(-1) || [x0,y0]), {button:'left', clickCount:1});
   }
-  await test('폰에서 그린 45° 선과 컴퍼스 원이 인쇄에서도 같은 모양', async () => {
+  await test('폰에서 크게 펼쳐 그린 45° 선과 컴퍼스 원이 인쇄에서도 같은 모양', async () => {
     const html = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
     const url = await saveFile('construction-student', html.replace('data-height-mm="25"', 'data-height-mm="85"'));
     await usingTab(url, async tab => {
@@ -592,7 +593,17 @@ try {
         }
         return maxX < 0 ? null : [maxX-minX+1, maxY-minY+1];
       })()`);
+      const size = () => tab.js(`(() => {const r=${select(canvas)}.getBoundingClientRect(); return [r.width,r.height];})()`);
+      const pressed = () => tab.js(`${select(btn('pen-zoom'))}.getAttribute('aria-pressed')`);
       try {
+        const small = await size();
+        assert.equal(await pressed(), 'false');
+        await tab.mouseClick(btn('pen-zoom'));
+        assert.equal(await pressed(), 'true');
+        const large = await size();
+        assert(large[0] >= small[0] * 1.9, quote({small,large}));
+        assert(Math.abs(large[0]/large[1] / (small[0]/small[1]) - 1) <= .015);
+        assert.equal((await tab.report()).overflow_x, 0);
         await tab.click(btn('pen-line'));
         assert.equal(await tab.js(`${select(btn('pen-line'))}.getAttribute('aria-pressed')`), 'true');
         await penGesture(tab, canvas, [17,24], [[37,56],[67,74]], async () => {
@@ -631,6 +642,52 @@ try {
         await tab.js('sheet.clearAnswers()');
       }
     }, metrics(390,844));
+  });
+  await test('경계에 잘려 보이는 원도 한 번에 지우고 되돌리며 다시 열 수 있음', async () => {
+    const draw = slot('q4.1'), canvas = `${draw} canvas`, btn = name => action(name, draw);
+    const phone = metrics(390,844);
+    const saved = await usingTab(studentInteractive, async tab => {
+      try {
+        await tab.click(btn('pen-compass'));
+        await penGesture(tab, canvas, [40,60], [[110,60]]);
+        await penGesture(tab, canvas, [138,60]);
+        const stroke = await penState(tab, 'q4.1');
+        assert.equal(stroke.length, 1);
+        assert(stroke[0].some(([,y]) => y < 0) && stroke[0].some(([,y]) => y > 1));
+        await tab.click(btn('eraser'));
+        await penGesture(tab, canvas, [208,60]);
+        assert.deepEqual(await penState(tab, 'q4.1'), []);
+        await tab.click(btn('pen-undo'));
+        assert.deepEqual(await penState(tab, 'q4.1'), stroke);
+        const html = await tab.js('__sheetCore.serialize(true,true)');
+        return { html, stroke };
+      } catch (error) { await tab.js('sheet.clearAnswers()'); throw error; }
+    }, phone);
+    const restored = async tab => {
+      const status = `${draw} [aria-live="polite"]`;
+      const notice = () => tab.js(`document.querySelector(${quote(status)}).textContent`);
+      assert.deepEqual(await penState(tab, 'q4.1'), saved.stroke);
+      await eventually(async () => (await notice()).includes('컴퍼스는 다시 벌려 주세요'), '그림을 복원한 상태 줄');
+      assert.match(await notice(), /그림을 다시 불러왔어요/);
+      assert(await tab.js(`document.querySelector(${quote(btn('pen-undo'))}).disabled`));
+      await tab.click(btn('pen-compass'));
+      await penGesture(tab, canvas, [138,60]);
+      assert.match(await notice(), /먼저 끌어서/);
+      assert.deepEqual(await penState(tab, 'q4.1'), saved.stroke);
+      await tab.js("sheet.view('a4')", true);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      const ink = `${draw} svg.ws-pen-ink`;
+      assert.deepEqual(await tab.js(`(() => {const el=document.querySelector(${quote(ink)});
+        return [el.checkVisibility(),el.children.length,getComputedStyle(el).overflow];})()`), [true,1,'hidden']);
+      await tab.send('Emulation.setEmulatedMedia', {media:''});
+      await tab.js("sheet.view('solve')", true);
+      assert.doesNotMatch(await notice(), /다시 불러왔어요/);
+    };
+    await usingTab(studentInteractive, async tab => {
+      try { await tab.click(action('resume-answers')); await restored(tab); }
+      finally { await tab.js('sheet.clearAnswers()'); }
+    }, phone);
+    await usingTab(await saveFile('restored-circle', saved.html), restored, phone);
   });
   await test('펜 되돌리기는 자리별로 지우개와 모두 지우기도 복원', () => usingTab(studentInteractive, async tab => {
     const draw = slot('q1.5'), canvas = `${draw} canvas`, btn = name => action(name, draw);
@@ -680,6 +737,31 @@ try {
       await tab.click(action('pen', draw));
       assert.equal(await tab.js(`document.querySelector(${quote(action('pen-pan', draw))}).getAttribute('aria-pressed')`), 'false');
       assert.equal(await tab.js(`getComputedStyle(document.querySelector(${quote(canvas)})).pointerEvents`), 'auto');
+    } finally { await tab.js('sheet.clearAnswers()'); }
+  }, metrics(390,844)));
+  await test('크게 펼친 모눈은 두 방향으로 그림 안에서만 밀고 저장 시 밑그림을 보존', () => usingTab(studentInteractive, async tab => {
+    const grid = slot('q3.2'), viewport = `${grid} .ws-pen-viewport`;
+    try {
+      await tab.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+      await tab.click(action('pen-zoom', grid));
+      await tab.click(action('pen-pan', grid));
+      const [left, top, pageScroll] = await tab.js(`(() => {
+        const box = document.querySelector(${quote(viewport)}); box.scrollIntoView({block:'center'});
+        const r = box.getBoundingClientRect(); return [r.left,r.top,scrollY];
+      })()`);
+      for (const [type, dx, dy] of [['touchStart',0,0],['touchMove',-48,-48],['touchMove',-100,-120]]) {
+        await tab.send('Input.dispatchTouchEvent', {type, touchPoints:[{x:left+180+dx,y:top+230+dy}]});
+      }
+      await tab.send('Input.dispatchTouchEvent', {type:'touchEnd', touchPoints:[]});
+      const [dx, dy, after] = await tab.js(`(() => {const box=document.querySelector(${quote(viewport)});
+        return [box.scrollLeft,box.scrollTop,scrollY];})()`);
+      assert(dx > 60 && dy > 60, quote({dx,dy}));
+      assert.equal(after, pageScroll, '크게 펼친 그림 밖의 페이지는 움직이지 않음');
+      assert.equal((await tab.report()).overflow_x, 0);
+      assert.equal((await valuesOf(tab))['q3.2'], undefined);
+      const content = await tab.js(`new DOMParser().parseFromString(sheet.serialize(),'text/html')
+        .querySelector(${quote(`#sheet-src ${grid} > svg[data-map]`)})?.getAttribute('viewBox')`);
+      assert.equal(content, '0 0 57 57', '크게 보기로 저장해도 원래 SVG를 보존');
     } finally { await tab.js('sheet.clearAnswers()'); }
   }, metrics(390,844)));
   await test('늘어난 그리기 칸과 2단·좌우 나눔에서 A4 틀 비율 유지', async () => {
@@ -760,9 +842,60 @@ try {
       for (const measured of [phone[i],tablet[i],print[i]]) assert(Math.abs(measured/expected-1) <= .015, quote({i,measured,expected}));
     }
   }, metrics(390,844)));
-  await test('저장 용량이 차면 경고하고 답과 펜이 모두 저장된 뒤 시각 갱신', () => usingTab(studentInteractive, async tab => {
+  await test('겸용 칸의 저장 실패 뒤에도 본답·그림·시각을 함께 복원', async () => {
+    const key = 'pbj-sheet:interactive-fixture:student', plot = slot('q3.1');
+    const old = { 'q3.1':[0] }, oldPen = { strokes: [[[.2,.5],[.4,.6]]] };
+    await usingTab(studentInteractive, tab => tab.js(`{
+      sheet.clearAnswers();
+      localStorage.setItem(${quote(key)}, ${quote(quote(old))});
+      localStorage.setItem(${quote(key+':pen')}, ${quote(quote({'q3.1':oldPen}))});
+      localStorage.setItem(${quote(key+':saved-at')}, String(+new Date(2024,10,27,9,10)));
+    }`));
+    const picture = tab => tab.js(`(() => {
+      const d=new DOMParser().parseFromString(__sheetCore.serialize(true,true),'text/html');
+      return JSON.parse(d.querySelector(${quote(plot)}).dataset.penValue);
+    })()`);
+    await usingTab(studentInteractive, async tab => {
+      await tab.click(action('resume-answers'));
+      assert.deepEqual(await valuesOf(tab), old);
+      assert.deepEqual(await picture(tab), oldPen);
+      await tab.js(`{
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          // 본답만 든 작은 쓰기는 허용하고, 겸용 펜을 포함한 쓰기는 거부한다.
+          if (value.includes('"strokes"')) throw new DOMException('가득 참','QuotaExceededError');
+          return write.call(this,key,value);
+        };
+      }`);
+      await tab.click(action('pen', plot));
+      await tab.mouseClick(`${plot} canvas`);
+      await tab.js(`sheet.answer('q3.1',[1])`);
+      assert.deepEqual(await valuesOf(tab), {'q3.1':[1]});
+      assert.equal((await picture(tab)).strokes.length, 2);
+      assert.match(await tab.js('document.querySelector(".ws-save-status").textContent'), /저장되지 않았어요/);
+    });
+    await usingTab(studentInteractive, async tab => {
+      try {
+        assert.match(await tab.js('document.querySelector(".ws-restore-dialog").textContent'), /11월 27일 09:10/);
+        await tab.click(action('resume-answers'));
+        assert.deepEqual(await valuesOf(tab), old);
+        assert.deepEqual(await picture(tab), oldPen);
+        await tab.click(action('pen', plot));
+        await tab.mouseClick(`${plot} canvas`);
+        await tab.js(`sheet.answer('q3.1',[1])`);
+      } catch (error) { await tab.js('sheet.clearAnswers()'); throw error; }
+    });
+    await usingTab(studentInteractive, async tab => {
+      try {
+        await tab.click(action('resume-answers'));
+        assert.deepEqual(await valuesOf(tab), {'q3.1':[1]});
+        assert.equal((await picture(tab)).strokes.length, 2);
+      } finally { await tab.js('sheet.clearAnswers()'); }
+    });
+  });
+  await test('저장 용량이 차면 경고하고 다음 저장에 성공하면 시각 갱신', () => usingTab(studentInteractive, async tab => {
     const key = 'pbj-sheet:interactive-fixture:student', status = 'document.querySelector(".ws-save-status")';
-    const savedAt = () => tab.js(`localStorage.getItem(${quote(key + ':saved-at')})`);
+    const saved = () => tab.js(`JSON.parse(localStorage.getItem(${quote(key)}))`);
     const input = value => setInput(tab, `${slot('q1.1')} input`, value);
     try {
       await tab.js(`{ const original = Storage.prototype.setItem;
@@ -772,12 +905,12 @@ try {
         };
         window.testTime=3000; Date.now=()=>window.testTime; }`);
       await input('1');
-      assert.equal(await savedAt(), '3000');
+      const first = await saved();
+      assert.equal(first.savedAt, 3000);
       await tab.js(`window.failKey=${quote(key)}; window.testTime=4000;`);
       await input('2');
       assert.equal((await valuesOf(tab))['q1.1'], '2');
-      assert.equal(await tab.js(`JSON.parse(localStorage.getItem(${quote(key)}))['q1.1']`), '1');
-      assert.equal(await savedAt(), '3000');
+      assert.deepEqual(await saved(), first);
       assert.equal(await tab.js(`${status}.getAttribute('aria-live')`), 'polite');
       assert.match(await tab.js(`${status}.textContent`), /이 기기에 저장되지 않았어요.*답을 넣어 저장/);
       await tab.js("sheet.view('a4')",true);
@@ -786,17 +919,10 @@ try {
       assert.equal(await tab.js(`${status}.checkVisibility()`), false);
       await tab.send('Emulation.setEmulatedMedia', {media:''});
       await tab.js("sheet.view('solve')",true);
-      await tab.js(`window.failKey=${quote(key+':pen')}; window.testTime=5000;`);
-      const plot = slot('q3.1');
-      await tab.click(action('pen', plot));
-      await tab.mouseClick(`${plot} canvas`);
-      assert.equal(await savedAt(), '3000', '겸용 펜 쓰기가 실패해도 시각을 그대로 둠');
-      assert.match(await tab.js(`${status}.textContent`), /저장되지 않았어요/);
       await tab.js('window.failKey=null; window.testTime=6000;');
       await input('3');
-      assert.equal(await savedAt(), '6000');
+      assert.equal((await saved()).savedAt, 6000);
       assert.equal(await tab.js(`${status}.textContent`), '');
-      assert.equal(await tab.js(`JSON.parse(localStorage.getItem(${quote(key+':pen')}))['q3.1'].strokes.length`), 1);
     } finally { await tab.send('Emulation.setEmulatedMedia', {media:''}); await tab.js('sheet.clearAnswers()'); }
   }));
   await test('공개 정책 네 가지·힌트 단계·서술형 예시 답안과 점검표', async () => {
@@ -1207,6 +1333,25 @@ try {
     await eventually(() => tab.js(`window.printed === 'a4' && sheet.view() === 'solve'`), '인쇄 단추 보기 복원');
     await tab.js('sheet.clearAnswers()');
   }));
+  await test('쪽 머리 이름 띠는 풀기 화면에서만 숨기고 A4와 PDF에 남김', async () => {
+    const html = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
+    const band = '<table class="ws-band"><tr><td>쪽 머리 이름 띠</td></tr></table>';
+    const source = html.replace(/<section class="ws-item" data-id="q3"[^>]*>/, match =>
+      `<section class="ws-item" data-id="band" data-break="1">${band}</section>${match}`);
+    assert.notEqual(source, html);
+    await usingTab(await saveFile('interactive-band', source), async tab => {
+      const shown = selector => tab.js(`!!document.querySelector(${quote(selector)})?.checkVisibility()`);
+      assert.equal(await shown('#sheet-flow .ws-band'), false);
+      assert.equal(await shown(`#sheet-flow ${item('band')}`), false, '빈 문항 상자도 남기지 않음');
+      assert(await shown('#sheet-flow .ws-head .ws-name-slot input'));
+      await tab.js("sheet.view('a4')", true);
+      assert(await shown('#sheet-pages .ws-band'));
+      assert.match(await pdf(tab, 'nameband', (await tab.report()).pages.length), /쪽\s*머리\s*이름\s*띠/);
+      await tab.js("sheet.view('solve')", true);
+      assert.equal(await shown('#sheet-flow .ws-band'), false);
+      assert(await tab.js(`!!new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('#sheet-src .ws-band')`));
+    }, metrics(390,844,true));
+  });
   await test('두 단은 넓을 때 나란히 좁을 때 문서 순서대로', async () => usingTab(lesson, async tab => {
     const two = await tab.js(`sheet.exportStudent().replace('data-columns="2"','data-columns="2" data-interactive="1"')`);
     await usingTab(await saveFile('interactive-columns',two), async student => {
@@ -1439,10 +1584,11 @@ try {
     const url = await saveFile('sync-restore', withSync(studentSource).replace('<script id="sheet-js">',
       '<script>delete HTMLElement.prototype.inert;<\/script><script id="sheet-js">'));
     await usingTab(url, async tab => {
-      await tab.js(`sheet.clearAnswers(); localStorage.clear(); syncMock.fail = true; sheet.answer('head.이름','앞 학생'); sheet.answer('q1.1','0.5')`);
+      await tab.js(`sheet.clearAnswers(); localStorage.clear(); syncMock.fail = true;
+        Date.now = () => +new Date(2024,10,27,9,10);
+        sheet.answer('head.이름','앞 학생'); sheet.answer('q1.1','0.5')`);
       await tab.click(action('check',item('q1')));
       await eventually(() => tab.js('Object.keys(localStorage).some(k=>k.endsWith(":queue"))'), '앞 학생 전송 대기');
-      await tab.js(`localStorage.setItem(${quote(key + ':saved-at')}, String(+new Date(2024,10,27,9,10)))`);
     });
     await usingTab(url, async tab => {
       assert.deepEqual(await valuesOf(tab),{});
@@ -1459,7 +1605,7 @@ try {
       assert.equal(await tab.js(`sheet.answer('q1.1','2')`), null);
       assert.equal(await tab.js(`(() => { const v=document.querySelector('main video'); v.focus(); return document.activeElement === v; })()`), false);
       await tab.click(action('start-fresh'));
-      assert.equal(await tab.js(`localStorage.getItem(${quote(key)})`),quote(old));
+      assert.deepEqual(await tab.js(`JSON.parse(localStorage.getItem(${quote(key)})).answers`),old);
       assert.equal(await tab.js('document.activeElement.dataset.sheetAction'), 'cancel-start-fresh');
       await tab.click(action('cancel-start-fresh'));
       assert.equal(await tab.js('document.activeElement.dataset.sheetAction'), 'start-fresh');
@@ -1773,7 +1919,7 @@ try {
       {client_id:'five',build:'interactive-',created_at:'2026-01-02T04:00:00Z',student:{'이름':'제출 학생','학급':'1','번호':'4'},event:'submit',
         answers:{'q1.1':'제출 유지'},verdicts:{'q1.1':true},score:{correct:1,checked:1}},
       {client_id:'one',build:'old123456789',created_at:'2026-01-02T12:00:00Z',student:a,event:'check',item:'q1',
-        answers:{'q1.1':'옛 확인 답','q1.5':{strokes:[[[.2,.3],[.8,.7]]]}},verdicts:{'q1.1':false},score:{correct:0,checked:1}},
+        answers:{'q1.1':'옛 확인 답','q1.5':{strokes:[[[1.2,.5],[.5,1.2],[-.2,.5],[.5,-.2],[1.2,.5]]]}},verdicts:{'q1.1':false},score:{correct:0,checked:1}},
       {client_id:'one',build:'interactive-',created_at:'2026-01-02T11:00:00Z',student:a,event:'check',item:'q1',
         answers:{'q1.1':'현재 수정'},verdicts:{'q1.1':false},score:{correct:0,checked:1}},
       {client_id:'one',build:'interactive-',created_at:'2026-01-02T10:00:00Z',student:a,event:'submit',

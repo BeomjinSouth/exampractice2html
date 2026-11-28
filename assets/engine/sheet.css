@@ -392,7 +392,7 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 }
 :is(canvas.ws-pen, svg.ws-pen-ink) { position: absolute; inset: 0; width: 100%; height: 100%; }
 .ws-pen { touch-action: none; cursor: crosshair; }
-.ws-item svg.ws-pen-ink { display: none; margin: 0; pointer-events: none; }
+.ws-item svg.ws-pen-ink { display: none; margin: 0; overflow: hidden; pointer-events: none; }
 .ws-pen-ink polyline {
   fill: none; stroke: #161616; stroke-width: 1.8px; stroke-linecap: round; stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
@@ -404,10 +404,17 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 :root[data-role="teacher"]:not([data-sheet-preview]) :is(.ws-draw-frame, .ws-pen-tools, .ws-pen-status) { display: none !important; }
 .ws-pen-tools { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-block-start: 4px; }
 .ws-pen-tools button { white-space: nowrap; }
+.ws-pen-zoom { display: none; }
 @media screen and (max-width: 719.98px) {
   #sheet-flow .ws-draw-table col:first-child { width: 20% !important; }
   #sheet-flow .ws-draw-table col:last-child { width: 80% !important; }
   #sheet-flow .ws-pen-tools button { padding-inline: 5px; min-height: 30px; }
+  #sheet-flow .ws-pen-zoom { display: inline-block; }
+  #sheet-flow .ws-pen-viewport { max-height: min(50vh, 420px); overflow: auto; overscroll-behavior: contain; }
+  #sheet-flow .ws-pen-viewport.ws-pen-pan { touch-action: none; cursor: grab; }
+  #sheet-flow .ws-pen-viewport.ws-pen-pan svg[data-map] { cursor: grab; }
+  #sheet-flow .ws-pen-stage { position: relative; width: 200%; }
+  #sheet-flow .ws-pen-stage > :is(img, svg) { display: block; width: 100%; height: auto; }
 }
 :root[data-role="student"] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
 :root[data-sheet-preview] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
@@ -419,7 +426,8 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   font: calc(10pt * var(--sheet-body-scale))/1.6 var(--sheet-body-font);
   word-break: keep-all; overflow-wrap: anywhere;
 }
-#sheet-flow :is(.ws-head, .ws-band, .ws-lab, .ws-step-n, .ws-data thead th, .ws-steps thead th) { word-break: inherit; }
+#sheet-flow .ws-band { display: none; }
+#sheet-flow :is(.ws-head, .ws-lab, .ws-step-n, .ws-data thead th, .ws-steps thead th) { word-break: inherit; }
 :root[data-view="solve"] body { background: #f4f4f4; }
 #sheet-flow .ws-item {
   min-width: 0; margin: 0; padding: 16px; box-sizing: border-box;
@@ -489,7 +497,8 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 @media screen and (max-width: 719.98px) {
   #sheet-flow :is(.ws-split, .ws-flow-cols) { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   #sheet-flow .ws-choices { grid-template-columns: repeat(auto-fit, minmax(min(100%, 95px), 1fr)); }
-  #sheet-flow .ws-chart > svg[data-chart="box"] text { font-size: var(--ws-box-phone-font); }
+  #sheet-flow .ws-chart > svg[data-chart="box"] text,
+  #sheet-flow .ws-chart .ws-pen-stage > svg[data-chart="box"] text { font-size: var(--ws-box-phone-font); }
   #sheet-flow .ws-item { padding: 12px; }
 }
 /* 기존 기기에서도 잘림 방지 규칙이 적용되도록 고전 미디어 쿼리를 쓴다. */

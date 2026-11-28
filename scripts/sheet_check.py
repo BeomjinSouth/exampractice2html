@@ -473,24 +473,42 @@ def _audit_graph_labels(pdf, regions, role, problems):
     return measured
 
 
-_PEN_ASPECT_JS = """(() => Object.fromEntries([...document.querySelectorAll(%s)]
+_PEN_SIZES_JS = """(() => Object.fromEntries([...document.querySelectorAll(%s)]
   .filter(layer => layer.getClientRects().length)
   .map(layer => {
-    const r = layer.getBoundingClientRect();
-    return [layer.closest('[data-slot]')?.dataset.slot, r.height ? r.width / r.height : 0];
+    const {width, height} = layer.getBoundingClientRect();
+    return [layer.closest('[data-slot]')?.dataset.slot, {width_px: width, height_px: height}];
   }).filter(([slot]) => slot)))()"""
 
 
-def _pen_aspects(protocol, *, print_media=False):
+def _pen_sizes(protocol, *, print_media=False):
     selector = '#sheet-pages svg.ws-pen-ink[data-sheet-runtime]' if print_media else '#sheet-flow canvas.ws-pen'
-    return protocol.evaluate(_PEN_ASPECT_JS % json.dumps(selector)) or {}
+    return protocol.evaluate(_PEN_SIZES_JS % json.dumps(selector)) or {}
+
+
+def _pen_aspects(sizes):
+    return {slot: size['width_px'] / size['height_px'] if size['height_px'] else 0 for slot, size in sizes.items()}
+
+
+_PEN_ZOOM_JS = """(async () => {
+  const buttons = [...document.querySelectorAll('#sheet-flow [data-sheet-action="pen-zoom"]')]
+    .filter(button => button.getClientRects().length && button.getAttribute('aria-pressed') === 'false');
+  if (!buttons.length) return null;
+  try {
+    for (const button of buttons) button.click();
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    return {pen_sizes: (%s), overflow_x: sheet.report().overflow_x};
+  } finally {
+    for (const button of buttons) button.click();
+  }
+})()"""
 
 
 def _print_pen_aspects(protocol):
     protocol.call('Emulation.setEmulatedMedia', {'media': 'print'})
     try:
         protocol.evaluate("sheet.view('a4')", True)
-        return _pen_aspects(protocol, print_media=True)
+        return _pen_aspects(_pen_sizes(protocol, print_media=True))
     finally:
         protocol.call('Emulation.setEmulatedMedia', {'media': ''})
 
@@ -776,7 +794,8 @@ def _interactive_check(protocol, out, table, problems):
             elif overflow > 1:
                 _problem(problems, "error", "screen-overflow", None, None,
                          f"{name}: 가로로 {overflow}px 넘칩니다.", "해당 폭의 표·그림·문항 배치를 고치세요.")
-            _audit_pen_aspects(_pen_aspects(protocol), printed_aspects, name, problems)
+            pen_sizes = _pen_sizes(protocol)
+            _audit_pen_aspects(_pen_aspects(pen_sizes), printed_aspects, name, problems)
             size = protocol.call("Page.getLayoutMetrics").get("cssContentSize", {})
             full_height = max(height, math.ceil(size.get("height", height)))
             data = protocol.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True,
@@ -786,8 +805,18 @@ def _interactive_check(protocol, out, table, problems):
                 _archive(path, out)
             path.write_bytes(base64.b64decode(data, validate=True))
             files.append(path)
-            info["screens"].append({"file": str(path), "width": width, "height": height,
-                                    "image_height": full_height, "view": report.get("view"), "overflow_x": overflow})
+            screen_entry = {"file": str(path), "width": width, "height": height, "pen_sizes": pen_sizes,
+                            "image_height": full_height, "view": report.get("view"), "overflow_x": overflow}
+            if width == 390 and pen_sizes:
+                zoom = protocol.evaluate(_PEN_ZOOM_JS % (_PEN_SIZES_JS % json.dumps('#sheet-flow canvas.ws-pen')), True)
+                if zoom is not None:
+                    screen_entry['pen_zoom'] = zoom
+                    _audit_pen_aspects(_pen_aspects(zoom['pen_sizes']), printed_aspects, '폰 화면 크게 보기', problems)
+                    if zoom['overflow_x'] > 1:
+                        _problem(problems, 'error', 'screen-overflow', None, None,
+                                 f"폰 화면에서 펜 그림을 크게 펼치면 가로로 {zoom['overflow_x']}px 넘칩니다.",
+                                 '크게 펼친 그림은 그림 칸 안에서만 움직이게 하세요.')
+            info["screens"].append(screen_entry)
         if table is not None:
             rows = table["slots"]
             info["answer_slots"] = len(rows)
@@ -826,8 +855,9 @@ def _interactive_check(protocol, out, table, problems):
                     or not isinstance(screen.get('clipped'), list)
                     or any(not isinstance(slot, str) for slot in screen['clipped'])):
                 raise CheckError('답을 채운 폰 화면의 넘침을 확인할 수 없습니다.')
+            screen['pen_sizes'] = _pen_sizes(protocol)
             info['filled_screen'] = screen
-            filled_aspects = _pen_aspects(protocol)
+            filled_aspects = _pen_aspects(screen['pen_sizes'])
             if screen['overflow_x'] > 1:
                 _problem(problems, 'error', 'filled-screen-overflow', None, None,
                          f"답과 정답을 보이는 폰 화면이 가로로 {screen['overflow_x']}px 넘칩니다.",

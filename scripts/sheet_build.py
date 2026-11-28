@@ -2117,16 +2117,20 @@ def education_settings(data, student_doc, *, edited=False):
         raise ValueError('학생용 본문이 없습니다.')
     items = {el.attrs['data-id']: el for el in public.elements()
              if el.has('ws-item') and el.attrs.get('data-id') not in (None, 'head')}
-    forms = {item['id']: {key: item[key] for key in EDUCATION_FORM_KEYS if key in item}
-             for item in data['items']}
+    explicit = {item['id']: {key: item[key] for key in EDUCATION_FORM_KEYS if key in item} for item in data['items']}
+    forms = {}
+    for id_, item in items.items():
+        # 발문에서 읽은 요구도 판정을 바꾸므로 학생용 문항에 실제로 붙은 요구를 기록한다.
+        applied = {key: item.attrs[attr] for key in EDUCATION_FORM_KEYS
+                   if item.attrs.get(attr := 'data-' + key.replace('_', '-'))}
+        row = {key: value for key, value in (applied or explicit.get(id_, {})).items() if value != '자유'}
+        if row:
+            forms[id_] = row
     if edited:
         root = next(el for el in student_doc.root.elements() if el.tag == 'html')
         kind = root.attrs.get('data-kind', kind)
         interactive = 'data-interactive' in root.attrs
         policy = root.attrs.get('data-reveal', policy)
-        for id_, item in items.items():
-            if item.attrs.get('data-fraction-form-explicit') == '1' and item.attrs.get('data-fraction-form'):
-                forms.setdefault(id_, {})['fraction_form'] = item.attrs['data-fraction-form']
     counts = dict.fromkeys(EDUCATION_COUNT_LABELS, 0)
     counts['items'] = len(items) if edited else len(data['items'])
     for item in items.values():
@@ -2138,19 +2142,29 @@ def education_settings(data, student_doc, *, edited=False):
             if el.tag == 'figure' and el.attrs.get('data-pen') == '1':
                 counts['pen_figures'] += 1
     return {'version': 1, 'meta': {'kind': kind, 'interactive': interactive, 'reveal': policy},
-            **counts, 'forms': {id_: values for id_, values in forms.items() if values and id_ in items}}
+            **counts, 'forms': forms}
 
 
-def _record_first_settings(path, data, student_doc):
-    if path.exists():
-        return
-    snapshot = json_bytes(education_settings(data, student_doc))
-    # 동시 조립에서도 처음 생성한 파일을 덮어쓰지 않는다.
+def _record_first_settings(path, data, student_doc, previous=None):
+    """첫 조립의 교육 설정을 정한다. 조립 기록의 사본이 기준이고 파일은 읽기용으로 되살린다."""
+    snapshot = previous if isinstance(previous, dict) else None
+    if snapshot is None and path.exists():
+        try:
+            snapshot = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError):
+            return None  # 깨진 예전 기준은 덮어쓰지 않고 status가 알리게 둔다.
+        if not isinstance(snapshot, dict):
+            return None
+    if snapshot is None:
+        snapshot = education_settings(data, student_doc)
+    payload = json_bytes(snapshot)
     try:
-        with path.open('xb') as output:
-            output.write(snapshot)
-    except FileExistsError:
-        pass
+        unchanged = path.read_bytes() == payload
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        atomic_write(path, payload)
+    return snapshot
 
 
 def cmd_build(folder: Path, force=False) -> int:
@@ -2196,7 +2210,13 @@ def cmd_build(folder: Path, force=False) -> int:
     atomic_write(teacher, teacher_data)
     atomic_write(student, student_data)
     update_answer_table(folder, answers)
-    _record_first_settings(record_path.parent / FIRST_SETTINGS_FILE, data, student_doc)
+    try:
+        previous = json.loads(record_path.read_text(encoding='utf-8-sig')).get('first_settings')
+    except (OSError, ValueError, AttributeError):
+        previous = None
+    first = _record_first_settings(record_path.parent / FIRST_SETTINGS_FILE, data, student_doc, previous)
+    if first is not None:
+        record['first_settings'] = first
     atomic_write(record_path, json_bytes(record))
     for message in warnings:
         print(f'경고: {message}')

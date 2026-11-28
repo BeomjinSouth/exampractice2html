@@ -864,6 +864,8 @@ class CheckBoundaryTest(unittest.TestCase):
                             ('관계식 $ay=2x$를 사용하시오.', False),
                             ('관계식 $y=2x^2$를 사용하시오.', False),
                             ('관계식 $y=2x$와 $y=2x+1$을 비교하시오.', True),
+                            ('두 식 $y=2x, y=3x$를 비교하시오.', True),
+                            ('점 $(x,y)=(1,2)$를 찍으시오.', False),
                             ('첫 번째 식은 $2 x = y$입니다.', True),
                             ('관계식은 y = 2x. 그래프로 나타내시오.', True)]:
             with self.subTest(text=text):

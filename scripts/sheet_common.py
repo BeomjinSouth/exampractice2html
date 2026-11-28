@@ -166,7 +166,8 @@ def find_usable_python():
 
 
 def python_sheet_command(executable, command):
-    executable, script = str(executable), str(ROOT / 'scripts/sheet.py')
+    executable = sys.executable if str(executable) == 'python' else str(executable)
+    script = str(ROOT / 'scripts/sheet.py')
     if sys.platform == 'win32':
         # PowerShell expands $ and backticks even inside double-quoted paths.
         executable, script = (part.replace('`', '``').replace('$', '`$') for part in (executable, script))

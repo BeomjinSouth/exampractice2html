@@ -530,6 +530,40 @@ try {
     assert.deepEqual((await valuesOf(tab))['q3.1'], [], '점 찍기로 돌아가 같은 점을 지움');
     await tab.js('sheet.clearAnswers()');
   }));
+  await test('펜 인쇄는 밑그림 위에 SVG 획만 남김', () => usingTab(studentInteractive, async tab => {
+    const standalone = [slot('q1.5'), slot('q4.1')], grid = slot('q3.2');
+    const targets = [...standalone, grid];
+    const layers = () => tab.js(`${quote(targets)}.map(s => {
+      const el=document.querySelector(s), canvas=el.querySelector('canvas.ws-pen'), ink=el.querySelector('svg.ws-pen-ink');
+      const base=el.querySelector('svg:not(.ws-pen-ink), img') || el;
+      const geometry=n=>{const {left,top,width,height}=n.getBoundingClientRect();return [left,top,width,height];};
+      return { canvas:canvas.checkVisibility(), ink:ink?.checkVisibility(), strokes:ink?.querySelectorAll('polyline').length,
+        position:ink && geometry(ink), base:geometry(base), baseVisible:base.checkVisibility() };
+    })`);
+    try {
+      assert((await layers()).every(r => r.canvas && !r.ink));
+      await tab.js(`sheet.view('a4')`, true);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      const blank = await layers();
+      assert(blank.every(r => !r.canvas && r.ink && r.strokes === 0 && r.baseVisible), quote(blank));
+      await tab.send('Emulation.setEmulatedMedia', {media:''});
+      await tab.js(`sheet.view('solve')`, true);
+      const strokes = [[[.1,.2],[.8,.6]], [[.4,.4]]];
+      await tab.js(`sheet.answer('q1.5',{strokes:${quote(strokes)}}); sheet.answer('q4.1',{strokes:${quote(strokes)}});
+        sheet.answer('q3.2',[[1,2]])`);
+      await tab.click(action('pen', grid));
+      await tab.mouseClick(`${grid} canvas.ws-pen`);
+      await tab.js(`sheet.view('a4')`, true);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      assert.deepEqual((await layers()).map(r => [r.canvas,r.ink,r.strokes,r.baseVisible]),
+        [[false,true,2,true],[false,true,2,true],[false,true,1,true]]);
+      for (const r of (await layers()).slice(1)) assert.deepEqual(r.position, r.base, '잉크와 밑그림의 위치·크기');
+      assert.equal(await tab.js(`document.querySelectorAll('${grid} .ws-user-point').length`), 1);
+      assert.equal(await tab.js(`!!new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('.ws-pen-ink')`), false);
+      await tab.js('sheet.clearAnswers()');
+      assert.deepEqual((await layers()).map(r => r.strokes), [0,0,0]);
+    } finally { await tab.js('sheet.clearAnswers()'); await tab.send('Emulation.setEmulatedMedia', {media:''}); await tab.js(`sheet.view('solve')`, true); }
+  }));
   await test('공개 정책 네 가지·힌트 단계·서술형 예시 답안과 점검표', async () => {
     for (const policy of ['시도 후','바로','교사만','없음']) {
       await usingTab(policy === '시도 후' ? interactive : await fixture('interactive',policy), async tab => {
@@ -598,6 +632,47 @@ try {
       });
     }
   });
+  await test('자동 판별 자리가 없으면 학생 도구 막대에 점수를 표시하지 않음', async () => {
+    const source = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
+    const withoutAuto = source.replaceAll(/ data-check-hash="[^"]+"/g, '')
+      .replaceAll(/data-check-kind="(?:number|text|choice|ox|order|match|points|line|bars)"/g, 'data-check-kind="open"');
+    for (const [name, html] of [['reveal-none', source.replace('data-reveal="시도 후"','data-reveal="없음"')],
+      ['all-open', withoutAuto]]) {
+      await usingTab(await saveFile(`no-score-${name}`, html), async tab => {
+        assert.deepEqual(await tab.js('sheet.score()'), {checked:0,correct:0,total:0});
+        assert.doesNotMatch(await tab.js('document.querySelector("#sheet-toolbar").innerText'), /맞힌 수|자동 판별/);
+        assert.equal(await tab.js('!!document.querySelector(".ws-score")?.checkVisibility()'), false);
+      });
+    }
+  });
+  await test('폰 자료표 안내는 표가 넘칠 때만 보이고 주어진 값 칸의 폭을 보장', () => usingTab(studentInteractive, async tab => {
+    const input = `${slot('q1.2')} input`;
+    const geometry = () => tab.js(`(() => {
+      const table = document.querySelector('#sheet-flow .ws-split .ws-data');
+      const cell = table.tBodies[0].rows[0].cells[0];
+      return { overflow:table.scrollWidth-table.clientWidth, cue:getComputedStyle(table,'::after').content,
+        givenWidth:cell.getBoundingClientRect().width }; })()`);
+    const expectCue = async (shown) => {
+      const r = await geometry();
+      assert.equal(r.overflow > 1, shown, quote(r));
+      assert.equal(r.cue.includes('좌우'), shown, quote(r));
+      assert.equal((await tab.report()).overflow_x, 0);
+    };
+    await expectCue(false);
+    await tab.js(`document.querySelector('#sheet-flow .ws-split .ws-data tbody td').innerHTML = '<math><mfrac><mn>1</mn><mn>2</mn></mfrac></math>';`);
+    assert((await geometry()).givenWidth >= 32, '주어진 분수가 독립해서 읽힐 열 폭');
+    await setInput(tab, input, '1'.repeat(46));
+    await expectCue(true);
+    await tab.send('Emulation.setDeviceMetricsOverride', metrics(680,844,true));
+    await eventually(async () => !(await geometry()).cue.includes('좌우'), '폭 확대 후 안내 숨김');
+    await expectCue(false);
+    await tab.send('Emulation.setDeviceMetricsOverride', metrics(390,844,true));
+    await eventually(async () => (await geometry()).cue.includes('좌우'), '폭 축소 후 안내 표시');
+    await expectCue(true);
+    await setInput(tab, input, '');
+    await expectCue(false);
+    await tab.js('sheet.clearAnswers()');
+  }, metrics(390,844,true)));
   const contractFolder = path.join(work, 'contract-worksheet');
   const contractTitle = '판별과 인쇄 시험';
   const contractStudent = pathToFileURL(path.join(contractFolder, `${contractTitle}.html`)).href;
@@ -1064,17 +1139,26 @@ try {
       await tab.js('sheet.clearAnswers()');
     });
   });
-  await test('MathML 배치가 안 될 때만 풀기 화면에 안내', async () => {
-    const broken = await saveFile('mathml-no-layout', (await fs.readFile(fileURLToPath(studentInteractive),'utf8'))
-      .replace('</head>','<style>math, mfrac, msup, math * { display:inline !important; }</style></head>'));
-    await usingTab(studentInteractive, async tab => assert.equal(await tab.js('!!document.querySelector(".ws-math-notice")'),false));
-    await usingTab(broken, async tab => {
-      assert.equal(await tab.js('document.querySelector(".ws-math-notice")?.checkVisibility()'),true);
-      assert.match(await tab.js('document.querySelector(".ws-math-notice").textContent'),/수식.*최신 브라우저/);
-      await tab.js(`sheet.view('a4')`,true);
-      assert.equal(await tab.js('document.querySelector(".ws-math-notice").checkVisibility()'),false);
-      assert.equal((await tab.report()).print_leaks,0);
-    }, metrics(390,844,true));
+  await test('MathML 미지원 안내는 교사·학생의 두 화면에만 표시', async () => {
+    const visible = tab => tab.js('!!document.querySelector(".ws-math-notice")?.checkVisibility()');
+    const warn = html => html.replace('</head>', '<style>math, mfrac, msup, math * { display:inline !important; }</style></head>');
+    const student = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
+    const teacher = await fs.readFile(fileURLToPath(interactive), 'utf8');
+    for (const [name, html, firstView] of [['student', student, 'solve'],
+      ['static-student', student.replace(' data-interactive="1"',''), 'a4'], ['teacher', teacher, 'a4']]) {
+      await usingTab(await saveFile(`mathml-supported-${name}`, html), async tab => assert.equal(await visible(tab), false));
+      await usingTab(await saveFile(`mathml-broken-${name}`, warn(html)), async tab => {
+        assert.equal(await tab.js('sheet.view()'), firstView);
+        assert.equal(await visible(tab), true, name);
+        assert.match(await tab.js('document.querySelector(".ws-math-notice").textContent'), /수식.*최신 브라우저.*PDF/);
+        await tab.js(`sheet.view('a4')`, true);
+        assert.equal(await visible(tab), true, `${name} A4 화면`);
+        assert.equal((await tab.report()).print_leaks, 0);
+        await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+        assert.equal(await visible(tab), false, `${name} 인쇄`);
+        assert.equal(await tab.js(`!!new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelector('.ws-math-notice')`), false);
+      }, metrics(390,844,true));
+    }
   });
   await test('1판에는 2판 장치가 없고, 영상은 누를 때만 임베드', async () => {
     const staticHtml = await usingTab(interactive, tab => tab.js(`sheet.exportStudent().replace(' data-interactive="1"','')`));

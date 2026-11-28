@@ -1061,6 +1061,15 @@
       else if (!command && !event.shiftKey && !event.repeat && key === 'a') { event.preventDefault(); setAnswers(!answersOn()); }
     });
   }
+  function mathLayoutWorks() {
+    const probe = make('div');
+    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;font-size:32px';
+    probe.innerHTML = '<math><mfrac><mn>1</mn><mn>2</mn></mfrac><msup><mi>x</mi><mn>2</mn></msup></math>';
+    document.body.append(probe);
+    const [numerator, denominator, base, exponent] = all(probe, 'mn, mi').map(rect);
+    probe.remove();
+    return numerator.width > 0 && numerator.top < denominator.top && exponent.width > 0 && exponent.top < base.top;
+  }
   async function init() {
     if (document.readyState === 'loading') await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
     src = byId('sheet-src');
@@ -1086,6 +1095,12 @@
     layout();
     root.removeAttribute('data-sheet-preparing');
     createToolbar();
+    if (!mathLayoutWorks()) {
+      const warning = make('p', 'ws-math-notice', '이 브라우저에서는 수식이 제대로 보이지 않아요. 최신 브라우저로 열거나 함께 받은 PDF를 보세요.');
+      warning.dataset.sheetRuntime = '';
+      warning.setAttribute('role', 'status');
+      main.before(warning);
+    }
     if (teacher) bindEditor();
     solve?.init();
     if (teacher) originalEditionContent = editionContent();

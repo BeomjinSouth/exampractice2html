@@ -448,6 +448,15 @@ try {
         assert.deepEqual(await tab.js(`__sheetCore.codec.${name}(...${quote(args)})`), expected, `${name}: ${quote(args)}`);
       }
     }
+    for (const spec of cases.writing_results) {
+      const result = await tab.js(`(() => {
+        const {kind, answer, unit, form, strict, cases} = ${quote(spec)};
+        const codec = __sheetCore.codec;
+        const forms = codec.writing_forms(kind, [codec.plain(answer)], unit);
+        return cases.map(([value]) => codec.writing_result(kind, value, v => forms.includes(v), form, strict, !!unit));
+      })()`);
+      assert.deepEqual(result, spec.cases.map(([, expected]) => expected), quote(spec));
+    }
     for (const [s, kind, value, expected] of cases.hash) {
       assert.equal(await tab.js(`__sheetCore.codec.hash(${[s,kind,value].map(quote).join(',')})`), expected);
       assert.equal(expected, hash(s,kind,value));
@@ -475,7 +484,7 @@ try {
     assert.equal(await tab.js(`sheet.answer('q3.3',[[1,1],[1,1]])`), null);
     assert.equal(await tab.js(`sheet.answer('q1.4','분자와 분모에 같은 수를 사용했어요.')`), null);
     await tab.js('sheet.clearAnswers()');
-    const filled = `${slot('q1.3')} textarea`;
+    const filled = `${slot('q1.3')} input`;
     await tab.mouseClick(filled); await paste(tab, '1');
     assert.equal((await valuesOf(tab))['q1.3'], '1');
     await tab.click(action('check', item('q1')));
@@ -966,7 +975,7 @@ try {
           await tab.click(action('compare',q1));
           assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare input').checkVisibility()`), true);
           assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare math')?.textContent`), '2');
-          await setInput(tab, `${slot('q1.3')} textarea`, '');
+          await setInput(tab, `${slot('q1.3')} input`, '');
           assert.equal(await status('compare'), true);
           assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare').hidden`), true);
           if (policy === '시도 후') assert.equal(await status('reveal-solution'), true);
@@ -1484,7 +1493,9 @@ try {
     const exported = await tab.js('sheet.exportStudent()');
     assert.doesNotMatch(exported,/앞칸 \{\{|data-check="\{/);
     await usingTab(await saveFile('edited-interactive-student',exported),async copy=>{
-      assert.equal(await copy.js(`sheet.answer('q1.2','6/8')`),true);
+      assert.equal(await copy.js(`sheet.answer('q1.2','3/4')`),true);
+      await copy.js(`sheet.answer('q1.2','6/8')`);
+      assert.equal(await copy.js(`__sheetCore.verdicts()['q1.2']`),'review');
       assert.equal(await copy.js(`sheet.answer('q1.2','1/2')`),false);
       assert.equal(await copy.js(`sheet.answer('q1.4','2')`),true);
       assert.equal(await copy.js(`sheet.answer('q1-copy-1.2','0.75')`),true);
@@ -1531,6 +1542,89 @@ try {
     const teacher = path.join(folder, `${title} (교사용).html`), student = path.join(folder, `${title}.html`);
     return { teacher, student, derive:() => cli('derive', teacher), open:p => pathToFileURL(p).href };
   }
+  const mathWriting = () => buildEditorCase('수식-답-판별', [
+    {id:'symbols', blocks:[{type:'question', text:'길이 {{|$4\\pi$}} cm와 근호 {{|$2\\sqrt{3}$}}를 써 봅시다.'}]},
+    {id:'strict', blocks:[{type:'situation', lines:['기약분수로 써 봅시다.']},
+      {type:'question', text:'비는 {{|$\\dfrac{3}{5}$}}입니다.'}]},
+    {id:'general', blocks:[{type:'question', text:'비는 {{|$\\frac{3}{5}$}}입니다.'},
+      {type:'answer', rows:[{label:'짧은 답', lines:2, answer:'$4$'}, {label:'설명', lines:3, answer:'두 줄 답', check:'off'}]}]},
+    {id:'unchecked', blocks:[{type:'question', text:'식은 {{|$x+x+x+x+x+x+x+x$}}입니다.'}]}
+  ]);
+  let mathWritingFiles;
+  await test('폰에서 π와 √를 입력 위치에 넣고 A4 보기와 인쇄에서는 숨김', async () => {
+    const files = mathWritingFiles = await mathWriting();
+    const student = await fs.readFile(files.student, 'utf8');
+    assert.doesNotMatch(student, /data-check=|4π|2√3/);
+    await usingTab(files.open(files.student), async tab => {
+      const insert = async (id, symbol, before, caret, after) => {
+        const field = `${slot(id)} input`;
+        await setInput(tab, field, before);
+        await tab.js(`document.querySelector(${quote(field)}).setSelectionRange(${caret}, ${caret})`);
+        await tab.mouseClick(`${slot(id)} + .ws-symbols [data-symbol="${symbol}"]`);
+        assert.equal((await valuesOf(tab))[id], after);
+      };
+      await insert('symbols.1', 'π', '4 cm', 1, '4π cm');
+      await insert('symbols.2', '√', '23', 1, '2√3');
+      await tab.click(action('check', item('symbols')));
+      assert.deepEqual(await tab.js(`Object.values(__sheetCore.verdicts()).slice(0,2)`), [true,true]);
+      const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el => el.getClientRects().length).length`);
+      assert.equal(await visible(), 2);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      assert.equal(await visible(), 0);
+      await tab.send('Emulation.setEmulatedMedia', {media:'screen'});
+      await tab.js(`sheet.view('a4')`);
+      assert.equal(await visible(), 0);
+      await tab.js(`sheet.view('solve'); sheet.clearAnswers()`);
+    }, metrics(390,844,true));
+  });
+  await test('Enter는 한 줄에서만 문항을 확인하고 한글 조합 중에는 무시', async () => {
+    const files = mathWritingFiles ??= await mathWriting();
+    await usingTab(files.open(files.student), async tab => {
+      const field = `${slot('symbols.1')} input`, short = `${slot('general.2')} input`;
+      await tab.js(`sheet.clearAnswers(); window.checkedItems = []; document.addEventListener('sheet:check', e => checkedItems.push(e.detail.item));`);
+      await setInput(tab, field, '4pi');
+      await tab.mouseClick(field);
+      await tab.js(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true, isComposing:true}))`);
+      assert.deepEqual(await tab.js('checkedItems'), []);
+      await tab.key('Enter');
+      assert.equal(await tab.js(`__sheetCore.verdicts()['symbols.1']`), true);
+      await setInput(tab, short, '4');
+      await tab.mouseClick(short); await tab.key('Enter');
+      assert.equal(await tab.js(`__sheetCore.verdicts()['general.2']`), true);
+      const long = `${slot('general.3')} textarea`;
+      await tab.mouseClick(long); await paste(tab, '첫 줄');
+      const enter = {key:'Enter', code:'Enter', windowsVirtualKeyCode:13};
+      await tab.send('Input.dispatchKeyEvent', {type:'keyDown', text:'\r', ...enter});
+      await tab.send('Input.dispatchKeyEvent', {type:'keyUp', ...enter});
+      await paste(tab, '둘째 줄');
+      assert.equal((await valuesOf(tab))['general.3'], '첫 줄\n둘째 줄');
+      await tab.mouseClick(`${slot('unchecked.1')} input`); await tab.key('Enter');
+      assert.deepEqual(await tab.js('checkedItems'), ['symbols','general']);
+      await tab.js('sheet.clearAnswers()');
+    });
+  });
+  await test('같은 값의 분수도 문항의 기약분수 요구에 따라 판별', async () => {
+    const files = mathWritingFiles ??= await mathWriting();
+    await usingTab(files.open(files.student), async tab => {
+      await tab.js('sheet.clearAnswers()');
+      for (const [id, value, expected] of [
+        ['strict','6/10',false], ['strict','0.6',false], ['strict','3/5',true],
+        ['general','6/10','review'], ['general','0.60',true]
+      ]) {
+        await setInput(tab, `${slot(id + '.1')} input`, value);
+        await tab.click(action('check', item(id)));
+        assert.equal(await tab.js(`__sheetCore.verdicts()[${quote(id + '.1')}]`), expected);
+        if (expected === 'review') {
+          const result = `${item(id)} .ws-verdict.ws-review`;
+          assert.match(await tab.js(`document.querySelector(${quote(result)}).textContent`), /기약분수로 나타냈는지/);
+        }
+      }
+      await setInput(tab, `${slot('symbols.2')} input`, '√12');
+      await tab.click(action('check', item('symbols')));
+      assert.equal(await tab.js(`__sheetCore.verdicts()['symbols.2']`), 'review');
+      await tab.js('sheet.clearAnswers()');
+    });
+  });
   async function editField(tab, selector, value) {
     await tab.mouseClick(selector, 2);
     assert.notEqual(await draft(tab), undefined, `편집 입력: ${selector}`);

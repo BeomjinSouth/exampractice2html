@@ -92,6 +92,8 @@ class MathParser:
                 return f'<mi mathvariant="normal">{symbol}</mi>', symbol
             tag = 'mi' if name == 'pi' else 'mo'
             return f'<{tag}>{symbol}</{tag}>', symbol
+        if name in ('sin', 'cos', 'tan'):
+            return f'<mo form="prefix" lspace="0em" rspace="0.1667em">{name}</mo>', name + ' '
         if name == 'quad':
             return '<mspace width="1em"></mspace>', ' '
         if name == 'begin':
@@ -121,7 +123,7 @@ class MathParser:
                 self.pos += 2
             return ('<mrow><mo stretchy="true">{</mo><mtable columnalign="left">'
                     + ''.join(rows) + '</mtable></mrow>', '{' + '; '.join(texts))
-        if name == 'frac':
+        if name in ('frac', 'dfrac'):
             a, b = self.group(), self.group()
             return f'<mfrac>{a[0]}{b[0]}</mfrac>', f'({a[1]})/({b[1]})'
         if name == 'sqrt':
@@ -131,7 +133,7 @@ class MathParser:
             if index:
                 return f'<mroot>{rendered}{index[0]}</mroot>', f'√[{index[1]}]({plain})'
             return f'<msqrt>{rendered}</msqrt>', '√' + (plain if len(plain) == 1 else f'({plain})')
-        if name in ('overline', 'overarc'):
+        if name in ('overline', 'overarc', 'overgroup'):
             rendered, plain = self.group()
             if name == 'overline':
                 return f'<mrow class="seg">{rendered}</mrow>', plain + '̅'

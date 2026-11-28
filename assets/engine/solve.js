@@ -39,20 +39,35 @@
     if (left && right && !rest.length && !/[<>≤≥≠]/u.test(text)) return [...new Set([text, `${right}=${left}`])];
     return text ? [text] : [];
   }
-  function number_parts(s) {
+  function numericDetails(s) {
     if (!textValue(s)) return null;
     let t = norm(s).replace(/^[a-z]=/, '');
     const unit = units.find(u => t.length > u.length && t.endsWith(u)) ?? '';
     if (unit) t = t.slice(0, -unit.length);
     if (t.startsWith('(') && t.endsWith(')')) t = t.slice(1, -1);
-    t = t.replace(/^\+/, '');
+    t = t.replace(/^\+/, '').replace(/pi|파이/g, 'π');
+    let pi = '';
+    if (t.endsWith('π')) {
+      pi = 'π'; t = t.slice(0, -1);
+      t = t === '' || t === '-' ? t + '1' : t.replace(/[×⋅·*]$/, '');
+    } else {
+      const match = /^(-?)([0-9]*)π\/([0-9]+)$/.exec(t);
+      if (match) { pi = 'π'; t = `${match[1]}${match[2] || '1'}/${match[3]}`; }
+    }
     if (/^-?[0-9]{1,3}(,[0-9]{3})+(\.[0-9]+)?$/.test(t)) t = t.replaceAll(',', '');
-    let n;
+    let n, form = 'integer';
     if (/^-?[0-9]+$/.test(t)) n = String(BigInt(t));
-    else if (/^-?[0-9]+\.[0-9]+$/.test(t)) n = fraction(BigInt(t.replace('.', '')), 10n ** BigInt(t.split('.')[1].length));
-    else if (/^-?[0-9]+\/[0-9]+$/.test(t)) n = fraction(...t.split('/').map(BigInt));
-    return n == null ? null : [n, unit === '도' ? '°' : unit];
+    else if (/^-?[0-9]+\.[0-9]+$/.test(t)) {
+      n = fraction(BigInt(t.replace('.', '')), 10n ** BigInt(t.split('.')[1].length));
+      form = 'decimal';
+    } else if (/^-?[0-9]+\/[0-9]+$/.test(t)) {
+      const [p, q] = t.split('/').map(BigInt);
+      n = fraction(p, q);
+      form = gcd(p, q) === 1n ? 'reduced' : 'unreduced';
+    }
+    return n == null ? null : [n + pi, unit === '도' ? '°' : unit, form];
   }
+  function number_parts(s) { return numericDetails(s)?.slice(0, 2) ?? null; }
   const num = s => number_parts(s)?.[0] ?? null;
   function normalizedUnit(value) {
     const unit = norm(value);
@@ -80,6 +95,38 @@
     if (parts.some(p => !p)) return [];
     const inferred = parts.some(([, u]) => u) ? '' : unit;
     return [...new Set([...parts.map(([n]) => n), ...parts.filter(([, u]) => u || inferred).map(([n, u]) => `${n}@${u || inferred}`)])];
+  }
+  function radicalParts(value) {
+    const match = /^(-?)([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))$/.exec(norm(value).replaceAll('루트', '√'));
+    if (!match) return null;
+    const [, sign, coefficient, radicand, grouped] = match, body = radicand || grouped;
+    const square = BigInt(coefficient || '1') ** 2n * BigInt(body);
+    return [`${sign}${coefficient}√${body}`, `square:${sign ? -square : square}`];
+  }
+  function writing_forms(kind, values, unit = '') {
+    if (kind === 'number') return number_forms(values, unit);
+    if (kind === 'radical') return values.flatMap(radicalParts);
+    return values.map(norm);
+  }
+  function writing_result(kind, value, matches, form = '', strict = false, checkUnit = false) {
+    if (value == null || value === '') return null;
+    if (kind === 'text') return !String(value).trim() ? null : text_candidates(value).some(matches) || 'review';
+    if (kind === 'radical') {
+      const parts = radicalParts(value);
+      return !!parts && (matches(parts[0]) || (matches(parts[1]) ? 'review' : false));
+    }
+    if (kind === 'number') {
+      const parts = numericDetails(value);
+      if (!parts) return false;
+      const [n, unit, written] = parts;
+      if (!matches(checkUnit && unit ? `${n}@${unit}` : n)) return false;
+      if (form === 'fraction') {
+        if (strict) return written === 'reduced';
+        if (written === 'unreduced') return 'review';
+      }
+      return true;
+    }
+    return null;
   }
   function input_mode(values) {
     const texts = values.map(norm);
@@ -120,7 +167,13 @@
           while (source[i] && /\s/u.test(source[i])) i++;
           const b = group();
           out += (a ?? '') + (b == null ? '' : '/' + b);
-        } else if (name === 'sqrt') out += '√' + (group() ?? '');
+        } else if (name === 'sqrt') {
+          const index = /^\[([^\[\]]*)\]\s*/.exec(source.slice(i));
+          if (index) i += index[0].length;
+          const body = group() ?? '';
+          out += index ? `√[${plain(index[1])}](${body})` : /^[0-9]+$/.test(body) ? `√${body}` : `√(${body})`;
+        } else if (['sin', 'cos', 'tan'].includes(name)) out += name + ' ';
+        else if (name === 'quad') out += ' ';
         else if (Object.hasOwn(symbols, name)) out += symbols[name];
       }
       return out;
@@ -221,14 +274,15 @@
   const encodeReveal = (salt, data) => base64(xor(salt, utf8.encode(JSON.stringify(data))));
   const decodeReveal = (salt, text) => JSON.parse(decoder.decode(xor(salt, unbase64(text))));
   // 계약 시험용 내부 표면. window.sheet의 학생 API와 분리한다.
-  core.codec = Object.freeze({ norm, num, number_parts, inferred_unit, number_forms, input_mode, text_candidates, plain, line, points, sha256: hex, hash, encodeReveal, decodeReveal });
+  core.codec = Object.freeze({ norm, num, number_parts, inferred_unit, number_forms, input_mode, text_candidates,
+    plain, line, points, writing_forms, writing_result, sha256: hex, hash, encodeReveal, decodeReveal });
 
   const salt = () => document.querySelector('meta[name="sheet-salt"]')?.content || '';
   const policy = root.dataset.reveal || '시도 후';
   // Same student exposure rules as sheet_build.student_policy.
   const canReveal = policy === '시도 후' || policy === '바로';
   const canGrade = canReveal || policy === '교사만';
-  const automatic = new Set(['number','text','choice','ox','order','match','points','line','bars']);
+  const automatic = new Set(['number','radical','text','choice','ox','order','match','points','line','bars']);
   const slotsIn = item => all(item, '[data-slot]').filter(el => !el.closest('.ws-key, .ws-teacher-only'));
   const recordByNode = new WeakMap(), panels = new WeakMap(), itemReveal = new WeakMap(), slotReveal = new WeakMap();
   const originalAttrs = new WeakMap(), exploreOriginal = new WeakMap(), mediaBound = new WeakSet();
@@ -311,15 +365,10 @@
     const { kind, el } = record, value = record.value ?? record.control?.initial;
     const matches = normalized => record.hashes.includes(hash(salt(), kind, normalized));
     if (value == null || value === '' || (Array.isArray(value) && !value.length)) return null;
-    if (kind === 'text') {
-      if (!String(value).trim()) return null;
-      return text_candidates(value).some(matches) ? true : 'review';
-    }
-    if (kind === 'number' && el.dataset.checkUnit === '1') {
-      const parts = number_parts(value);
-      if (!parts) return false;
-      const [n, unit] = parts;
-      return matches(unit ? `${n}@${unit}` : n);
+    if (['text', 'number', 'radical'].includes(kind)) {
+      const form = writingShape(el).includes('fraction') ? 'fraction' : '';
+      return writing_result(kind, value, matches, form, record.item.dataset.reducedFractions === '1',
+        el.dataset.checkUnit === '1');
     }
     const normalized = normalize(kind, value, el);
     if (normalized == null && ['match','line','bars'].includes(kind)) return null;
@@ -573,8 +622,12 @@
     const column = forGrading && inHead ? '' : read(heads?.cells[cell.cellIndex]);
     return { row, column, unit: table.matches('.ws-data') ? table.dataset.tableUnit : undefined };
   }
+  const writingShape = el => (el.dataset.writingShape ?? '').split(' ');
   function field(row) {
-    const { el, kind } = row, multiline = el.matches('.ws-ans');
+    const { el, kind } = row;
+    const answerBox = el.matches('.ws-ans');
+    const multiline = answerBox && !(el.dataset.lines === '2' && el.dataset.grow !== '1' &&
+      ['number', 'radical', 'text'].includes(kind));
     const input = runtime(make(multiline ? 'textarea' : 'input', 'ws-in'));
     const ink = runtime(make('span', 'ws-ink ws-print-only'));
     const fillTable = el.matches('.ws-blank') && el.parentElement?.matches('td.ws-fill') && el.closest('table.ws-data');
@@ -589,9 +642,9 @@
     const headings = tableHeadings(el);
     const label = [headings.row, headings.column].filter(Boolean).join(', ');
     input.setAttribute('aria-label', kind === 'name' ? row.slot.split('.').at(-1) : label ||
-      (multiline ? '답 쓰기' : `빈칸 ${el.querySelector('.ws-blank-mark')?.textContent || row.slot}`));
+      (answerBox ? '답 쓰기' : `빈칸 ${el.querySelector('.ws-blank-mark')?.textContent || row.slot}`));
     input.autocomplete = 'off';
-    if (kind === 'number') input.spellcheck = false;
+    if (kind === 'number' || kind === 'radical') input.spellcheck = false;
     if (['numeric', 'decimal'].includes(el.dataset.inputMode)) input.inputMode = el.dataset.inputMode;
     if (el.matches('.ws-name-slot') && !el.querySelector(':scope > .ws-name-space')) {
       const placeholder = make('span', 'ws-name-space');
@@ -607,7 +660,40 @@
     el.append(input, ink);
     if (sizer) el.append(sizer);
     input.addEventListener('input', () => setValue(row, input.value));
-    return { paint(value) {
+    if (!multiline && kind !== 'name') input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229 || !usable() || mode !== 'solve') return;
+      const button = row.item.querySelector('.ws-check-bar [data-sheet-action="check"]');
+      if (!button || button.disabled) return;
+      event.preventDefault();
+      button.click();
+    });
+    let symbols;
+    function syncSymbols() {
+      symbols?.remove();
+      symbols = undefined;
+      for (const [symbol, label] of [['π', '파이'], ['√', '루트']]) {
+        if (!writingShape(el).includes(symbol)) continue;
+        if (!symbols) {
+          symbols = solveOnly('span', 'ws-symbols');
+          if (answerBox) el.append(symbols); else el.after(symbols);
+        }
+        const button = make('button', '', symbol);
+        button.type = 'button';
+        button.dataset.symbol = symbol;
+        button.setAttribute('aria-label', `${label} 넣기`);
+        button.addEventListener('mousedown', event => event.preventDefault());
+        button.addEventListener('click', () => {
+          if (!usable() || mode !== 'solve') return;
+          const start = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? start;
+          input.focus();
+          input.setRangeText(symbol, start, end, 'end');
+          setValue(row, input.value);
+        });
+        symbols.append(button);
+      }
+    }
+    syncSymbols();
+    return { syncSymbols, paint(value) {
       const text = value ?? '';
       if (input.value !== text) input.value = text;
       if (multiline && el.style.height) input.style.setProperty('--ws-input-height', el.style.height);
@@ -1167,8 +1253,12 @@
       row.verdict.classList.toggle('ws-ok', ok);
       row.verdict.classList.toggle('ws-no', no);
       row.verdict.classList.toggle('ws-review', review);
-      const message = ok ? '✓' : no ? '다시 생각해 봐요' : review
-        ? '예상한 답과 달라요. 같은 뜻이면 선생님께 확인받아요.' : '';
+      let message = ok ? '✓' : no ? '다시 생각해 봐요' : '';
+      if (review) {
+        if (row.kind === 'number') message = '기약분수로 나타냈는지 확인해 보세요.';
+        else if (row.kind === 'radical') message = '값은 같아요. 근호가 있는 꼴을 확인해 보세요.';
+        else message = '예상한 답과 달라요. 같은 뜻이면 선생님께 확인받아요.';
+      }
       if (row.verdict.textContent !== message) row.verdict.textContent = message;
       if (ok) row.verdict.setAttribute('aria-label', '맞았어요');
       else row.verdict.removeAttribute('aria-label');
@@ -1692,42 +1782,44 @@
   function changedAnswer(el, source, html, options, blank) {
     const answer = plain(source).trim(), accept = options.accept ?? [];
     const mode = options.mode || 'auto';
-    const number = num(answer);
+    const numeric = numericDetails(answer), answers = [answer, ...accept.map(value => plain(value).trim())];
     let kind = 'open';
     if (answer && mode !== 'off') {
-      if (mode !== 'text' && number != null) kind = 'number';
+      if (mode !== 'text' && numeric) kind = 'number';
+      else if (mode === 'auto' && answers.every(radicalParts)) kind = 'radical';
       else if (mode === 'text' || (mode === 'auto' && (blank ? Array.from(answer).length <= 12 : accept.length))) kind = 'text';
     }
-    const canonical = value => normalize(kind, value, el);
-    const answers = [answer, ...accept.map(plain)];
-    const valid = new Set(answers.map(canonical).filter(v => v != null));
-    const right = canonical(answer);
+    const shape = [];
+    if (answers.some(value => value.includes('π') || num(value)?.endsWith('π'))) shape.push('π');
+    if (answers.some(value => value.includes('√') || radicalParts(value))) shape.push('√');
     const attrs = { 'data-check-kind': kind, 'data-check-hash': null, 'data-check-unit': null, 'data-check': null,
       'data-input-mode': kind === 'number' ? input_mode(answers) || null : null };
-    if (right != null && salt()) {
-      let wrong;
+    const { column, row, unit } = options.headings;
+    const forms = kind === 'open' ? [] : writing_forms(kind, answers, inferred_unit(options.tail ?? '', column, row, unit));
+    if (forms.length && salt()) {
+      let right = answer, wrong;
       if (kind === 'number') {
-        const [p, q = 1n] = right.split('/').map(BigInt);
+        const [number, , written] = numeric;
+        const pi = number.endsWith('π') ? 'π' : '', coefficient = pi ? number.slice(0, -1) : number;
+        if (written === 'reduced' || written === 'unreduced') shape.push('fraction');
+        if (written === 'unreduced') right = coefficient + (coefficient.includes('/') ? '' : '/1') + pi;
+        const [p, q = 1n] = coefficient.split('/').map(BigInt);
         let next = p;
-        do { next += q; wrong = fraction(next, q); } while (valid.has(canonical(wrong)));
+        do { next += q; wrong = fraction(next, q) + pi; } while (forms.includes(wrong));
       } else {
         wrong = answer + '오답';
-        while (text_candidates(wrong).some(v => valid.has(v))) wrong += '오답';
+        while (text_candidates(wrong).some(v => forms.includes(v))) wrong += '오답';
       }
-      attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
+      attrs['data-check'] = JSON.stringify({ mode, accept, right, wrong });
       if (canGrade) {
-        if (kind === 'number') {
-          const { column, row, unit } = options.headings;
-          const forms = number_forms(answers, inferred_unit(options.tail ?? '', column, row, unit));
-          if (forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
-          for (const form of forms) valid.add(form);
-        }
-        attrs['data-check-hash'] = [...valid].map(v => hash(salt(),kind,v)).join(',');
+        if (kind === 'number' && forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
+        attrs['data-check-hash'] = [...new Set(forms)].map(v => hash(salt(),kind,v)).join(',');
       }
     } else if (mode !== 'auto' || accept.length) {
       // Keep an explicit setting (notably off) so another edit does not turn grading back on.
       attrs['data-check'] = JSON.stringify({ mode, accept });
     }
+    attrs['data-writing-shape'] = shape.join(' ');
     return { attrs, reveal: html && answer ? { answer_html: html } : undefined };
   }
   function applyAttrs(el, attrs) {
@@ -1784,12 +1876,14 @@
     panel.bar?.remove(); panel.solutionBox?.remove(); panel.compareBox?.remove(); panels.delete(item);
   }
   function writeAnswer(el, result) {
+    const oldShape = el.dataset.writingShape;
     applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
     const row = recordByNode.get(el);
     if (!row) return;
     row.result = null; row.reveal?.remove(); row.reveal = undefined;
     const input = el.querySelector('.ws-in');
     if (input) applyAttrs(input, { inputmode: result.attrs['data-input-mode'] });
+    if (oldShape !== el.dataset.writingShape) row.control?.syncSymbols?.();
   }
   function tableAnswerUpdates(table, editedField) {
     // 원본 표기에서 정답·대안·빈칸 바로 뒤의 글을 읽는다. 이미 붙은 해시로는 단위를 되돌릴 수 없다.
@@ -1847,12 +1941,25 @@
     const isAnswer = writing?.matches(':not([data-kind="draw"])') && !!key;
     const table = target.closest('table');
     const refresh = !key && table?.matches('.ws-data, .ws-steps, .ws-ans-table') ? tableAnswerUpdates(table, target) : null;
-    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check','data-input-mode'].map(name => [name,writing.getAttribute(name)])) : null;
+    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check','data-input-mode','data-writing-shape'].map(name => [name,writing.getAttribute(name)])) : null;
     const oldReveal = isAnswer ? slotReveal.get(writing) : undefined;
     const updated = isAnswer ? changedAnswer(writing, source, html, { ...json(writing.dataset.check, {}), headings: tableHeadings(writing, true) }, false) : null;
+    const promptFields = '.ws-q-text, .ws-sit-text [data-src], .ws-ask th [data-src]:not(.ws-ask-tag)';
     function write(text, children, result) {
       target.dataset.src = text; target.replaceChildren(...children);
       if (isAnswer) writeAnswer(writing, result);
+      if (target.matches(promptFields)) {
+        const strict = all(item, promptFields).some(field => {
+          const copy = field.cloneNode(true);
+          for (const node of all(copy, '.ws-blank, [data-sheet-runtime]')) node.remove();
+          return copy.textContent.includes('기약분수');
+        });
+        if (strict) item.dataset.reducedFractions = '1';
+        else delete item.dataset.reducedFractions;
+        for (const row of records.values()) {
+          if (row.item === item && writingShape(row.el).includes('fraction')) row.result = null;
+        }
+      }
       refresh?.();
       resetPanel(item);
     }

@@ -61,6 +61,9 @@
           if (name === 'pi') return [`<mi>${symbol}</mi>`, symbol];
           return [`<mo>${symbol}</mo>`, symbol];
         }
+        if (['sin', 'cos', 'tan'].includes(name)) {
+          return [`<mo form="prefix" lspace="0em" rspace="0.1667em">${name}</mo>`, name + ' '];
+        }
         if (name === 'quad') return ['<mspace width="1em"></mspace>', ' '];
         if (name === 'begin') {
           this.spaces();
@@ -84,7 +87,7 @@
           }
           return [`<mrow><mo stretchy="true">{</mo><mtable columnalign="left">${rows.join('')}</mtable></mrow>`, '{' + texts.join('; ')];
         }
-        if (name === 'frac') {
+        if (name === 'frac' || name === 'dfrac') {
           const a = this.group(), b = this.group();
           return [`<mfrac>${a[0]}${b[0]}</mfrac>`, `(${a[1]})/(${b[1]})`];
         }
@@ -95,7 +98,7 @@
           return index ? [`<mroot>${value[0]}${index[0]}</mroot>`, `√[${index[1]}](${value[1]})`]
             : [`<msqrt>${value[0]}</msqrt>`, `√${Array.from(value[1]).length === 1 ? value[1] : `(${value[1]})`}`];
         }
-        if (name === 'overline' || name === 'overarc') {
+        if (['overline', 'overarc', 'overgroup'].includes(name)) {
           const [markup, plain] = this.group();
           return name === 'overline' ? [`<mrow class="seg">${markup}</mrow>`, plain + '̅']
             : [`<mover>${markup}<mo stretchy="true">⏜</mo></mover>`, plain + '⌒'];

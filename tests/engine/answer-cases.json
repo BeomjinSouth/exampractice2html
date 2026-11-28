@@ -54,6 +54,17 @@
   [["일 것", "", ""], ""], [["분의 1", "", ""], ""], [["점에서 만난다", "", ""], ""],
   [["분 동안", "", ""], "분"], [["점이다", "", ""], "점"]
  ],
+ "writing_results": [
+  {"kind":"number", "answer":"$4\\pi$", "unit":"cm", "cases":[["4π",true],["4 π",true],["4pi",true],["4파이",true],["4π cm",true],["4πcm",true],["4×π",true],["4π mm",false],["4π kg",false],["4",false],["4π+0",false],["4π²",false],["",null]]},
+  {"kind":"number", "answer":"$\\pi$", "cases":[["pi",true],["+π",true],["1.0π",true],["-π",false],["×π",false]]},
+  {"kind":"number", "answer":"$\\frac{3}{2}\\pi$", "form":"fraction", "cases":[["3π/2",true],["6/4π","review"],["6π/4","review"],["1.50π",true],["3/0π",false],["3/2",false]]},
+  {"kind":"number", "answer":"$\\dfrac{3\\pi}{2}$", "form":"fraction", "strict":true, "cases":[["3/2 π",true],["6π/4",false],["1.5π",false]]},
+  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"fraction", "unit":"cm", "cases":[["6/10","review"],["6/10cm","review"],["6/10mm",false],["3/5",true],["0.6",true],["0.60",true],["7/10",false]]},
+  {"kind":"number", "answer":"$\\frac{3}{5}$", "form":"fraction", "strict":true, "cases":[["6/10",false],["0.6",false],["0.60",false],["3/5",true],["⅗",true],["7/10",false]]},
+  {"kind":"number", "answer":"$0.6$", "cases":[["6/10",true]]},
+  {"kind":"radical", "answer":"$2\\sqrt{3}$", "cases":[["2√3",true],["2√(3)",true],["2루트3",true],["√12","review"],["√(12)","review"],["-√12",false],["√13",false],["2√3+0",false]]},
+  {"kind":"radical", "answer":"$-\\sqrt{12}$", "cases":[["-√12",true],["-2√3","review"],["2√3",false]]}
+ ],
  "number_forms": [
   [[["11"], "일"], ["11", "11@일"]], [[["11권"], "일"], ["11", "11@권"]],
   [[["1시간", "60분", "1"], "일"], ["1", "60", "1@시간", "60@분"]]
@@ -235,6 +246,11 @@
   ["원점", ["원점"]]
  ],
  "plain": [
+  ["$\\sin A+\\cos B+\\tan C$", "sin A+cos B+tan C"],
+  ["$\\overgroup{AB}$와 $\\overarc{CD}$", "AB와 CD"],
+  ["$\\dfrac{3\\pi}{2}$", "3π/2"],
+  ["$\\frac{3}{2}\\pi$", "3/2π"],
+  ["$\\sqrt{3+1}$", "√(3+1)"],
   [
    "$\\frac{1}{2}$",
    "1/2"

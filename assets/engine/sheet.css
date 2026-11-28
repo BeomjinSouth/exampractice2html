@@ -448,6 +448,13 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 #sheet-flow .ws-ans > .ws-in { display: block; position: static; min-height: calc(var(--ws-input-height, 2.5em) + 2.5mm); height: auto; }
 #sheet-flow .ws-ans:has(> .ws-in) { padding: 0; }
 #sheet-flow .ws-ans :is(.ws-reveal, .ws-verdict) { margin-inline: 1.8mm; }
+#sheet-flow .ws-symbols { display: inline-flex; gap: 3px; vertical-align: middle; margin-inline: 3px; }
+#sheet-flow .ws-ans > .ws-symbols { margin: 3px 1.8mm; }
+#sheet-flow .ws-symbols > button {
+  min-width: 30px; min-height: 30px; padding: 0 4px; border: 1px solid #aaa; border-radius: 4px;
+  background: #fafafa; color: inherit; font: inherit; cursor: pointer;
+}
+#sheet-flow .ws-symbols > button:focus-visible { outline: 2px solid #555; outline-offset: 1px; }
 #sheet-flow .ws-choices > li { padding: 4px; border: 1px solid #d4d4d4; border-radius: 3px; }
 #sheet-flow .ws-choices > .ws-picked { background: #eee; border-color: #777; }
 @media screen {

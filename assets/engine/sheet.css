@@ -92,7 +92,8 @@ html:not([data-answers="on"]) :is(.ws-key, .ws-teacher-only, .ws-paper:has(> .ws
   background-position: top, bottom;
   background-repeat: no-repeat;
   text-align: center;
-  word-break: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 .ws-item :is(.ws-head, .ws-band) :is(th, td) { padding: 0.5mm; }
 :is(.ws-head--평가, .ws-head--연습) tr:first-child { height: 12.7mm; }
@@ -114,7 +115,8 @@ html:not([data-answers="on"]) :is(.ws-key, .ws-teacher-only, .ws-paper:has(> .ws
   color: var(--ws-label);
   font-weight: 700;
   text-align: center;
-  word-break: normal;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 :root[data-kind="연습"] .ws-lab { font-size: calc(8pt * var(--sheet-body-scale)); font-weight: 400; }
 .ws-pts, .ws-guide { display: block; }
@@ -442,7 +444,11 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
 #sheet-flow :is(svg, img, video, iframe, canvas) { max-width: 100%; }
 #sheet-flow :is(.ws-fig, .ws-figs, .ws-sit-fig) svg { height: auto; }
 #sheet-flow .ws-blank { min-width: min(100%, var(--ws-blank-min, 2.6em)) !important; }
-#sheet-flow .ws-name-slot[data-slot$="이름"] { min-width: min(100%, 6em); }
+#sheet-flow .ws-name-slot:is([data-slot$="이름"], [data-slot$="성명"]) { min-width: min(100%, max(72px, 6em)); }
+/* 풀기 화면의 입력 글자는 최소 16px이므로 작은 머리표 글꼴에서도 폭을 확보한다. */
+#sheet-flow .ws-name-slot:is([data-slot$="번"], [data-slot$="번호"]) { min-width: min(100%, max(60px, 5em)); }
+#sheet-flow .ws-name-slot:is([data-slot$="반"], [data-slot$="학급"], [data-slot$="학년"],
+  [data-slot="head.번"], [data-slot="head.짝-번"]) { min-width: min(100%, max(38px, 3em)); }
 #sheet-flow .ws-fill > .ws-blank { width: 100%; }
 #sheet-flow .ws-fill > :is(.ws-verdict, .ws-reveal) { display: block; margin-inline: 0; }
 #sheet-flow .ws-in { min-width: 0; font-size: max(16px, 1em); background: #fafafa; border: 1px solid #b2b2b2; border-radius: 3px; }
@@ -529,8 +535,6 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
     box-sizing: border-box; width: fit-content; max-width: 100%; padding: 2px 4px;
     color: #475467; font: 12px/1.4 var(--sheet-sans);
   }
-  #sheet-flow .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]),
-  #sheet-flow .ws-head-name .ws-name-slot:is([data-slot$="학번"], [data-slot$="반"], [data-slot$="번"], [data-slot$="학급"], [data-slot$="번호"]) { min-width: min(100%, 5em); }
 }
 @media print {
   .ws-solve-only, .ws-in, .ws-verdict, .ws-check-bar, .ws-reveal, .ws-solution, canvas.ws-pen { display: none !important; }
@@ -585,8 +589,6 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
   #sheet-flow .ws-head--수업 tr + tr > td { flex: 1 1 auto; }
   #sheet-flow .ws-head--수업 td:has(.ws-name-slot) { flex-basis: 100%; white-space: normal; }
   #sheet-flow .ws-head-name { white-space: normal; overflow-wrap: normal; word-break: keep-all; }
-  #sheet-flow .ws-head-name .ws-name-slot { min-width: 2em; }
-  #sheet-flow .ws-head-name .ws-name-slot[data-slot$="이름"] { min-width: 4em; }
   #sheet-flow .ws-ox col:first-child { width: 2.8em !important; }
   #sheet-flow .ws-ox col:nth-child(2) { width: auto !important; }
   #sheet-flow .ws-ox col:nth-child(3) { width: 96px !important; }

@@ -292,6 +292,10 @@ def _audit_report(report, role, problems):
                 _problem(problems, level, code, page, item,
                          f"{index}번 답 칸의 예상 필기 높이 {amount}, 실제 {height:.1f}mm.",
                          "답 칸을 늘리거나 학생이 쓸 답안 분량을 줄이세요.")
+    for split in report.get('print_word_splits', []):
+        _problem(problems, 'warning', 'print-word-split', split['page'], split['item'],
+                 f"{role}: 어절 중간에서 줄이 바뀝니다: {split['text']}",
+                 '쪽 그림의 해당 어절을 확인하고 앞뒤 말이나 칸의 폭을 조정하세요.')
     for family, applied in report.get("fonts", {}).items():
         if not applied:
             _problem(problems, "warning", "font-not-applied", None, None,
@@ -710,7 +714,17 @@ _FILL_JS = """(async()=>{
       if (el && el.matches('.ws-ans')) { value = '%s\\n%s'; kinds.open_box++; }
       else { value = '검사'; kinds.open_blank++; }
     } else if (s.kind === 'draw') { value = {strokes: [[[0.15, 0.25], [0.5, 0.75], [0.85, 0.35]]]}; kinds.draw++; }
-    else if (s.kind === 'name') { value = '검사'; kinds.name++; }
+    else if (s.kind === 'name') {
+      const field = s.slot.split('.').at(-1).replace(/^짝-/, '');
+      if (field === '반') value = '12';
+      else if (field === '번') value = '34';
+      else if (field.endsWith('학급')) value = '123';
+      else if (field.endsWith('학년')) value = '3';
+      else if (/(번|번호)$/.test(field)) value = '30215';
+      else if (/(이름|성명)$/.test(field)) value = '김가나다';
+      else value = '검사';
+      kinds.name++;
+    }
     else continue;
     sheet.answer(s.slot, value);
   }
@@ -732,13 +746,16 @@ _FILL_JS = """(async()=>{
   return {kinds, values: sheet.values(), extraPens};
 })()"""
 _FILL_LINES = ("검사 서술 첫째 줄", "검사 서술 둘째 줄")
-_FILLED_SCREEN_JS = """(async function filledScreenInspection(){
-  await sheet.view('solve');
+_TYPING_SCREEN_JS = """(async function typingScreenInspection(){
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  const typing_clipped = [...document.querySelectorAll('#sheet-flow input.ws-in')]
+  const clipped = [...document.querySelectorAll('#sheet-flow input.ws-in')]
     .filter(el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible' &&
       (!el.checkVisibility || el.checkVisibility({checkOpacity:true})) && el.clientWidth && el.scrollWidth > el.clientWidth + 1)
     .map(el => el.closest('[data-slot]')?.dataset.slot).filter(Boolean);
+  return [...new Set(clipped)].sort();
+})()"""
+_FILLED_SCREEN_JS = """(async function filledScreenInspection(){
+  await sheet.view('solve');
   const items = [...document.querySelectorAll('#sheet-flow .ws-item')];
   let checked_items = 0, revealed_items = 0, solution_items = 0, compare_items = 0;
   for (const item of items) {
@@ -755,13 +772,97 @@ _FILLED_SCREEN_JS = """(async function filledScreenInspection(){
     compare_items += open('compare');
   }
   await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  const visible = el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible' &&
+    (!el.checkVisibility || el.checkVisibility({checkOpacity:true}));
+  const replaced = 'math, svg, img, canvas, input, textarea, video, iframe';
+  const range = document.createRange();
+  function contentRects(el) {
+    if (el.matches(replaced)) return [...el.getClientRects()];
+    const rects = [...el.querySelectorAll(replaced)].filter(node => visible(node) && !node.parentElement.closest(replaced))
+      .flatMap(node => [...node.getClientRects()]);
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      // 수식·그림은 한 덩어리다. 안쪽의 글자를 다시 재지 않는다.
+      if (!node.data.trim() || node.parentElement.closest(replaced) || !visible(node.parentElement)) continue;
+      range.selectNodeContents(node);
+      rects.push(...range.getClientRects());
+    }
+    return rects.filter(r => r.width && r.height);
+  }
+  function clipAxes(el, style) {
+    if (style.display === 'inline' || style.display === 'contents') return [false, false];
+    // 밀어서 끝까지 읽는 자료표는 의도된 예외다. 그 안의 입력 칸은 따로 잰다.
+    const movingTable = el.matches('.ws-data.ws-table-overflow') && /^(auto|scroll)$/.test(style.overflowX);
+    return [style.overflowX !== 'visible' && !movingTable, style.overflowY !== 'visible'];
+  }
+  function isClipped(el) {
+    if (!visible(el)) return false;
+    const panel = el.matches('.ws-solution, .ws-reveal');
+    const wide = el.scrollWidth > el.clientWidth + 1;
+    const [clipX, clipY] = clipAxes(el, getComputedStyle(el));
+    if ((clipX && wide) || (panel && clipY && el.scrollHeight > el.clientHeight + 1)) return true;
+    let rects;
+    const contents = () => rects ??= contentRects(el);
+    const item = el.closest('.ws-item');
+    for (let parent = el.parentElement; parent && parent.closest('.ws-item') === item && item; parent = parent.parentElement) {
+      const [x, y] = clipAxes(parent, getComputedStyle(parent));
+      if (!x && !y) continue;
+      const r = parent.getBoundingClientRect();
+      const left = r.left + parent.clientLeft, top = r.top + parent.clientTop;
+      if (contents().some(c => (x && (c.left < left - 1 || c.right > left + parent.clientWidth + 1)) ||
+        (y && (c.top < top - 1 || c.bottom > top + parent.clientHeight + 1)))) return true;
+    }
+    // overflow:visible이어도 셀/흐름 상자의 내용이 옆 칸이나 화살표를 덮으면 경고한다.
+    if (wide && !clipX && el.matches('td, th, .ws-flow-node')) {
+      const box = el.getBoundingClientRect();
+      return [...el.parentElement.children].some(sibling => {
+        if (sibling === el || !sibling.matches('td, th, .ws-flow-node, .ws-flow-arrow') || !visible(sibling)) return false;
+        const s = sibling.getBoundingClientRect();
+        return contents().some(c => (c.left < box.left - 1 || c.right > box.right + 1) &&
+          Math.min(c.right, s.right) - Math.max(c.left, s.left) > 1 &&
+          Math.min(c.bottom, s.bottom) - Math.max(c.top, s.top) > 1);
+      });
+    }
+    return false;
+  }
   const clipped = [...document.querySelectorAll('#sheet-flow :is(td, th, .ws-flow-node, .ws-in, .ws-solution, .ws-reveal)')]
-    .filter(el => el.getClientRects().length && el.clientWidth && (el.scrollWidth > el.clientWidth + 1 ||
-      (el.matches('.ws-solution, .ws-reveal') && el.scrollHeight > el.clientHeight + 1)))
+    .filter(isClipped)
     .map(el => el.closest('[data-slot]')?.dataset.slot || el.closest('.ws-item')?.dataset.id || el.tagName.toLowerCase());
   return { view: sheet.view(), overflow_x: sheet.report().overflow_x,
-    clipped: [...new Set(clipped)].sort(), typing_clipped: [...new Set(typing_clipped)].sort(),
+    clipped: [...new Set(clipped)].sort(),
     checked_items, revealed_items, solution_items, compare_items };
+})()"""
+_PRINT_WORD_SPLITS_JS = """(() => {
+  const splits = [], range = document.createRange();
+  const pages = [...document.querySelectorAll('#sheet-pages .ws-page')];
+  for (const [index, page] of pages.entries()) {
+    const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (parent.closest('svg, math, .ws-ink, script, style') || getComputedStyle(parent).visibility !== 'visible') continue;
+      for (const word of node.data.matchAll(/[가-힣]{2,}/g)) {
+        const start = word.index, end = start + word[0].length;
+        range.setStart(node, start);
+        range.setEnd(node, end);
+        // 한 줄에 들어온 어절은 글자마다 재지 않는다.
+        if (range.getClientRects().length < 2) continue;
+        let previous;
+        for (let i = start; i < end; i++) {
+          range.setStart(node, i);
+          range.setEnd(node, i + 1);
+          const rect = range.getClientRects()[0];
+          if (rect && previous && rect.top > previous.top + rect.height / 2) {
+            const before = node.data.slice(Math.max(start, i - 6), i);
+            const after = node.data.slice(i, Math.min(end, i + 6));
+            splits.push({page: index + 1, item: parent.closest('.ws-item')?.dataset.id ?? null,
+              text: before + '│' + after});
+          }
+          previous = rect;
+        }
+      }
+    }
+  }
+  return splits;
 })()"""
 _RESTORED_JS = """(async()=>{
   await sheet.view('a4');
@@ -822,6 +923,7 @@ def _navigate(browser, path, teacher):
     report = result["report"]
     if report.get("role") != expected or not isinstance(report.get("pages"), list) or not result.get("count"):
         raise CheckError(f"활동지 역할이나 쪽 수가 올바르지 않습니다: {path.name}")
+    report['print_word_splits'] = protocol.evaluate(_PRINT_WORD_SPLITS_JS)
     pdf = _print_pdf(protocol)
     report['graph_regions'] = result.get('graph_regions', [])
     return report, result["count"], result.get("keys", []), pdf, result.get("public", "")
@@ -930,22 +1032,29 @@ def _interactive_check(protocol, out, table, problems):
                 raise CheckError("채움 인쇄에 쓸 입력을 넣지 못했습니다.")
             info['filled_inputs'] = {'from_answer_table': sum(row['slot'] in entered['values'] for row in rows),
                                      **(entered.get('kinds') or {})}
-            protocol.call('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844,
-                                                                  'deviceScaleFactor': 1, 'mobile': False})
+            # 빈 화면 검사가 마지막에 태블릿을 열었다. 공개 단추를 누르기 전에 두 폭을 잰다.
+            for label, width, height, key in (
+                ('태블릿', 1024, 768, 'typing_screen_clipped_tablet'),
+                ('폰', 390, 844, 'typing_screen_clipped'),
+            ):
+                protocol.call('Emulation.setDeviceMetricsOverride', {'width': width, 'height': height,
+                                                                      'deviceScaleFactor': 1, 'mobile': False})
+                clipped = protocol.evaluate(_TYPING_SCREEN_JS, True)
+                if not isinstance(clipped, list) or any(not isinstance(slot, str) for slot in clipped):
+                    raise CheckError(f'{label} 화면에서 입력 중 잘리는 칸을 확인할 수 없습니다.')
+                info[key] = clipped
+                if clipped:
+                    _problem(problems, 'warning', 'typing-screen-clipped', None, None,
+                             f'입력 중 {label}({width}×{height})에서 잘리는 칸: ' + ', '.join(clipped),
+                             '해당 한 줄 입력 칸의 폭과 실제 표시를 확인하세요.')
             screen = protocol.evaluate(_FILLED_SCREEN_JS, True)
             if (not isinstance(screen, dict) or screen.get('view') != 'solve'
                     or type(screen.get('overflow_x')) not in (int, float)
                     or not math.isfinite(screen['overflow_x']) or screen['overflow_x'] < 0
                     or not isinstance(screen.get('clipped'), list)
-                    or any(not isinstance(slot, str) for slot in screen['clipped'])
-                    or not isinstance(screen.get('typing_clipped'), list)
-                    or any(not isinstance(slot, str) for slot in screen['typing_clipped'])):
+                    or any(not isinstance(slot, str) for slot in screen['clipped'])):
                 raise CheckError('답을 채운 폰 화면의 넘침을 확인할 수 없습니다.')
-            info['typing_screen_clipped'] = screen['typing_clipped']
-            if screen['typing_clipped']:
-                _problem(problems, 'warning', 'typing-screen-clipped', None, None,
-                         '답을 입력하는 동안 폰 화면에서 잘리는 칸: ' + ', '.join(screen['typing_clipped']),
-                         '해당 한 줄 입력 칸의 폭과 실제 표시를 확인하세요.')
+            screen['typing_clipped'] = info['typing_screen_clipped']
             screen['pen_sizes'] = _pen_sizes(protocol)
             info['filled_screen'] = screen
             filled_aspects = _pen_aspects(screen['pen_sizes'])
@@ -956,7 +1065,8 @@ def _interactive_check(protocol, out, table, problems):
             if screen['clipped']:
                 _problem(problems, 'warning', 'filled-screen-clipped', None, None,
                          '답을 채운 폰 화면에서 잘릴 수 있는 곳: ' + ', '.join(screen['clipped']),
-                         '해당 입력 칸·표·흐름 상자·정답과 풀이 패널의 실제 표시를 확인하세요.')
+                         '화면-폰-채움.png에서 실제로 잘린 곳을 확인하세요. 공개 정책이나 문항을 바꿔 경고를 없애지 마세요. '
+                         '잘림이 보이지 않으면 검토.md에 ‘그대로 둠 — 까닭’을 적으세요.')
             size = protocol.call('Page.getLayoutMetrics').get('cssContentSize', {})
             height = max(844, math.ceil(size.get('height', 844)))
             data = protocol.call('Page.captureScreenshot', {'format': 'png', 'captureBeyondViewport': True,

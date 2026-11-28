@@ -1490,6 +1490,33 @@ assert 'q.2' in problems[1]['msg']
       await tab.js('sheet.clearAnswers()');
     },metrics(390,844,true));
   });
+  await test('머리표의 학번·반·번·학급이 태블릿과 폰에서 잘리지 않음', async () => {
+    for (const [kind, fields] of [['수업', ['학번', '번호', '이름']],
+        ['연습', ['반', '번', '학급']]]) {
+      const folder = path.join(work, `head-input-${kind}`);
+      const title = `머리표 ${kind}`;
+      const source = {version:1, meta:{title, kind, name_fields:fields, reveal:'없음', sync:false},
+        items:[{id:'q1', blocks:[{type:'question', text:'설명해 봅시다.'}]}]};
+      await fs.mkdir(folder);
+      await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+      await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+        {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+      await usingTab(pathToFileURL(path.join(folder, `${title}.html`)).href, async tab => {
+        for (const [width,height] of [[1024,768], [768,1024], [390,844]]) {
+          await tab.send('Emulation.setDeviceMetricsOverride', metrics(width,height,width < 720));
+          for (const field of fields) {
+            const value = {학번:'30215', 번호:'30215', 이름:'김가나다', 반:'12', 번:'34', 학급:'123'}[field];
+            await setInput(tab, `#sheet-flow ${slot(`head.${field}`)} input`, value);
+          }
+          const clipped = await tab.js(`Array.from(document.querySelectorAll('#sheet-flow .ws-head input.ws-in'))
+            .filter(el => el.scrollWidth > el.clientWidth + 1).map(el => el.closest('[data-slot]').dataset.slot)`);
+          assert.deepEqual(clipped, [], `${kind} ${width}px 머리표 입력 폭`);
+          assert.equal((await tab.report()).overflow_x, 0, `${kind} ${width}px 문서 가로 넘침`);
+        }
+        await tab.js('sheet.clearAnswers()');
+      }, metrics(1024,768,false));
+    }
+  });
   await test('채운 휴대폰 표의 정답과 학번이 잘리지 않음', async () => {
     const folder = path.join(work, 'filled-mobile-table');
     const source = JSON.parse(await fs.readFile(path.join(here, '../../examples/대여소-요금-비교/구성.json'), 'utf8'));

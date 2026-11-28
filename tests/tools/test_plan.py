@@ -1033,6 +1033,24 @@ class FigurePlanTest(unittest.TestCase):
         heading = {'type': 'heading', 'tag': '활동', 'text': '살펴보기', 'image': pict}
         self.assertFalse(any(i.code == 'figure-alt-missing' for i in self.check(heading)))
 
+    def test_plain_alt_and_goal_allow_point_names_but_visible_text_and_caption_warn(self):
+        alt = '원에 점 A, B, P가 있고, 호 AB와 점 P에 놓인 각도 눈금이 표시된 그림'
+        figure = {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40, 'alt': alt}
+        self.assertEqual(self.check(figure), [])
+        data = document({'type': 'text', 'text': alt}, {**figure, 'caption': alt})
+        data['meta']['goal'] = alt
+        warnings = [i.path for i in validate(data, ROOT) if i.code == 'latin-outside-math']
+        self.assertEqual(warnings, ['items[0].blocks[0].text', 'items[0].blocks[1].caption'])
+
+    def test_first_draft_point_names_keep_only_genuine_duplicate_warnings(self):
+        blocks = [{'type': 'figure', 'svg': '<svg/>', 'width_mm': 40,
+                   'alt': f'원에 점 A, B, {name}이 있고, 호 AB와 점 {name}에 놓인 각도 눈금이 표시된 그림'}
+                  for name in ('P', 'Q', 'O', 'R', 'O', 'S')]
+        issues = self.check(*blocks)
+        self.assertFalse(any(i.code == 'latin-outside-math' for i in issues))
+        self.assertEqual({i.path for i in issues if i.code == 'figure-alt-duplicate'},
+                         {'items[0].blocks[2].alt', 'items[0].blocks[4].alt'})
+
     def test_duplicate_student_figure_alt_reports_every_location(self):
         picture = {'svg': '<svg/>', 'width_mm': 40, 'alt': '두  점이 표시된 그림'}
         same = {**picture, 'alt': '  두\t점이 표시된 그림  '}
@@ -1056,7 +1074,7 @@ class FigurePlanTest(unittest.TestCase):
         self.assertEqual(len(warnings), len(paths))
         for warning in warnings:
             self.assertTrue(any(other in warning.hint for other in paths - {warning.path}))
-            for difference in ('꼭짓점', '값', '호'):
+            for difference in ('꼭짓점', '값', '호', '점 이름(A, B, P)', 'alt에 그대로'):
                 self.assertIn(difference, warning.hint)
 
     def test_duplicate_alt_checks_two_columns_and_excludes_teacher_figures(self):

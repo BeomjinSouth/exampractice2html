@@ -846,7 +846,7 @@ class Validator:
                 self.error(f'{path}.{key}', '참·거짓 값이 필요합니다.', 'true 또는 false를 쓰세요.')
 
     def text(self, value, path, *, empty=False, private=False, local=False, field=None, term_visible=None,
-             expression_visible=None, print_visible=None):
+             expression_visible=None, print_visible=None, math_typography=True):
         if not isinstance(value, str) or (not empty and not value.strip()):
             self.error(path, '글자 내용이 필요합니다.', '비어 있지 않은 문자열을 쓰세요.')
             return None
@@ -887,7 +887,7 @@ class Validator:
             self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.', 'text-length')
         if '□' in parsed.outside_math:
             self.warn(path, '점검 줄 기호(□)가 있습니다.', '학생이 해야 할 행동을 문장으로 쓰세요.', 'checklist-mark')
-        if re.search(r'(?<![A-Za-z0-9])[A-Z]+(?![A-Za-z0-9])', parsed.outside_math):
+        if math_typography and re.search(r'(?<![A-Za-z0-9])[A-Z]+(?![A-Za-z0-9])', parsed.outside_math):
             self.warn(path, '수식 밖에 영문 대문자 낱말이 있습니다.', '점은 $A$, 평면은 $\\mathit{A}$처럼 쓰세요.', 'latin-outside-math')
         for blank in parsed.blanks:
             if not blank.answer:
@@ -956,7 +956,8 @@ class Validator:
                 message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else '그림 파일을 읽지 못했습니다.'
                 self.error(where, message, '활동지 폴더 안의 읽을 수 있는 그림을 지정하세요.')
         if 'alt' in value or ('src' in value and not local_svg):
-            parsed = self.text(value.get('alt'), path + '.alt', private=True, term_visible=not private, field=field + 'alt')
+            parsed = self.text(value.get('alt'), path + '.alt', private=True, term_visible=not private,
+                               field=field + 'alt', math_typography=False)
             if parsed and parsed.blanks:
                 self.error(path + '.alt', '대체 설명에는 빈칸을 그릴 수 없습니다.', '정답이 없는 일반 설명으로 바꾸세요.')
             elif parsed and not private and parsed.plain.strip():
@@ -1880,7 +1881,8 @@ class Validator:
                                self.kind in ('연습', '평가') and
                                (key == 'grade' or key in ('term', 'subject') and not header_title))
                     parsed = self.text(meta[key], 'meta.' + key, empty=key in ('term', 'grade', 'subject', 'unit'),
-                                       private=True, term_visible=key != 'goal', print_visible=in_head)
+                                       private=True, term_visible=key != 'goal', print_visible=in_head,
+                                       math_typography=key != 'goal')
                     if parsed and parsed.blanks:
                         self.error('meta.' + key, '머리표 정보에는 빈칸 표기를 넣을 수 없습니다.', '빈칸은 상황이나 발문에 넣으세요.')
             for i, name in enumerate(self.texts(meta['name_fields'], 'meta.name_fields', minimum=1, maximum=3,
@@ -1928,8 +1930,8 @@ class Validator:
                 for i, where in enumerate(paths):
                     other = paths[1 if i == 0 else 0]
                     self.warn(where, '학생 그림의 대체 설명이 다른 그림과 같습니다.',
-                              f'{other}와 구별되도록 그림마다 꼭짓점 이름, 주어진 값, 표시한 호 등을 쓰세요.',
-                              'figure-alt-duplicate')
+                              f'{other}와 구별되도록 그림마다 꼭짓점 이름, 주어진 값, 표시한 호 등을 쓰세요. '
+                              '점 이름(A, B, P)은 alt에 그대로 써도 됩니다.', 'figure-alt-duplicate')
         self.check_box_tables(sheet_blocks)
         self.meta(meta)
         self.teacher(data.get('teacher', {}))

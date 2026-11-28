@@ -542,6 +542,87 @@ class PlanTest(unittest.TestCase):
                          [f'items[0].blocks[{i}].text' for i in range(len(controls), len(controls) + len(examples))])
         self.assertIn('아래로 열', issues[-1].message)
 
+    def test_round9_expression_and_term_regressions(self):
+        cases = (
+            ('원과 부채꼴', '호 $AB$는 원호입니다.', 'textbook-expression', True),
+            ('원과 부채꼴', '이것은 원호이다.', 'textbook-expression', True),
+            ('원과 부채꼴', '원호는 원의 일부이다.', 'textbook-expression', True),
+            ('원과 부채꼴', '원호가 보인다.', 'textbook-expression', True),
+            ('원과 부채꼴', '타원호를 그린다.', 'textbook-expression', False),
+            ('원과 부채꼴', '반지름이 3π cm인 원', 'textbook-expression', True),
+            ('원과 부채꼴', r'반지름이 $3\pi$ cm인 원', 'textbook-expression', True),
+            ('원과 부채꼴', r'지름이 $\pi$인 원', 'textbook-expression', True),
+            ('원과 부채꼴', '반지름의 길이가 3π cm인 원', 'textbook-expression', False),
+            ('일차방정식', '분모를 이항할 수가 없다.', 'textbook-expression', False),
+            ('일차방정식', '분모를 이항할 수는 없다.', 'textbook-expression', False),
+            ('일차방정식', '분모를 이항할 수도 없다.', 'textbook-expression', False),
+            ('일차방정식', '분모를 이항할 수가 있다.', 'textbook-expression', True),
+            ('자료의 정리와 해석', '자료를 분산 보관한다.', 'term-beyond-grade', False),
+            ('자료의 정리와 해석', '분산 투자와 분산 처리.', 'term-beyond-grade', False),
+            ('자료의 정리와 해석', '자료를 분산시키거나 분산되도록 한다.', 'term-beyond-grade', False),
+            ('자료의 정리와 해석', '자료의 분산을 구한다.', 'term-beyond-grade', True),
+            ('원의 성질', r'$\angle APB$가 보는 호를 찾는다.', 'textbook-expression', True),
+            ('원주각', '각이 보는 호를 비교한다.', 'textbook-expression', True),
+            ('원의 성질', '같은 호에 대한 원주각을 찾는다.', 'textbook-expression', False),
+            ('원의 성질', '호를 보는 눈을 그린다.', 'textbook-expression', False),
+            ('독서', '그림을 보는 호기심을 기른다.', 'textbook-expression', False),
+        )
+        for unit, text, code, expected in cases:
+            with self.subTest(text=text):
+                data = document({'type': 'text', 'text': text})
+                data['meta'].update(grade='중1', unit=unit)
+                issues = [i for i in validate(data, ROOT) if i.code == code and i.path.startswith('items')]
+                self.assertEqual(bool(issues), expected, issues)
+                if '보는 호' in text and expected:
+                    self.assertIn('포함하지 않는 호', issues[0].hint)
+
+    def test_screen_only_instruction_in_printed_student_text(self):
+        bad = ('‘곧은 선’을 골라 이으세요.', '"지우개"를 고르세요.', "'되돌리기'를 누르세요.",
+               '“모두 지우기”를 고르세요.', '‘크게’를 고르세요.', '‘펜’을 선택하세요.',
+               '확인 단추를 누르세요.', '정답 보기 단추를 누르시오.')
+        good = ('꼭짓점에서 $A$, $B$까지 각각 선분을 그으세요.', '지우개로 잘못 그린 부분을 지운다.',
+                '펜으로 선을 긋는다.', '각의 크기를 크게 그린다.', '‘펜’으로 글씨를 쓴다.')
+        for text in (*bad, *good):
+            with self.subTest(text=text):
+                data = document({'type': 'question', 'text': text})
+                self.assertEqual(any(i.code == 'screen-only-instruction' for i in validate(data, ROOT)), text in bad)
+        data = document({'type': 'situation', 'title': bad[0], 'lines': [bad[1]]},
+                        {'type': 'answer', 'rows': [{'label': bad[2], 'answer': bad[3]}]},
+                        {'type': 'callout', 'kind': '개념', 'title': bad[4], 'lines': [bad[5]]},
+                        {'type': 'checklist', 'items': [bad[6]]},
+                        {'type': 'checklist', 'print': True, 'items': [bad[7]]},
+                        {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40, 'teacher_only': True,
+                         'caption': bad[0]})
+        data['meta']['kind'] = '수업'
+        data['items'][0]['hints'] = [bad[0]]
+        data['teacher'] = {'memo': [bad[1]], 'solutions': [{'item': 'q1', 'answer': bad[2], 'steps': [bad[3]]}]}
+        paths = {i.path for i in validate(data, ROOT) if i.code == 'screen-only-instruction'}
+        self.assertEqual(paths, {'items[0].blocks[0].title', 'items[0].blocks[0].lines[0]',
+                                 'items[0].blocks[1].rows[0].label', 'items[0].blocks[2].title',
+                                 'items[0].blocks[2].lines[0]', 'items[0].blocks[4].items[0]'})
+        data = document({'type': 'text', 'text': '설명을 쓰세요.'})
+        data['meta'].update(kind='수업', title=bad[0], unit=bad[1], name_fields=[bad[4]], goal=bad[6])
+        paths = lambda: {i.path for i in validate(data, ROOT) if i.code == 'screen-only-instruction'}
+        self.assertEqual(paths(), {'meta.title', 'meta.unit', 'meta.name_fields[0]'})
+        data['meta']['header_title'] = '제목'
+        self.assertEqual(paths(), {'meta.unit', 'meta.name_fields[0]'})
+
+    def test_print_color_theme_warning_only_for_practice_and_assessment(self):
+        data = document({'type': 'text', 'text': '생각을 씁니다.'})
+        for kind, theme, expected in (('수업', '산뜻', False), ('연습', '산뜻', True), ('평가', '산뜻', True),
+                                      ('연습', '정본', False), ('평가', None, False)):
+            with self.subTest(kind=kind, theme=theme):
+                data['meta']['kind'] = kind
+                if theme is None:
+                    data['meta'].pop('theme', None)
+                else:
+                    data['meta']['theme'] = theme
+                warnings = [i for i in validate(data, ROOT) if i.code == 'theme-print-color']
+                self.assertEqual(len(warnings), int(expected))
+                if warnings:
+                    self.assertEqual(warnings[0].path, 'meta.theme')
+                    self.assertIn('인쇄 PDF에도 색 채움이 남습니다', warnings[0].hint)
+
     def test_grade_long_and_short_simultaneous_equations(self):
         for term in ('연립방정식', '연립일차방정식', '피타고라스 정리', '피타고라스의 정리'):
             data = document({'type': 'question', 'text': term + '을 푸시오.'})
@@ -868,6 +949,28 @@ class FigurePlanTest(unittest.TestCase):
         raw['rows'][0][1] = '$45$, $60$, $90$'  # A repeated value was left out.
         self.assertEqual(set(mismatches()), {'box-table-data-mismatch'})
 
+    def test_box_table_and_chart_units_prevent_unrelated_comparisons(self):
+        chart = {'type': 'chart', 'kind': 'box', 'x': [0, 100], 'x_step': 10, 'x_label': '(분)',
+                 'groups': [{'label': '1반', 'data': [10, 20, 30, 40]}]}
+        raw = {'type': 'table', 'header': ['구분', '점수'], 'unit': '점',
+               'rows': [['1반', '$1$, $2$, $3$, $4$']]}
+        five = {'type': 'table', 'header': ['구분', '최솟값', '제1사분위수', '중앙값', '제3사분위수', '최댓값'],
+                'unit': '점', 'rows': [['1반', '$1$', '$1.5$', '$2.5$', '$3.5$', '$4$']]}
+        data = document(raw, five)
+        data['items'].append({'id': 'q2', 'blocks': [chart]})
+        def codes():
+            return {i.code for i in validate(data, ROOT) if i.code.startswith('box-table-')}
+        self.assertEqual(codes(), set())
+        raw.pop('unit')
+        raw['header'][1] = '점수 (점)'
+        self.assertEqual(codes(), set())
+        raw['header'][1] = '점수 (분)'
+        five['unit'] = '분'
+        self.assertEqual(codes(), {'box-table-data-mismatch', 'box-table-five-mismatch'})
+        raw['header'][1] = '점수'
+        five.pop('unit')
+        self.assertEqual(codes(), {'box-table-data-mismatch', 'box-table-five-mismatch'})
+
     def test_figure_answer_requires_svg_with_matching_viewbox(self):
         figure = deepcopy(load_registry()['figure']['example'])
         for answer in ('<svg viewBox="0,0,40.0,20"/>', {'svg': '<svg viewBox="0 0 40 20"/>'}):
@@ -956,6 +1059,26 @@ class FigurePlanTest(unittest.TestCase):
                 figure = {'type': 'figure', 'width_mm': 100, 'svg': svg, 'alt': '점 A'}
                 messages = [i.message for i in self.check(figure) if i.code == 'figure-label-small']
                 self.assertEqual(len(messages), int(expected is not None))
+                if expected:
+                    self.assertIn(expected + 'pt', messages[0])
+
+    def test_svg_label_size_composes_nested_viewports(self):
+        cases = (
+            ('<svg width="10" height="10" viewBox="0 0 100 100"><text font-size="10">A</text></svg>', '2.83'),
+            ('<g transform="scale(2)"><svg width="10" height="10" viewBox="0 0 100 100">'
+             '<text font-size="10">A</text></svg></g>', '5.67'),
+            ('<svg width="10" height="20" viewBox="0 0 100 100" preserveAspectRatio="none">'
+             '<text font-size="10">A</text></svg>', '5.67'),
+            ('<svg width="10" height="20" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">'
+             '<text font-size="10">A</text></svg>', '2.83'),
+            ('<svg width="10%" height="10%" viewBox="0 0 100 100"><text font-size="1">A</text></svg>', None),
+        )
+        for child, expected in cases:
+            with self.subTest(child=child):
+                svg = f'<svg viewBox="0 0 100 100">{child}</svg>'
+                figure = {'type': 'figure', 'width_mm': 100, 'svg': svg, 'alt': '점 A'}
+                messages = [i.message for i in self.check(figure) if i.code == 'figure-label-small']
+                self.assertEqual(len(messages), int(expected is not None), messages)
                 if expected:
                     self.assertIn(expected + 'pt', messages[0])
 

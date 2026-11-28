@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -28,6 +29,34 @@ class Tags(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         self.tags.append((tag, dict(attrs)))
+
+
+class PythonCommandTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows에서 PowerShell 명령 구문을 검사합니다.')
+    def test_windows_python_command_parses_in_powershell(self):
+        from sheet_common import python_sheet_command
+        shell = shutil.which('powershell') or shutil.which('pwsh')
+        if not shell:
+            self.skipTest('PowerShell이 없습니다.')
+        parse = ("$code = [Console]::In.ReadToEnd(); $tokens = $null; $errors = $null; "
+                 "[System.Management.Automation.Language.Parser]::ParseInput($code, [ref]$tokens, [ref]$errors) > $null; "
+                 "if ($errors.Count) { $errors | ForEach-Object { $_.ToString() }; exit 1 }")
+        for executable in (r'C:\대체 환경\python.exe', 'C:\\대체 $환경`파일\\python.exe'):
+            for action in ('doctor', 'build "활동지 폴더"'):
+                with self.subTest(executable=executable, action=action):
+                    command = python_sheet_command(executable, action)
+                    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', parse],
+                                            input=command, capture_output=True, encoding='utf-8')
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(command.startswith('& "'), command)
+                    if '$' in executable:
+                        self.assertIn('`$환경``파일', command)
+
+    def test_non_windows_python_command_keeps_existing_form(self):
+        import sheet_common
+        with patch.object(sheet_common.sys, 'platform', 'linux'):
+            command = sheet_common.python_sheet_command('/path with spaces/python', 'doctor')
+        self.assertEqual(command, f'"/path with spaces/python" -X utf8 "{ROOT / "scripts/sheet.py"}" doctor')
 
 
 class BuildTest(unittest.TestCase):
@@ -187,6 +216,30 @@ class BuildTest(unittest.TestCase):
         self.assertIn('foreign-code', output)
         self.assertIn('구성.json', output)
         self.assertEqual({path: path.read_bytes() for path in paths}, before)
+
+    def test_derive_blocks_new_foreign_elements_without_changing_outputs(self):
+        self.interactive_fixture()
+        self.cli('build', self.folder)
+        source = self.teacher.read_text(encoding='utf-8')
+        saved = source.replace('<style id="sheet-user"></style>',
+                               '<style id="sheet-user">.ws-text{font-size:12pt}</style>')
+        self.assertNotEqual(saved, source)
+        self.teacher.write_text(saved, encoding='utf-8')
+        self.cli('derive', self.teacher)
+        saved = self.teacher.read_text(encoding='utf-8')
+        paths = (self.student, self.record, self.folder / '검사/정답표.json')
+        before = {path: path.read_bytes() for path in paths}
+        for fragment in ('<base href="https://example.invalid/">',
+                         '<meta http-equiv="refresh" content="0">',
+                         '<style>body{display:none}</style>',
+                         '<style id="sheet-css"></style>',
+                         '<style id="extra">@import "extra.css";</style>'):
+            with self.subTest(fragment=fragment):
+                edited = saved.replace('</head>', fragment + '</head>')
+                self.teacher.write_text(edited, encoding='utf-8')
+                self.assertIn('foreign-code', self.cli('derive', self.teacher, status=1))
+                self.assertEqual(self.teacher.read_text(encoding='utf-8'), edited)
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
     def test_derive_accepts_edited_sheet_from_an_older_build_record(self):
         # 스크립트 해시가 없는 예전 조립 기록이면, 스킬을 업데이트한 뒤에도 예전 엔진으로 만든 편집본을 derive할 수 있어야 한다.

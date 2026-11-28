@@ -16,7 +16,7 @@ TRIALS = Path(os.environ.get('SHEET_TEST_TRIALS', ROOT / 'tests' / '_out' / '검
 sys.path.insert(0, str(ROOT / 'scripts'))
 import sheet_build
 import sheet_check
-from sheet_common import engine_script
+from sheet_common import ForeignCodeAudit, engine_script, foreign_code_issues
 
 
 def fixture_html():
@@ -118,6 +118,11 @@ class CheckIntegrationTest(unittest.TestCase):
                 ('<object></object>', '<object>'),
                 ('<embed>', '<embed>'),
                 ('<link rel="stylesheet" href="style.css">', '<link>'),
+                ('<meta http-equiv="REFRESH" content="0;url=https://example.invalid">', '<meta'),
+                ('<base href="https://example.invalid/">', '<base>'),
+                ('<style>body {display:none}</style>', '<style>'),
+                ('<style id="sheet-user"></style>', '<style>'),
+                ('<style id="extra">@import "external.css";</style>', '@import'),
                 ('<a href=" Javascript:void(0)">보기</a>', 'javascript:'),
                 ('<script id="sheet-reveal">/* 자료 아님 */</script>', 'sheet-reveal'),
                 ('<script id="sheet-js" src="extra.js"></script>', 'sheet-js')):
@@ -245,7 +250,8 @@ class CheckIntegrationTest(unittest.TestCase):
                 folder = self.run_root / name
                 folder.mkdir()
                 teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
-                student = sheet_build.strip_teacher(teacher).replace('</head>', f'<style>{css}{injected}</style></head>')
+                student = sheet_build.strip_teacher(teacher).replace(
+                    '<style id="sheet-user"></style>', f'<style id="sheet-user">{css}{injected}</style>')
                 self.make_case(name, teacher, student)
                 sheet_build.update_answer_table(folder, sheet_build.answer_table_from_html(teacher))
                 with patch.object(sheet_check, 'sheet_browser', browser_with_pen_fixture):
@@ -340,6 +346,52 @@ class CheckIntegrationTest(unittest.TestCase):
 
 
 class SourceAuditTest(unittest.TestCase):
+    def test_foreign_code_rejects_redirects_and_unapproved_or_duplicate_styles(self):
+        fragments = (
+            '<MeTa HTTP-EQUIV="ReFrEsH" content="0;url=https://example.invalid">',
+            '<base href="https://example.invalid/">',
+            '<style>body {display:none}</style>',
+            '<style id="extra">body {display:none}</style>',
+            '<style id="sheet-css"></style><style id="sheet-css"></style>',
+            '<style id="sheet-user" id="extra"></style>',
+        )
+        for fragment in fragments:
+            with self.subTest(fragment=fragment):
+                self.assertTrue(foreign_code_issues(fragment), fragment)
+
+    def test_foreign_code_checks_resources_inside_each_allowed_style(self):
+        dangerous = (
+            '@import "local.css";',
+            '@IMPORT url("data:text/css,x");',
+            'p {background: url(HTTP://example.invalid/a)}',
+            "p {background: URL( '//example.invalid/a' )}",
+            r'p {background: u\72l(\68 ttps://example.invalid/a)}',
+            'p {background: url(../outside.png)}',
+            'p {background: url(file:///C:/outside.png)}',
+            'p {background: url(https://example.invalid/a',
+            'p {background: url("https://example.invalid/a"',
+        )
+        for ident in ('sheet-css', 'sheet-fonts', 'sheet-theme', 'sheet-user'):
+            for css in dangerous:
+                with self.subTest(ident=ident, css=css):
+                    self.assertTrue(foreign_code_issues(f'<style id="{ident}">{css}</style>'))
+
+    def test_foreign_code_accepts_local_styles_video_and_svg_across_chunks(self):
+        source = ("<style id='sheet-fonts'>@font-face{src:url(data:font/woff;base64,YWJj)}</style>"
+                  '<style id="sheet-css">/* @import "ignored.css" */'
+                  'p::after{content:"url(https://example.invalid)"} .a{clip-path:url(#clip)}</style>'
+                  '<style id="sheet-theme">p{color:red}</style>'
+                  '<style id="sheet-user">p{font-size:12pt}</style>'
+                  '<figure class="ws-video" data-yt="abcdefghijk">영상</figure>'
+                  '<svg><defs><clipPath id="clip"></clipPath></defs>'
+                  '<path clip-path="url(#clip)" style="fill:red"></path></svg>')
+        parser = ForeignCodeAudit()
+        for start in range(0, len(source), 7):
+            parser.feed(source[start:start + 7])
+        parser.close()
+        self.assertEqual(parser.issues(), [])
+        self.assertEqual(foreign_code_issues(source), [])
+
     def test_markers_only_in_markup_not_inline_engine(self):
         parser = sheet_check._SourceAudit()
         parser.feed('<style>.ws-key{color:red}</style><script>"data-src=";"ws-key"</script><p>정상</p>')

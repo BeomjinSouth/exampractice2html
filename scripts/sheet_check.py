@@ -17,6 +17,7 @@ import tempfile
 import unicodedata
 
 import cdp
+from sheet_common import FOREIGN_CODE_FIX, ForeignCodeAudit, foreign_code_issues
 
 
 class CheckError(Exception):
@@ -1054,6 +1055,26 @@ def _contact_sheets(out, images, problems):
     return [color, gray]
 
 
+def _print_problem(issue):
+    location = f"{issue['page']}쪽" if issue['page'] else "문서"
+    if issue['item']:
+        location += " " + str(issue['item'])
+    level = "오류" if issue['level'] == "error" else "경고"
+    print(f"{level} · {location} · {issue['code']} · {issue['msg']} · {issue['fix']}")
+
+
+def _write_check_report(out, teacher, student, problems, *, teacher_report=None,
+                        student_report=None, interactive_info=None, outputs=()):
+    report_path = out / "report.json"
+    report = {"tool": "pbj-html-sheet", "version": 1,
+              "checked_at": datetime.now(timezone.utc).isoformat(),
+              "teacher": teacher_report, "student": student_report,
+              "interactive_check": interactive_info,
+              "problems": problems, "files": [*outputs, str(report_path)],
+              "html_sha256": {"teacher": _sha(teacher), "student": _sha(student)}}
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def cmd_check(folder: Path) -> int:
     folder = Path(folder).resolve()
     try:
@@ -1076,6 +1097,16 @@ def cmd_check(folder: Path) -> int:
                 if build.get(key, {}).get("sha256") != _sha(path):
                     _problem(problems, "warning", "build-hash-changed", None, None,
                              f"{role} HTML이 조립 기록과 다릅니다.", "브라우저 편집본인지 확인하고 최신 학생용을 검사하세요.")
+        script_hash = (build or {}).get('sheet_js_sha256')
+        for role, source in (("교사용", teacher_text), ("학생용", student_text)):
+            for message in foreign_code_issues(source, script_hash):
+                _problem(problems, "error", "foreign-code", None, None, f"{role} HTML: {message}", FOREIGN_CODE_FIX)
+        if any(issue['code'] == 'foreign-code' for issue in problems):
+            _write_check_report(out, teacher, student, problems)
+            for issue in problems:
+                _print_problem(issue)
+            print("다음 할 일: 스킬 밖 코드를 고친 뒤 다시 검사하세요. 브라우저는 열지 않았습니다.")
+            return 1
         with sheet_browser() as browser:
             protocol = browser.cdp
             for domain in ("Page.enable", "Runtime.enable", "Network.enable"):
@@ -1123,25 +1154,14 @@ def cmd_check(folder: Path) -> int:
         outputs.extend(str(path) for _, _, path in images)
         sheets = _contact_sheets(out, [image for image in images if image[0] != "학생-채움"], problems)
         outputs.extend(str(path) for path in sheets)
-        report_path = out / "report.json"
-        outputs.append(str(report_path))
-        report = {"tool": "pbj-html-sheet", "version": 1,
-                  "checked_at": datetime.now(timezone.utc).isoformat(),
-                  "teacher": teacher_report, "student": student_report,
-                  "interactive_check": interactive_info,
-                  "problems": problems, "files": outputs,
-                  "html_sha256": {"teacher": _sha(teacher), "student": _sha(student)}}
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _write_check_report(out, teacher, student, problems, teacher_report=teacher_report,
+                            student_report=student_report, interactive_info=interactive_info, outputs=outputs)
         for role, engine in (("학생", student_report), ("교사", teacher_report)):
             for page in engine["pages"]:
                 fills = ", ".join(f"{slot.get('fill', 0) * 100:.1f}%" for slot in page.get("slots", []))
                 print(f"{role} {page.get('n')}쪽 · 채움 {fills}")
         for issue in problems:
-            location = f"{issue['page']}쪽" if issue["page"] else "문서"
-            if issue["item"]:
-                location += " " + str(issue["item"])
-            level = "오류" if issue["level"] == "error" else "경고"
-            print(f"{level} · {location} · {issue['code']} · {issue['msg']} · {issue['fix']}")
+            _print_problem(issue)
         errors = sum(issue["level"] == "error" for issue in problems)
         warns = sum(issue["level"] == "warning" for issue in problems)
         print(f"오류 {errors} · 경고 {warns}")
@@ -1154,10 +1174,10 @@ def cmd_check(folder: Path) -> int:
         return 2
 
 
-class _DeliveryMeta(HTMLParser):
+class _DeliveryMeta(ForeignCodeAudit):
     """조립 지문과 공개 정책·실제 요소를 읽되 연동 설정 값은 보관하지 않는다."""
     def __init__(self):
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.build = None
         self.sync = False
         self.interactive = False
@@ -1166,6 +1186,7 @@ class _DeliveryMeta(HTMLParser):
         self.has_hash = False
 
     def handle_starttag(self, tag, attrs):
+        super().handle_starttag(tag, attrs)
         attrs = dict(attrs)
         if tag == 'html':
             self.interactive = 'data-interactive' in attrs
@@ -1369,7 +1390,16 @@ def _plan_warning_note(warnings):
     return '원고 경고: ' + (', '.join(f'{code} {count}건' for code, count in warnings.items()) or '0건')
 
 
-def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, edited_note='', unchecked=()):
+def _fonts_not_embedded(build, report):
+    fonts = (build or {}).get('fonts')
+    if isinstance(fonts, dict) and type(fonts.get('embedded')) is bool:
+        return not fonts['embedded']
+    applied = report['student'].get('fonts')
+    return isinstance(applied, dict) and bool(applied) and all(value is False for value in applied.values())
+
+
+def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, edited_note='', unchecked=(),
+                    fonts_not_embedded=False):
     print('\n전달 문안 초안 (경로·확인 범위는 다듬어도 되지만 맨 끝 ⭐ 줄은 답의 마지막 줄에 글자 그대로 붙이세요.)')
     print(f'학생용 HTML: {student}')
     print(f'학생용 PDF: {student.with_suffix(".pdf")}')
@@ -1382,6 +1412,8 @@ def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, e
         print(edited_note)
     for note in unchecked:
         print(note)
+    if fonts_not_embedded:
+        print('주의: 글꼴을 내장하지 못해 기기마다 줄바꿈과 쪽 나눔이 달라질 수 있습니다.')
     info = report.get('interactive_check')
     if metadata.interactive or report['student'].get('interactive'):
         info = info if isinstance(info, dict) else {}
@@ -1438,9 +1470,12 @@ def cmd_status(folder: Path) -> int:
 
     teacher_meta = student_meta = None
     fingerprint_ok = False
+    foreign_count = 0
     if files_ok:
         try:
             teacher_meta, student_meta = _delivery_meta(teacher), _delivery_meta(student)
+            script_hash = (build or {}).get('sheet_js_sha256')
+            foreign_count = sum(len(meta.issues(script_hash)) for meta in (teacher_meta, student_meta))
             fingerprint_ok = _engine_matches(build, teacher_meta, student_meta)
         except (OSError, UnicodeError, ValueError, ImportError):
             fingerprint_ok = False
@@ -1494,7 +1529,9 @@ def cmd_status(folder: Path) -> int:
 
     report_path = out / "report.json"
     report, check_ok, check_note = None, False, "검사 결과가 없습니다"
-    if files_ok and report_path.is_file():
+    if foreign_count:
+        check_note = f"foreign-code 오류 {foreign_count}개 · {FOREIGN_CODE_FIX}"
+    elif files_ok and report_path.is_file():
         try:
             report = _json(report_path)
             entries = report["problems"]
@@ -1564,7 +1601,8 @@ def cmd_status(folder: Path) -> int:
         print("다음 할 일: 전달할 파일을 확인하세요.")
         _delivery_draft(student, teacher, report, student_meta,
                         plan_warnings if '원고 경고:' in plan_note else None,
-                        edited_note=edited_note, unchecked=unchecked)
+                        edited_note=edited_note, unchecked=unchecked,
+                        fonts_not_embedded=_fonts_not_embedded(build, report))
     else:
         action = next(label for label, ok, _ in gates if not ok)
         print(f"다음 할 일: {action} 관문을 확인하세요.")

@@ -1,14 +1,19 @@
 import base64
+import builtins
+import contextlib
 import hashlib
+import io
 from html.parser import HTMLParser
 from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -114,6 +119,74 @@ class BuildTest(unittest.TestCase):
         for key, path in [('teacher', self.teacher), ('student', self.student)]:
             self.assertEqual(record[key], {'file': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
         self.assertEqual(record['fonts'], {'embedded': False, 'bytes': 0})
+        for content in (teacher, student):
+            script = re.search(r'<script id="sheet-js">(.*?)</script>', content, re.S)[1]
+            self.assertEqual(record['sheet_js_sha256'], hashlib.sha256(script.encode('utf-8')).hexdigest())
+
+    def test_build_without_fonttools_recommends_doctor_and_alternate_python(self):
+        import sheet_build
+
+        self.fixture(kind='수업')
+        fonts = Path(self.temp.name)
+        (fonts / 'NotoSansKR-VF.ttf').touch()
+        alternate = fonts / '대체 환경' / 'python.exe'
+        import_original = builtins.__import__
+
+        def without_fonttools(name, *args, **kwargs):
+            if name == 'fontTools':
+                raise ImportError(name)
+            return import_original(name, *args, **kwargs)
+
+        with (patch.dict(os.environ, {'SHEET_FONT_DIR': str(fonts), 'SHEET_SYNC_CONFIG': str(fonts / 'sync.json')}),
+              patch.object(builtins, '__import__', side_effect=without_fonttools),
+              patch.object(sheet_build, 'find_usable_python', return_value=alternate),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(sheet_build.cmd_build(self.folder), 0, output.getvalue())
+        self.assertIn('글꼴을 내장하지 않았습니다', output.getvalue())
+        self.assertIn('sheet.py" doctor', output.getvalue())
+        self.assertIn(f'"{alternate}" -X utf8 "{ROOT / "scripts/sheet.py"}" build', output.getvalue())
+        self.assertEqual(self.manifest()['fonts'], {'embedded': False, 'bytes': 0})
+
+    def test_doctor_tries_other_pythons_in_order_and_only_recommends_one_that_imports_everything(self):
+        import sheet
+        import sheet_common
+
+        candidates = [Path(self.temp.name) / f'python {i}.exe' for i in range(4)]
+        for path in candidates:
+            path.touch()
+        for usable in (True, False):
+            with self.subTest(usable=usable):
+                results = [subprocess.TimeoutExpired('python', 5), subprocess.CompletedProcess([], 1),
+                           subprocess.CompletedProcess([], 0 if usable else 1), subprocess.CompletedProcess([], 1)]
+                with (patch.object(sheet_common, '_python_candidates', return_value=candidates),
+                      patch.object(sheet_common.subprocess, 'run', side_effect=results) as probe,
+                      patch.object(sheet.importlib, 'import_module', side_effect=ImportError),
+                      contextlib.redirect_stdout(io.StringIO()) as output):
+                    self.assertEqual(sheet.cmd_doctor(), 0)
+                tried = candidates[:3] if usable else candidates
+                self.assertEqual([call.args[0][0] for call in probe.call_args_list], list(map(str, tried)))
+                for call in probe.call_args_list:
+                    self.assertEqual(call.kwargs['timeout'], 5)
+                    self.assertIn('import fontTools, PIL, pymupdf', call.args[0][-1])
+                if usable:
+                    self.assertIn(f'"{candidates[2]}" -X utf8 "{ROOT / "scripts/sheet.py"}" build', output.getvalue())
+                    self.assertNotIn('pip install', output.getvalue())
+                else:
+                    self.assertIn('python -m pip install fonttools pillow pymupdf', output.getvalue())
+
+    def test_derive_refuses_changed_engine_and_keeps_all_outputs(self):
+        self.interactive_fixture()
+        self.cli('build', self.folder)
+        teacher = self.teacher.read_text(encoding='utf-8')
+        edited = teacher.replace('<script id="sheet-js">', '<script id="sheet-js">\n/* 직접 편집 */', 1)
+        self.assertNotEqual(edited, teacher)
+        self.teacher.write_text(edited, encoding='utf-8')
+        paths = (self.teacher, self.student, self.record, self.folder / '검사/정답표.json')
+        before = {path: path.read_bytes() for path in paths}
+        output = self.cli('derive', self.teacher, status=1)
+        self.assertIn('foreign-code', output)
+        self.assertIn('구성.json', output)
+        self.assertEqual({path: path.read_bytes() for path in paths}, before)
 
     def test_saved_teacher_survives_derive_and_requires_force_to_overwrite(self):
         self.fixture()

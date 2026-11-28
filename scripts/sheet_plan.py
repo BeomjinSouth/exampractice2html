@@ -362,7 +362,11 @@ class Validator:
             if 'accept' in row:
                 self.texts(row['accept'], where + '.accept', private=True)
             if isinstance(row.get('answer'), str):
-                value = plain(row['answer'])
+                source = row['answer']
+                value = plain(source)
+                if (row.get('grow') is True and row.get('kind', 'text') == 'text' and
+                        source.splitlines() == [source] and 0 < len(value.strip()) <= 20):
+                    self.warn(where + '.grow', '짧은 답 칸이 쪽 채움으로 커집니다.', 'grow를 빼고 lines로 정하세요.')
                 if check == 'number' and num(value) is None:
                     self.error(where + '.answer', '수로 판별할 수 없는 정답입니다.', '숫자나 분수로 쓰세요.')
                 if check in ('number', 'auto') and num(value) is not None and isinstance(row.get('accept', []), list):
@@ -727,21 +731,45 @@ class Validator:
         elif kind == 'explore':
             text('prompt', False)
             params = self.list(block.get('params'), path + '.params', 1, 3) or []
-            names = set()
+            names, ranges = set(), {}
             for i, param in enumerate(params):
                 where = f'{path}.params[{i}]'
-                if not self.object(param, where, ('name', 'label', 'min', 'max', 'step', 'value')):
+                if not self.object(param, where, ('name', 'label', 'min', 'max', 'step', 'value', 'except')):
                     continue
                 name = param.get('name')
-                if not isinstance(name, str) or not re.fullmatch('[a-wyz]', name) or name in names:
-                    self.error(where + '.name', '매개변수 이름이 맞지 않습니다.', 'x를 제외한 서로 다른 영문 소문자 한 글자를 쓰세요.')
-                else:
+                valid_name = isinstance(name, str) and re.fullmatch('[a-wyz]', name) and name not in names
+                if valid_name:
                     names.add(name)
+                else:
+                    self.error(where + '.name', '매개변수 이름이 맞지 않습니다.', 'x를 제외한 서로 다른 영문 소문자 한 글자를 쓰세요.')
                 if 'label' in param:
                     self.text(param['label'], where + '.label')
                 low, high, step, value = (param.get(k) for k in ('min', 'max', 'step', 'value'))
-                if not all(is_number(v) for v in (low, high, step, value)) or not (low < high and step > 0 and low <= value <= high):
+                bounded = is_number(low) and is_number(high) and low < high
+                if not (bounded and is_number(step) and step > 0 and is_number(value) and low <= value <= high):
                     self.error(where, '매개변수 범위가 맞지 않습니다.', 'min < max, 양수 step, 범위 안의 value를 쓰세요.')
+                excluded = set()
+                for j, v in enumerate(self.list(param.get('except', []), where + '.except', 0) or []):
+                    if not is_number(v) or (bounded and not low <= v <= high):
+                        self.error(f'{where}.except[{j}]', '건너뛸 값이 범위에 맞지 않습니다.', 'min~max 사이의 수를 쓰세요.')
+                    else:
+                        excluded.add(v)
+                if is_number(value) and value in excluded:
+                    self.error(where + '.value', '처음 값은 건너뛸 값과 같을 수 없습니다.', 'except에 없는 값을 쓰세요.')
+                if valid_name and bounded:
+                    ranges[name] = (low, high, excluded)
+            if 'print' in block:
+                for i, snapshot in enumerate(self.list(block['print'], path + '.print', 1, 4) or []):
+                    where = f'{path}.print[{i}]'
+                    if not self.object(snapshot, where, names):
+                        continue
+                    if not snapshot:
+                        self.error(where, '인쇄할 값이 필요합니다.', '매개변수 이름과 값을 한 쌍 이상 쓰세요.')
+                    for name, value in snapshot.items():
+                        if name in ranges:
+                            low, high, excluded = ranges[name]
+                            if not is_number(value) or not low <= value <= high or value in excluded:
+                                self.error(f'{where}.{name}', '인쇄할 값이 허용 범위에 없습니다.', 'min~max 사이에서 except에 없는 수를 쓰세요.')
             try:
                 if not isinstance(block.get('fn'), str):
                     raise ValueError('함수 식이 필요합니다.')
@@ -756,6 +784,7 @@ class Validator:
         elif kind == 'video':
             self.video(block, path)
         elif kind == 'checklist':
+            self.bools(block, path, 'print')
             if self.kind == '평가':
                 self.error(path, '평가에는 자기 점검표를 쓸 수 없습니다.', '점검표를 빼거나 활동지 종류를 바꾸세요.')
             text('title', False)

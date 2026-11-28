@@ -429,9 +429,9 @@ try {
   }));
   await test('JS 정규화·해시·난독화 기준 자료 전부 및 Node SHA-256 대조', () => usingTab(interactive, async tab => {
     const cases = JSON.parse(await fs.readFile(path.join(here, 'answer-cases.json'), 'utf8'));
-    for (const name of ['norm','num','plain','points','line']) {
+    for (const name of ['norm','num','number_parts','text_candidates','plain','points','line']) {
       for (const [input, expected] of cases[name]) {
-        assert.equal(await tab.js(`__sheetCore.codec.${name}(${quote(input)})`), expected, `${name}: ${quote(input)}`);
+        assert.deepEqual(await tab.js(`__sheetCore.codec.${name}(${quote(input)})`), expected, `${name}: ${quote(input)}`);
       }
     }
     assert.deepEqual(await tab.js(`(${quote(cases.units)}).map(u=>__sheetCore.codec.num('18'+u))`), cases.units.map(() => '18'));
@@ -512,18 +512,46 @@ try {
         assert.equal(await status('reveal-solution'), permitted ? policy !== '바로' : undefined);
         assert.equal(await status('check'), policy === '없음' ? undefined : false);
         assert.equal(await tab.js(`sheet.answer('q1.1','1/2')`), policy === '없음' ? null : true);
-        if (policy === '시도 후') assert.equal(await status('reveal-answer'), true, 'API 판별은 확인 단추를 누른 시도가 아님');
+        if (policy === '시도 후') {
+          // Blank confirmation must not count, including for the record event.
+          await tab.js(`sheet.clearAnswers(); window.checks = 0; document.addEventListener('sheet:check', () => checks++)`);
+          await setInput(tab, `${slot('q1.1')} input`, '  ');
+          await tab.click(action('check',q1));
+          assert.equal(await status('reveal-answer'), true);
+          assert.equal(await status('reveal-solution'), true);
+          assert.match(await tab.js(`document.querySelector('${q1} .ws-item-score').textContent`), /먼저 답을 써 보세요/);
+          assert.equal(await tab.js('checks'), 0);
+          await tab.js(`sheet.answer('q1.1','1/2')`);
+          assert.equal(await status('reveal-answer'), true, 'API 판별은 확인 단추를 누른 시도가 아님');
+        }
         if (policy !== '없음') await tab.click(action('check',q1));
         if (permitted) {
           assert.equal(await status('reveal-answer'), false);
           assert.equal(await status('compare'), true);
-          await setInput(tab, `${slot('q1.4')} textarea`, '한글 다섯 자 이상');
+          const revealedCount = () => tab.js(`document.querySelectorAll('${q1} .ws-reveal:not([hidden])').length`);
+          await tab.click(action('reveal-answer',q1));
+          assert.equal(await revealedCount(), policy === '시도 후' ? 1 : 3);
+          assert.equal(await status('reveal-solution'), policy === '시도 후');
+          await setInput(tab, `${slot('q1.4')} textarea`, '!?');
+          assert.equal(await status('compare'), true);
+          await setInput(tab, `${slot('q1.4')} textarea`, '원점');
           assert.equal(await status('compare'), false);
           await tab.click(action('compare',q1));
           assert.equal(await tab.js(`document.querySelector('${q1} .ws-compare input').checkVisibility()`), true);
-          await tab.click(action('reveal-answer',q1)); await tab.click(action('reveal-solution',q1));
+          if (policy === '시도 후') {
+            assert.equal(await status('reveal-solution'), true);
+            await tab.js(`sheet.answer('q1.2','서로 평행'); sheet.answer('q1.3','1')`);
+            assert.equal(await status('reveal-solution'), false, '펜 칸은 채우지 않아도 됨');
+          }
+          await tab.click(action('reveal-solution',q1));
           assert.match(await tab.js(`document.querySelector('${q1} .ws-solution:not(.ws-compare)').textContent`), /풀이 표식/);
-          assert.equal(await tab.js(`document.querySelectorAll('${q1} .ws-reveal:not([hidden])').length`), 4);
+          assert.equal(await revealedCount(), 4);
+          if (policy === '시도 후') {
+            await setInput(tab, `${slot('q1.2')} input`, '');
+            assert.equal(await status('reveal-solution'), true);
+            assert.equal(await tab.js(`document.querySelector('${q1} .ws-solution:not(.ws-compare)').hidden`), true);
+            assert.equal(await revealedCount(), 3);
+          }
         } else assert.equal(await tab.js('!!document.querySelector("#sheet-reveal,.ws-reveal,.ws-solution")'), false);
         const shownHints = () => tab.js(`document.querySelectorAll('${q1} .ws-hint:not([hidden])').length`);
         assert.equal(await shownHints(), 0);
@@ -533,6 +561,86 @@ try {
       });
     }
   });
+  const contractFolder = path.join(work, 'contract-worksheet');
+  const contractTitle = '판별과 인쇄 시험';
+  const contractStudent = pathToFileURL(path.join(contractFolder, `${contractTitle}.html`)).href;
+  const explore = { type:'explore', fn:'a*x', x:[-2,2], y:[-4,4], unit_mm:5, table:[-1,0,1],
+    params:[{name:'a', min:-2, max:2, step:0.5, value:0.5, except:[-2,0,0.5+0.5]}] };
+  await test('조립본 단위 해시·등식 대칭·확인 필요 판별', async () => {
+    const source = { version:1, meta:{title:contractTitle, kind:'수업', theme:'산뜻', sync:false}, items:[
+      {id:'check', blocks:[{type:'answer', rows:[{label:'시간', answer:'$2$분'}, {label:'등식', answer:'$y=2x$', check:'text'}]}]},
+      {id:'units', blocks:[{type:'answer', rows:[{label:'각도', answer:'$30^\\circ$'}, {label:'길이', answer:'$5$'},
+        {label:'다른 정답', answer:'$1$시간', accept:['$60$분', '$1$']},
+        {label:'단위 있는 대안', answer:'$2$', accept:['$3$분']}]}]},
+      {id:'explore', break:true, blocks:[{...explore, print:[{a:2},{a:-1}]}, { ...explore, unit_mm:3 }]},
+      {id:'screen-check', break:true, blocks:[{type:'split', left:[{type:'checklist', title:'화면전용 점검', items:['하나']}],
+        right:[{type:'checklist', items:['둘'], print:false}]}]},
+      {id:'paper-check', blocks:[{type:'checklist', title:'인쇄허용 점검', items:['확인했어요.'], print:true},
+        {type:'order', items:['처음','중간','끝']}]}
+    ]};
+    await fs.mkdir(contractFolder);
+    await fs.writeFile(path.join(contractFolder, '구성.json'), quote(source));
+    await run(process.env.PYTHON || 'python', ['-B', '-X', 'utf8', path.join(here, '../../scripts/sheet.py'), 'build', contractFolder],
+      { env:{...process.env, SHEET_TEST_SALT:salt, SHEET_FONT_DIR:work} });
+    await usingTab(contractStudent, async tab => {
+      const answer = (id, value) => tab.js(`sheet.answer(${quote(id)}, ${quote(value)})`);
+      for (const [id, value, expected] of [
+        ['check.1','2',true], ['check.1','2분',true], ['check.1','2시간',false], ['check.1','3분',false],
+        ['check.2','2x=y',true], ['units.1','30도',true], ['units.1','30°',true], ['units.1','30분',false],
+        ['units.2','5cm',true], ['units.3','60분',true], ['units.3','60시간',false], ['units.3','1',true],
+        ['units.4','2',true], ['units.4','3분',true], ['units.4','3시간',false]
+      ]) assert.equal(await answer(id, value), expected, `${id}: ${value}`);
+      assert.deepEqual(await tab.js(`(() => { const el=document.querySelector('${slot('check.1')}'); return [el.dataset.checkUnit,el.dataset.checkHash.split(',')]; })()`),
+        ['1', [hash(salt,'number','2'), hash(salt,'number','2@분')]]);
+      await tab.js('sheet.clearAnswers()');
+      await setInput(tab, `${slot('check.1')} textarea`, '2분');
+      await setInput(tab, `${slot('check.2')} textarea`, 'y=3x');
+      await tab.click(action('check', item('check')));
+      assert.deepEqual(await tab.js(`Object.values(__sheetCore.verdicts()).slice(0,2)`), [true,'review']);
+      assert.match(await tab.js(`document.querySelector('${slot('check.2')} .ws-verdict.ws-review').textContent`), /예상한 답과 달라요.*선생님께 확인받아요/);
+      assert.equal(await tab.js(`document.querySelector('${item('check')} .ws-item-score').textContent`), '1/2 맞음 · 확인 필요 1');
+      assert.deepEqual(await tab.js('sheet.score()'), {checked:2, correct:1, total:7});
+      await setInput(tab, `${slot('check.2')} textarea`, '');
+      assert.equal(await tab.js(`__sheetCore.verdicts()['check.2']`), null);
+      assert.equal(await tab.js(`document.querySelector('${slot('check.2')} .ws-verdict').checkVisibility()`), false);
+      await tab.js('sheet.clearAnswers()');
+    });
+  });
+  await test('탐구 제외값·인쇄 스냅숏·점검표와 순서 안내', () => usingTab(contractStudent, async tab => {
+    const exploreItem = item('explore'), first = `${exploreItem} .ws-explore:first-child`;
+    const visible = selector => tab.js(`document.querySelector(${quote(selector)}).checkVisibility()`);
+    const slider = `${first} .ws-explore-ctrl input`;
+    assert.equal(await tab.js(`document.querySelectorAll('${slider}').length`), 1);
+    assert.equal(await visible(`${first} .ws-explore-snapshots`), false);
+    assert.equal(await visible(`${first} .ws-explore-table`), true);
+    assert.equal(await visible(`${item('screen-check')} .ws-checklist`), true);
+    assert.equal(await visible('.ws-order .ws-print-only'), false);
+    for (const [input, expected, text] of [['0','-0.5','−0.5'], ['0','0.5','0.5'], ['1','1.5','1.5'],
+      ['-1.5','-1.5','−1.5'], ['-2','-1.5','−1.5']]) {
+      await setInput(tab, slider, input);
+      assert.equal(await tab.js(`document.querySelector('${slider}').value`), expected);
+      assert.equal(await tab.js(`document.querySelector('${first} [data-y-for="1"]').textContent`), text);
+    }
+    await tab.js(`sheet.view('a4')`, true);
+    assert.equal(await visible(`${first} .ws-explore-snapshots`), true);
+    assert.equal(await visible(`${first} .ws-explore-table`), false);
+    assert.equal(await visible(`${first} .ws-explore-ctrl`), false);
+    assert.equal(await visible(`${item('paper-check')} .ws-checklist`), true);
+    assert.equal(await visible('.ws-order .ws-print-only'), true);
+    assert.equal(await tab.js(`document.querySelector('#sheet-pages ${item('screen-check')}') === null`), true);
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-snapshots figcaption')].map(x=>x.textContent)`), ['a=2','a=−1']);
+    assert.equal(await tab.js(`document.querySelector('${first} .ws-print-only [data-map], ${first} .ws-print-only [data-y-for]') === null`), true);
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('${first} .ws-explore-print-table tr')].map(row=>[...row.cells].map(c=>c.textContent))`),
+      [['x','−1','0','1'], ['y (a=2)','−2','0','2'], ['y (a=−1)','1','0','−1']]);
+    const report = await tab.report();
+    assert.deepEqual(report.issues, []);
+    const printed = await pdf(tab, 'snapshot-worksheet', report.pages.length, true);
+    assert.match(printed, /a=2/); assert.match(printed, /a=−1/);
+    assert.match(printed, /인쇄허용\s*점검/); assert.doesNotMatch(printed, /화면전용\s*점검/);
+    assert.match(printed, /안에\s*순서대로\s*1,\s*2,\s*3,/);
+    assert.match(printed, /화면에서는\s*값을\s*바꾸며\s*살펴볼\s*수\s*있습니다/);
+    assert.equal(await tab.js(`document.querySelector('${first} .ws-explore-note') === null`), true);
+  }));
   await test('해상도·인쇄 배치·열 복원 및 실제 Chrome PNG', () => usingTab(studentInteractive, async tab => {
     assert.equal(await tab.js('sheet.view()'), 'solve');
     const col = '.ws-split .ws-data col:first-child';
@@ -649,11 +757,14 @@ try {
     const hashes = (selector) => tab.js(`document.querySelector(${quote(selector)}).dataset.checkHash`);
     assert.equal(await hashes(slot('q1.2')),hash(salt,'number','3/4'));
     assert.equal(await tab.js(`document.querySelector('${qText('q1')} .ws-blank[data-slot="q1.2"] .ws-key').textContent`),'34');
-    await editField(`${slot('q1.4')} .ws-key`,'$2$');
-    assert.equal(await hashes(slot('q1.4')),hash(salt,'number','2'));
+    await editField(`${slot('q1.4')} .ws-key`,'$2$분');
+    const unitAttribute = () => tab.js(`document.querySelector(${quote(slot('q1.4'))}).getAttribute('data-check-unit')`);
+    assert.equal(await unitAttribute(), '1');
+    assert.equal(await hashes(slot('q1.4')),[hash(salt,'number','2'),hash(salt,'number','2@분')].join(','));
     await tab.key('z',2);
     assert.equal(await hashes(slot('q1.4')),hash(salt,'number','1'));
-    await editField(`${slot('q1.4')} .ws-key`,'$2$');
+    assert.equal(await unitAttribute(), null);
+    await editField(`${slot('q1.4')} .ws-key`,'$2$분');
     await tab.click(action('duplicate',item('q1')));
     const serialized = await tab.js(`(() => {
       const d=new DOMParser().parseFromString(sheet.serialize(),'text/html');
@@ -736,7 +847,7 @@ try {
     assert.equal(sent.body.event,'check'); assert.equal(sent.body.item,'q1');
     assert(!Object.keys(sent.body.answers).some(key => key.startsWith('head.')));
     assert.equal(sent.body.answers['q1.1'],'0.5'); assert.equal(sent.body.verdicts['q1.1'],true);
-    assert.equal(sent.body.verdicts['q1.2'],false); assert.deepEqual(sent.body.score,{checked:2,correct:1,total:11});
+    assert.equal(sent.body.verdicts['q1.2'],'review'); assert.deepEqual(sent.body.score,{checked:2,correct:1,total:11});
     await tab.js('syncMock.fail = true'); await tab.click(action('sync-submit'));
     await eventually(() => tab.js(`document.querySelector(${quote(action('sync-retry'))}).textContent.includes('보내지 못함')`), '실패 상태');
     const queued = await tab.js(`JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.endsWith(':queue'))))`);

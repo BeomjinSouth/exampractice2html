@@ -5,6 +5,7 @@ html[data-theme="산뜻"] {
   --hairline: #c1cbd0; --mist: #f7f9fa; --paper: #fff;
   --ws-rule: .2mm solid var(--line); --ws-label: var(--accent-ink);
   --ok: #18613f; --ok-soft: #edf8f0; --retry: #8d420e; --retry-soft: #fff2e8;
+  --review: #854700; --review-soft: #fff5dc;
 }
 html[data-theme="산뜻"][data-accent="민트"] {
   --accent: #197d6e; --accent-ink: #175348; --accent-soft: #edf8f2;
@@ -199,6 +200,7 @@ html[data-theme="산뜻"] .ws-pen-tools { border-radius: 4px; }
 html[data-theme="산뜻"] #sheet-flow .ws-verdict { width: fit-content; padding-inline: .45em; border-radius: .35em; font-weight: 700; }
 html[data-theme="산뜻"] #sheet-flow .ws-verdict.ws-ok { color: var(--ok); background: var(--ok-soft); }
 html[data-theme="산뜻"] #sheet-flow .ws-verdict.ws-no { color: var(--retry); background: var(--retry-soft); }
+html[data-theme="산뜻"] #sheet-flow .ws-verdict.ws-review { color: var(--review); background: var(--review-soft); }
 html[data-theme="산뜻"] #sheet-flow .ws-reveal { width: fit-content; padding: .15em .45em; border-inline-start: 2px solid var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
 html[data-theme="산뜻"] #sheet-flow :is(.ws-solution, .ws-hint) { background: var(--accent-soft); border: 0; border-inline-start: 3px solid var(--accent); border-radius: 0 4px 4px 0; padding: 8px 12px; }
 html[data-theme="산뜻"] #sheet-flow .ws-solution > :first-child { margin-block-start: 0; }

@@ -173,9 +173,15 @@ class SourceAuditTest(unittest.TestCase):
 
 
 class FakeInteractiveProtocol:
-    def __init__(self, reveal='시도 후', overflow=0, leaks=0):
+    def __init__(self, reveal='시도 후', overflow=0, leaks=0, items=(), lose=None):
         self.reveal, self.overflow, self.leaks = reveal, overflow, leaks
-        self.calls, self.expressions = [], []
+        self.items, self.lose = list(items), lose
+        self.values = {'q1.1': '정답', 'q2.1': '검사 서술 첫째 줄\n검사 서술 둘째 줄',
+                       'q2.2': {'strokes': [[[0.15, 0.25], [0.5, 0.75], [0.85, 0.35]]]}, 'head.이름': '검사'}
+        self.calls, self.expressions, self.events = [], [], []
+
+    def wait_event(self, method, timeout=None):
+        return {}
 
     def call(self, name, params=None):
         self.calls.append((name, params))
@@ -189,12 +195,19 @@ class FakeInteractiveProtocol:
         self.expressions.append(expression)
         if 'available:' in expression:
             return {'available': True, 'reveal': self.reveal, 'salt': 'a' * 32}
+        if 'ws-item[data-id]' in expression:
+            return self.items
+        if 'Promise.race' in expression:
+            return 'ready'
         if expression == 'sheet.slots()':
             return [{'slot': 'q1.1', 'auto': True}]
         if '.map(row =>' in expression:
             return [{'slot': 'q1.1', 'right': True, 'wrong': False}]
         if 'for (const row of' in expression:
-            return {'view': 'a4', 'print_leaks': self.leaks}
+            return {'kinds': {'open_box': 1, 'open_blank': 0, 'draw': 1, 'name': 1}, 'values': dict(self.values)}
+        if 'values: sheet.values()' in expression:
+            values = {k: v for k, v in self.values.items() if k != self.lose}
+            return {'view': 'a4', 'print_leaks': self.leaks, 'values': values}
         if "sheet.view('solve')" in expression:
             return {'view': 'solve', 'overflow_x': self.overflow}
         return None
@@ -261,6 +274,63 @@ class CheckBoundaryTest(unittest.TestCase):
         self.assertTrue(any('q3.1' in p['msg'] for p in mismatches))
         failed = [p['item'] for p in problems if p['code'] == 'answer-check-failed']
         self.assertEqual(failed, ['q1.1', 'q2.1'])
+
+    def test_filled_print_enters_essays_drawings_names_and_reloads(self):
+        out = TRIALS / ('filled-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
+        protocol, problems = FakeInteractiveProtocol(), []
+        info, _, _ = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertEqual(info['filled_inputs'], {'auto': 1, 'open_box': 1, 'open_blank': 0, 'draw': 1, 'name': 1})
+        self.assertTrue(info['filled_restored'])
+        self.assertIn(('Page.reload', {'ignoreCache': False}), protocol.calls)
+        fill = next(e for e in protocol.expressions if 'for (const row of' in e)
+        self.assertIn("'검사 서술 첫째 줄\\n검사 서술 둘째 줄'", fill)
+        self.assertFalse(problems)
+        protocol, problems = FakeInteractiveProtocol(lose='q2.2'), []
+        info, _, _ = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertFalse(info['filled_restored'])
+        lost = [p for p in problems if p['code'] == 'filled-restore-failed']
+        self.assertTrue(lost and 'q2.2' in lost[0]['msg'])
+
+    def test_later_item_showing_an_earlier_equation_warns(self):
+        table = {'slots': [{'slot': 'q3.1', 'kind': 'text', 'right': 'y=2x'},
+                           {'slot': 'q2.1', 'kind': 'text', 'right': '정비례'},
+                           {'slot': 'q1.1', 'kind': 'number', 'right': '4'}]}
+        items = [{'id': 'q1', 'text': '표 4 6 8'}, {'id': 'q2', 'text': '정비례'}, {'id': 'q3', 'text': '관계식'},
+                 {'id': 'q4', 'text': '정비례 관계를 생각합니다. 4'}, {'id': 'q5', 'text': '관계식 2 x = y 를 그래프로'}]
+        problems = []
+        sheet_check._audit_later_answers(table, items, problems)
+        self.assertEqual([(p['code'], p['item']) for p in problems], [('later-answer-shown', 'q5')])
+        problems = []
+        quiet = items[:4] + [{'id': 'q5', 'text': '앞에서 구한 관계식의 그래프'}]
+        sheet_check._audit_later_answers(table, quiet, problems)
+        sheet_check._audit_later_answers(None, items, problems)
+        sheet_check._audit_later_answers(table, None, problems)
+        self.assertEqual(problems, [])
+
+    def test_filled_text_counts_both_lines_in_pdf(self):
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest('PyMuPDF 없음')
+
+        def pdf(lines):
+            document = pymupdf.open()
+            page = document.new_page()
+            for i, line in enumerate(lines):
+                page.insert_text((72, 72 + 20 * i), line, fontname='korea')
+            data = document.tobytes()
+            document.close()
+            return data
+        both = list(sheet_check._FILL_LINES)
+        info, problems = {'filled_inputs': {'open_box': 2}}, []
+        sheet_check._audit_filled_text(info, pdf(both + both), problems)
+        self.assertEqual((info['filled_text'], problems), ({'open_box': 2, 'found': 2}, []))
+        info, problems = {'filled_inputs': {'open_box': 2}}, []
+        sheet_check._audit_filled_text(info, pdf(both + both[:1]), problems)
+        self.assertEqual(info['filled_text']['found'], 1)
+        self.assertEqual([p['code'] for p in problems], ['filled-print-missing'])
 
     def test_interactive_report_must_include_print_leak_count(self):
         problems = []

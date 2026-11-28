@@ -34,19 +34,26 @@
     const d = gcd(p, q);
     return q === d ? String(p / d) : `${p / d}/${q / d}`;
   }
-  function num(s) {
+  function text_candidates(value) {
+    const text = norm(value), [left, right, ...rest] = text.split('=');
+    if (left && right && !rest.length && !/[<>≤≥≠]/u.test(text)) return [...new Set([text, `${right}=${left}`])];
+    return text ? [text] : [];
+  }
+  function number_parts(s) {
     if (!textValue(s)) return null;
     let t = norm(s).replace(/^[a-z]=/, '');
-    const unit = units.find(u => t.length > u.length && t.endsWith(u));
+    const unit = units.find(u => t.length > u.length && t.endsWith(u)) ?? '';
     if (unit) t = t.slice(0, -unit.length);
     if (t.startsWith('(') && t.endsWith(')')) t = t.slice(1, -1);
     t = t.replace(/^\+/, '');
     if (/^-?[0-9]{1,3}(,[0-9]{3})+(\.[0-9]+)?$/.test(t)) t = t.replaceAll(',', '');
-    if (/^-?[0-9]+$/.test(t)) return String(BigInt(t));
-    if (/^-?[0-9]+\.[0-9]+$/.test(t)) return fraction(BigInt(t.replace('.', '')), 10n ** BigInt(t.split('.')[1].length));
-    if (/^-?[0-9]+\/[0-9]+$/.test(t)) return fraction(...t.split('/').map(BigInt));
-    return null;
+    let n;
+    if (/^-?[0-9]+$/.test(t)) n = String(BigInt(t));
+    else if (/^-?[0-9]+\.[0-9]+$/.test(t)) n = fraction(BigInt(t.replace('.', '')), 10n ** BigInt(t.split('.')[1].length));
+    else if (/^-?[0-9]+\/[0-9]+$/.test(t)) n = fraction(...t.split('/').map(BigInt));
+    return n == null ? null : [n, unit === '도' ? '°' : unit];
   }
+  const num = s => number_parts(s)?.[0] ?? null;
   const symbols = { times: '×', div: '÷', le: '≤', ge: '≥', ne: '≠', pi: 'π', circ: '°', angle: '∠',
     triangle: '△', square: '□', perp: '⊥', parallel: '⫽', equiv: '≡', sim: '∽', pm: '±', approx: '≈',
     cdot: '⋅', therefore: '∴', because: '∵', cdots: '⋯' };
@@ -182,7 +189,7 @@
   const encodeReveal = (salt, data) => base64(xor(salt, utf8.encode(JSON.stringify(data))));
   const decodeReveal = (salt, text) => JSON.parse(decoder.decode(xor(salt, unbase64(text))));
   // 계약 시험용 내부 표면. window.sheet의 학생 API와 분리한다.
-  core.codec = Object.freeze({ norm, num, plain, line, points, sha256: hex, hash, encodeReveal, decodeReveal });
+  core.codec = Object.freeze({ norm, num, number_parts, text_candidates, plain, line, points, sha256: hex, hash, encodeReveal, decodeReveal });
 
   const salt = () => document.querySelector('meta[name="sheet-salt"]')?.content || '';
   const policy = root.dataset.reveal || '시도 후';
@@ -238,14 +245,38 @@
       default: return null;
     }
   }
+  function hasResponse({ kind, value }) {
+    if (value == null) return false;
+    if (kind === 'draw') return !!value.strokes.length;
+    if (kind === 'match') return Object.keys(value).length > 0;
+    if (kind === 'self') return value.some(Boolean);
+    if (Array.isArray(value)) return value.some(v => v != null);
+    return String(value).trim() !== '';
+  }
+  function completeResponse(row) {
+    if (!hasResponse(row)) return false;
+    if (['match','line','bars'].includes(row.kind)) return normalize(row.kind, row.value, row.el) != null;
+    if (row.kind === 'points') return row.value.length >= maxPoints(row.el);
+    return true;
+  }
   function check(record) {
     if (!record.auto) return null;
-    const value = record.value ?? record.control?.initial;
-    const normalized = normalize(record.kind, value, record.el);
-    const incomplete = value == null || value === '' || (Array.isArray(value) && !value.length) ||
-      (normalized == null && ['match','line','bars'].includes(record.kind));
-    if (incomplete) return null;
-    return normalized != null && record.hashes.includes(hash(salt(), record.kind, normalized));
+    const { kind, el } = record, value = record.value ?? record.control?.initial;
+    const matches = normalized => record.hashes.includes(hash(salt(), kind, normalized));
+    if (value == null || value === '' || (Array.isArray(value) && !value.length)) return null;
+    if (kind === 'text') {
+      if (!String(value).trim()) return null;
+      return text_candidates(value).some(matches) ? true : 'review';
+    }
+    if (kind === 'number' && el.dataset.checkUnit === '1') {
+      const parts = number_parts(value);
+      if (!parts) return false;
+      const [n, unit] = parts;
+      return matches(unit ? `${n}@${unit}` : n);
+    }
+    const normalized = normalize(kind, value, el);
+    if (normalized == null && ['match','line','bars'].includes(kind)) return null;
+    return normalized != null && matches(normalized);
   }
   function sanitizedValue(record, value) {
     const { el, kind } = record;
@@ -331,10 +362,13 @@
     if (usable()) {
       row.control?.paint(row.value);
       updateRow(row);
+      const panel = panels.get(row.item);
+      if (panel) panel.emptyAttempt = false;
       updatePanel(row.item);
       updateScore();
     }
-    return row.result;
+    // Keep sheet.answer() boolean/null for callers that test whether the answer matched.
+    return row.result === 'review' ? false : row.result;
   }
   const answer = (slot, value) => records.has(slot) ? setValue(records.get(slot), value, true) : null;
   function clearAnswers() {
@@ -348,7 +382,7 @@
     for (const item of core.items()) {
       const panel = panels.get(item);
       if (panel) {
-        Object.assign(panel, { attempted: false, answers: false, solution: false, comparing: false, hintCount: 0 });
+        Object.assign(panel, { attempted: false, emptyAttempt: false, answers: false, solution: false, comparing: false, hintCount: 0 });
         if (panel.solutionBox) { stopVideo(panel.solutionBox); panel.solutionBox.remove(); panel.solutionBox = undefined; }
         if (panel.compareBox) { panel.compareBox.remove(); panel.compareBox = undefined; }
         updatePanel(item);
@@ -744,17 +778,20 @@
   }
   function updateRow(row) {
     const active = usable(), ok = active && row.result === true, no = active && row.result === false;
-    toggle(row.el, 'ws-ok', ok); toggle(row.el, 'ws-no', no);
-    if ((ok || no) && !row.verdict) {
+    const review = active && row.result === 'review';
+    toggle(row.el, 'ws-ok', ok); toggle(row.el, 'ws-no', no); toggle(row.el, 'ws-review', review);
+    if ((ok || no || review) && !row.verdict) {
       row.verdict = solveOnly(row.el.matches('.ws-blank,.ws-name-slot') ? 'span' : 'div', 'ws-verdict');
       row.verdict.setAttribute('role', 'status');
       auxiliary(row, row.verdict);
     }
     if (row.verdict) {
-      row.verdict.hidden = !(ok || no);
+      row.verdict.hidden = !(ok || no || review);
       row.verdict.classList.toggle('ws-ok', ok);
       row.verdict.classList.toggle('ws-no', no);
-      const message = ok ? '✓' : no ? '다시 생각해 봐요' : '';
+      row.verdict.classList.toggle('ws-review', review);
+      const message = ok ? '✓' : no ? '다시 생각해 봐요' : review
+        ? '예상한 답과 달라요. 같은 뜻이면 선생님께 확인받아요.' : '';
       if (row.verdict.textContent !== message) row.verdict.textContent = message;
       if (ok) row.verdict.setAttribute('aria-label', '맞았어요');
       else row.verdict.removeAttribute('aria-label');
@@ -820,10 +857,16 @@
     if (!(hints.length || hasAnswers || hasCompare || hasSolution || hasAuto)) return;
     const bar = panel.bar = solveOnly('div', 'ws-check-bar');
     bar.setAttribute('role', 'group'); bar.setAttribute('aria-label', '문항 풀이 도구');
-    if (hasAuto || (policy === '시도 후' && (hasAnswers || hasSolution))) {
+    const hasCheck = hasAuto || (policy === '시도 후' && (hasAnswers || hasSolution));
+    if (hasCheck) {
       bar.append(uiButton('확인', 'check', () => {
+        panel.emptyAttempt = policy === '시도 후' && !panel.rows.some(hasResponse);
+        if (panel.emptyAttempt) { updatePanel(item); return; }
         panel.attempted = true;
-        for (const row of panel.rows) { row.result = check(row); updateRow(row); }
+        for (const row of panel.rows) {
+          row.result = policy === '시도 후' && !hasResponse(row) ? null : check(row);
+          updateRow(row);
+        }
         updatePanel(item); updateScore();
         document.dispatchEvent(new CustomEvent('sheet:check', { detail: { item: item.dataset.id } }));
       }));
@@ -837,7 +880,7 @@
     if (hints.length) bar.append(panel.hintButton = uiButton('힌트 1', 'hint', () => {
       panel.hintCount++; updatePanel(item);
     }));
-    if (hasAuto) {
+    if (hasAuto || (hasCheck && policy === '시도 후')) {
       panel.result = make('span', 'ws-item-score');
       panel.result.setAttribute('role', 'status'); bar.append(panel.result);
     }
@@ -852,20 +895,24 @@
       button.disabled = !enabled;
       button.setAttribute('aria-pressed', String(enabled && !!pressed));
     };
-    setButton(panel.answerButton, unlocked, panel.answers);
-    setButton(panel.solutionButton, unlocked, panel.solution);
-    const open = panel.rows.filter(r => r.kind === 'open' && slotReveal.get(r.el)?.answer_html);
-    const eligible = open.filter(r => Array.from(String(r.value ?? '').trim()).length >= 5);
+    const answerRows = panel.rows.filter(r => r.kind !== 'open' && slotReveal.get(r.el)?.answer_html &&
+      (policy === '바로' || hasResponse(r)));
+    const answerReady = unlocked && answerRows.length > 0;
+    const solutionReady = unlocked && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
+    setButton(panel.answerButton, answerReady, panel.answers);
+    setButton(panel.solutionButton, solutionReady, panel.solution);
+    const eligible = panel.rows.filter(r => r.kind === 'open' && slotReveal.get(r.el)?.answer_html &&
+      /[\p{L}\p{N}]/u.test(r.value ?? ''));
     setButton(panel.compareButton, active && !!eligible.length, panel.comparing);
     for (const row of panel.rows) setReveal(row, row.kind === 'open'
-      ? !!(active && panel.compareButton && panel.comparing && eligible.includes(row)) : !!(unlocked && panel.answers));
+      ? !!(active && panel.comparing && eligible.includes(row)) : !!(answerReady && panel.answers && answerRows.includes(row)));
     const compare = !!(active && panel.compareButton && panel.comparing && eligible.length);
     if (compare && itemReveal.get(item)?.rubric?.length && !panel.compareBox) {
       panel.compareBox = solveOnly('div', 'ws-solution ws-compare');
       appendRubric(panel.compareBox, itemReveal.get(item).rubric); item.append(panel.compareBox);
     }
     if (panel.compareBox) panel.compareBox.hidden = !compare;
-    const show = !!(unlocked && panel.solutionButton && panel.solution);
+    const show = !!(solutionReady && panel.solutionButton && panel.solution);
     if (show && !panel.solutionBox) {
       const reveal = itemReveal.get(item), box = panel.solutionBox = solveOnly('div', 'ws-solution');
       if (reveal.solution_html) putHtml(box, reveal.solution_html);
@@ -886,7 +933,10 @@
     }
     if (panel.result) {
       const auto = panel.rows.filter(row => row.auto);
-      const label = auto.some(row => row.result != null) || panel.attempted ? `${auto.filter(row => row.result === true).length}/${auto.length} 맞음` : '';
+      const review = auto.filter(row => row.result === 'review').length;
+      const label = panel.emptyAttempt ? '먼저 답을 써 보세요.' :
+        auto.length && (auto.some(row => row.result != null) || panel.attempted)
+          ? `${auto.filter(row => row.result === true).length}/${auto.length} 맞음${review ? ` · 확인 필요 ${review}` : ''}` : '';
       if (panel.result.textContent !== label) panel.result.textContent = label;
     }
   }
@@ -981,11 +1031,29 @@
     for (const p of params) {
       const label = make('label'), input = make('input'), out = make('output');
       input.type = 'range'; input.min = p.min; input.max = p.max; input.step = p.step; input.value = p.value;
-      scope[p.name] = input.valueAsNumber;
+      const excluded = new Set(Array.isArray(p.except) ? p.except : []);
+      const seek = direction => {
+        while (excluded.has(input.valueAsNumber)) {
+          const before = input.value;
+          if (direction > 0) input.stepUp(); else input.stepDown();
+          if (input.value === before) return false;
+        }
+        return true;
+      };
+      if (!seek(1)) {
+        input.value = p.value;
+        if (!seek(-1)) input.disabled = true;
+      }
+      scope[p.name] = input.disabled ? p.value : input.valueAsNumber;
       const name = p.label || p.name;
       input.setAttribute('aria-label', name);
       out.value = nfmt(scope[p.name]);
-      input.addEventListener('input', () => { scope[p.name] = input.valueAsNumber; out.value = nfmt(scope[p.name]); render(); });
+      input.addEventListener('input', () => {
+        if (input.disabled) return;
+        const previous = scope[p.name];
+        if (!seek(input.valueAsNumber >= previous ? 1 : -1)) input.value = previous;
+        scope[p.name] = input.valueAsNumber; out.value = nfmt(scope[p.name]); render();
+      });
       label.append(make('span', '', name), input, out); tool.append(label);
     }
     const prompt = block.querySelector('.ws-explore-prompt');
@@ -1190,9 +1258,10 @@
       else if (mode === 'text' || (mode === 'auto' && (blank ? Array.from(answer).length <= 12 : accept.length))) kind = 'text';
     }
     const canonical = value => normalize(kind, value, el);
-    const valid = new Set([answer, ...accept.map(plain)].map(canonical).filter(v => v != null));
+    const answers = [answer, ...accept.map(plain)];
+    const valid = new Set(answers.map(canonical).filter(v => v != null));
     const right = canonical(answer);
-    const attrs = { 'data-check-kind': kind, 'data-check-hash': null, 'data-check': null };
+    const attrs = { 'data-check-kind': kind, 'data-check-hash': null, 'data-check-unit': null, 'data-check': null };
     if (right != null && salt()) {
       let wrong;
       if (kind === 'number') {
@@ -1202,10 +1271,19 @@
       } else {
         const letters = Array.from(answer); letters.pop();
         wrong = `${letters.join('')}가`;
-        while (valid.has(canonical(wrong))) wrong += '가';
+        while (text_candidates(wrong).some(v => valid.has(v))) wrong += '가';
       }
       attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
-      if (policy !== '없음') attrs['data-check-hash'] = [...valid].map(v => hash(salt(),kind,v)).join(',');
+      if (policy !== '없음') {
+        if (kind === 'number') for (const value of answers) {
+          const parts = number_parts(value);
+          if (parts?.[1]) {
+            attrs['data-check-unit'] = '1';
+            valid.add(parts.join('@'));
+          }
+        }
+        attrs['data-check-hash'] = [...valid].map(v => hash(salt(),kind,v)).join(',');
+      }
     } else if (mode !== 'auto' || accept.length) {
       // Keep an explicit setting (notably off) so another edit does not turn grading back on.
       attrs['data-check'] = JSON.stringify({ mode, accept });
@@ -1235,7 +1313,7 @@
         applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
       }
     }
-    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check'].map(name => [name,writing.getAttribute(name)])) : null;
+    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check'].map(name => [name,writing.getAttribute(name)])) : null;
     const oldReveal = isAnswer ? slotReveal.get(writing) : undefined;
     const updated = isAnswer ? changedAnswer(writing, source, html, json(writing.dataset.check, {}), false) : null;
     function write(text, children, result) {

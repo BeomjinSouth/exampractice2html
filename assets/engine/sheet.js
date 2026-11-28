@@ -418,7 +418,7 @@
     const visible = studentItems.filter(item => answersOn() || !item.matches('.ws-teacher-only'));
     if (solve?.layoutFlow(main, visible)) { solve.afterLayout(); return; }
     main.id = 'sheet-pages';
-    placeItems(visible, false);
+    placeItems(visible.filter(item => !item.matches('.ws-solve-only')), false);
     if (answersOn()) placeItems(teacherItems, true);
     for (const [i, info] of pages.entries()) {
       info.slots.forEach((slot, j) => {

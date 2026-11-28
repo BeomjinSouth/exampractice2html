@@ -22,11 +22,21 @@ def norm(value):
     return re.sub(r'\s+', '', text).lower().rstrip('.。')
 
 
-def num(value):
+def text_candidates(value):
+    text = norm(value)
+    left, equal, right = text.partition('=')
+    if equal and left and right and '=' not in right and not re.search(r'[<>≤≥≠]', text):
+        return list(dict.fromkeys((text, f'{right}={left}')))
+    return [text] if text else []
+
+
+def number_parts(value):
     text = re.sub(r'^[a-z]=', '', norm(value), count=1)
+    suffix = ''
     for unit in sorted(UNITS, key=len, reverse=True):
         if text.endswith(unit) and len(text) > len(unit):
             text = text[:-len(unit)]
+            suffix = '°' if unit == '도' else unit
             break
     if text.startswith('(') and text.endswith(')'):
         text = text[1:-1]
@@ -40,7 +50,13 @@ def num(value):
         value = Fraction(text)
     except (ValueError, ZeroDivisionError):
         return None
-    return str(value.numerator) if value.denominator == 1 else str(value)
+    number = str(value.numerator) if value.denominator == 1 else str(value)
+    return [number, suffix]
+
+
+def num(value):
+    parts = number_parts(value)
+    return parts[0] if parts is not None else None
 
 
 def plain(source):

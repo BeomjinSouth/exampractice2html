@@ -24,7 +24,9 @@ class PlanTest(unittest.TestCase):
                 data = document(entry['example'])
                 if kind == 'checklist':
                     data['meta']['kind'] = '수업'
-                self.assertEqual(self.errors(data), set())
+                # The video example deliberately leaves the teacher's actual address to fill in.
+                expected = {'items[0].blocks[0].url'} if kind == 'video' else set()
+                self.assertEqual(self.errors(data), expected)
 
     def test_template_and_bad_fields(self):
         template = json.loads((ROOT / 'assets/templates/구성.json').read_text(encoding='utf-8'))
@@ -121,6 +123,40 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(any('accept' in issue.hint for issue in validate(data, ROOT)))
         data['teacher']['solutions'][0]['video']['url'] = 'https://bad.test/abcdefghijk'
         self.assertIn('teacher.solutions[0].video.url', self.errors(data))
+
+    def test_explore_exclusions_and_print_values(self):
+        block = {'type': 'explore', 'fn': 'a*x+b', 'x': [-2, 2], 'y': [-3, 3], 'unit_mm': 5,
+                 'params': [{'name': 'a', 'min': -2, 'max': 2, 'step': .5, 'value': 1, 'except': [0]},
+                            {'name': 'b', 'min': -1, 'max': 1, 'step': 1, 'value': 0}],
+                 'print': [{'a': 2}, {'a': -2, 'b': 1}]}
+        self.assertEqual(self.errors(document(block)), set())
+        for updates, field in [({'value': 0}, 'value'), ({'except': [3]}, 'except[0]'),
+                               ({'except': [False]}, 'except[0]'), ({'except': 0}, 'except')]:
+            with self.subTest(updates=updates):
+                invalid = deepcopy(block)
+                invalid['params'][0].update(updates)
+                self.assertIn('items[0].blocks[0].params[0].' + field, self.errors(document(invalid)))
+        for snapshots, field in [([{'c': 1}], '[0].c'), ([{'a': 3}], '[0].a'),
+                                 ([{'a': 0}], '[0].a'), ([{'a': True}], '[0].a'),
+                                 ([{'a': 2}] * 5, ''), ([], ''), ([{}], '[0]')]:
+            with self.subTest(snapshots=snapshots):
+                self.assertIn('items[0].blocks[0].print' + field,
+                              self.errors(document({**block, 'print': snapshots})))
+
+    def test_checklist_print_is_boolean(self):
+        data = document({'type': 'checklist', 'items': ['확인'], 'print': True})
+        data['meta']['kind'] = '수업'
+        self.assertEqual(self.errors(data), set())
+        data['items'][0]['blocks'][0]['print'] = 'true'
+        self.assertEqual(self.errors(data), {'items[0].blocks[0].print'})
+
+    def test_grow_warns_only_for_short_answer_rows(self):
+        rows = [{'label': '답', 'answer': answer, 'grow': grow} for answer, grow in
+                [('가' * 20, True), ('가' * 21, True), ('원점', False), ('가\n나', True)]]
+        warnings = [i for i in validate(document({'type': 'answer', 'rows': rows}), ROOT)
+                    if i.level == 'warning' and '쪽 채움' in i.message]
+        self.assertEqual([(i.path, i.hint) for i in warnings],
+                         [('items[0].blocks[0].rows[0].grow', 'grow를 빼고 lines로 정하세요.')])
 
     def test_all_warnings_nonblocking(self):
         data = document({'type': 'question', 'text': '1. 점 A □ ' + '가' * 161},

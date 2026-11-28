@@ -17,7 +17,7 @@ from sheet_common import (BUILD_FILE, CHECK_DIR, RASTER_MIMES, ROOT, TEACHER_SUF
 from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
 from sheet_plan import checked_svg, function_tree, function_value, line_grid_points, load_plan, print_issues
 from sheet_common import youtube_id
-from sheet_answer import canonical, check_hash, make_salt, num, plain, reveal
+from sheet_answer import canonical, check_hash, make_salt, num, number_parts, plain, reveal, text_candidates
 
 LABEL_MM = {'평가': 25.1, '연습': 46.1, '수업': 30}
 TEACHER_ONLY = 'ws-teacher-only'
@@ -57,8 +57,15 @@ def table(cls, widths, body, head=''):
     return f'<table class="{cls}">{cols(*widths)}{head}<tbody>{body}</tbody></table>'
 
 
-def section(id_, body, extra=''):
-    return f'<section class="ws-item" data-id="{id_}"{extra}>\n{body}\n</section>'
+def solve_only(block):
+    if block['type'] == 'checklist':
+        return not block.get('print', False)
+    return block['type'] == 'split' and all(solve_only(b) for side in ('left', 'right') for b in block[side])
+
+
+def section(id_, body, extra='', *, screen_only=False):
+    cls = 'ws-item ws-solve-only' if screen_only else 'ws-item'
+    return f'<section class="{cls}" data-id="{id_}"{extra}>\n{body}\n</section>'
 
 
 def tr(content):
@@ -121,7 +128,13 @@ class Renderer:
         if any(v is None for v in normalized):
             raise ValueError(f'{slot}: 정답을 {kind} 형식으로 정규화할 수 없습니다.')
         if self.reveal_policy != '없음':
-            hashes = ','.join(dict.fromkeys(check_hash(self.salt, kind, v) for v in normalized))
+            forms = list(normalized)
+            if kind == 'number':
+                with_units = [f'{n}@{unit}' for n, unit in (number_parts(plain(v)) for v in values) if unit]
+                if with_units:
+                    attrs += ' data-check-unit="1"'
+                    forms.extend(with_units)
+            hashes = ','.join(dict.fromkeys(check_hash(self.salt, kind, v) for v in forms))
             attrs += f' data-check-hash="{hashes}"'
         if kind in ('number', 'text'):
             actual = plain(right)
@@ -134,7 +147,7 @@ class Renderer:
                     number += 1
                     wrong = str(number + 1)
             else:
-                while canonical(kind, wrong) in normalized:
+                while any(candidate in normalized for candidate in text_candidates(wrong)):
                     wrong += '오답'
         else:
             actual = right
@@ -351,7 +364,7 @@ class Renderer:
                 rows.append(f'<tr class="ws-row">{label}{td}</tr>')
         return table('ws-ans-table', (self.label_mm, self.content_mm - self.label_mm), ''.join(rows))
 
-    def grid(self, block):
+    def grid(self, block, *, live_map=True, fit=None):
         coord = block['mode'] == 'coord'
         xmin, xmax = block['x'] if coord else (0, block['cols'])
         ymin, ymax = block['y'] if coord else (0, block['rows'])
@@ -478,9 +491,10 @@ class Renderer:
             body += f'<g class="ws-key" clip-path="url(#{clip})">{key_plot}</g>'
         if plot:
             body += '<g class="ws-plot"></g>'
-        mapping = f' data-map="{mm(xmin)} {mm(xmax)} {mm(ymin)} {mm(ymax)} 0 0 {mm(unit)}"' if coord else ''
+        mapping = f' data-map="{mm(xmin)} {mm(xmax)} {mm(ymin)} {mm(ymax)} 0 0 {mm(unit)}"' if coord and live_map else ''
+        scale = min(1, fit[0] / width, fit[1] / height) if fit else 1
         alt = '좌표평면' if coord else f'가로 {xmax}칸, 세로 {ymax}칸 모눈'
-        return (f'<figure class="ws-fig ws-grid"{slot}><svg width="{w}mm" height="{h}mm" '
+        return (f'<figure class="ws-fig ws-grid"{slot}><svg width="{mm(width * scale)}mm" height="{mm(height * scale)}mm" '
                 f'viewBox="0 0 {w} {h}"{mapping} role="img" aria-label="{alt}">{body}</svg></figure>')
 
     @staticmethod
@@ -530,7 +544,9 @@ class Renderer:
         prompt = editable('p', block['prompt'], 'ws-order-prompt') if 'prompt' in block else ''
         items = ''.join(f'<li data-token="t{i+1}"><span class="ws-order-box"></span>{editable("span", values[j])}'
                         f'<span class="ws-key">{j+1}</span></li>' for i, j in enumerate(permutation))
-        return f'<div class="ws-order"{slot}>{prompt}<ol class="ws-order-list">{items}</ol></div>'
+        instruction = '써 봅시다.' if self.kind == '수업' else '쓰시오.'
+        note = f'<p class="ws-print-only">□ 안에 순서대로 1, 2, 3, …을 {instruction}</p>'
+        return f'<div class="ws-order"{slot}>{prompt}{note}<ol class="ws-order-list">{items}</ol></div>'
 
     def numberline(self, block):
         a, b = block['range']
@@ -649,13 +665,12 @@ class Renderer:
                 f'viewBox="0 0 {mm(width)} {mm(height)}" data-ymap="{mm(y0)} {mm(y1)} {mm(bottom)} {mm(top)}" '
                 f'role="img" aria-label="통계 그래프">{axis}{marks}{hits}</svg></figure>')
 
-    def explore(self, block):
-        params = {p['name']: p['value'] for p in block['params']}
-        tree = function_tree(block['fn'], params)
+    def explore_figure(self, block, tree, params, caption=None, fit=None):
         xmin, xmax = block['x']
         ymin, ymax = block['y']
         unit = block['unit_mm']
-        figure = self.grid({'mode': 'coord', 'x': block['x'], 'y': block['y'], 'unit_mm': unit})
+        live = caption is None
+        figure = self.grid({'mode': 'coord', 'x': block['x'], 'y': block['y'], 'unit_mm': unit}, live_map=live, fit=fit)
         path = []
         active = False
         for i in range(241):
@@ -670,21 +685,56 @@ class Renderer:
                 continue
             path.append(f'{"L" if active else "M"}{mm((x-xmin)*unit)} {mm((ymax-y)*unit)}')
             active = True
-        figure = figure.replace('</svg>', f'<g class="ws-plot"><path d="{"".join(path)}" fill="none" stroke="currentColor" stroke-width="0.4"/></g></svg>')
+        group = 'class="ws-plot"' if live else f'clip-path="url(#ws-grid-clip-{self.grid_index})"'
+        graph = f'<g {group}><path d="{"".join(path)}" fill="none" stroke="currentColor" stroke-width="0.4"/></g>'
+        figure = figure.replace('</svg>', graph + '</svg>')
+        return figure if live else figure.replace('</figure>', f'<figcaption>{escape(caption)}</figcaption></figure>')
+
+    @staticmethod
+    def explore_table(xs, tree, rows, *, live):
+        if not xs:
+            return ''
+
+        def cell(value, attr=''):
+            return f'<td{attr}>{escape(value.replace("-", "−"))}</td>'
+
+        header = '<th>x</th>' + ''.join(cell(mm(x), f' data-x="{mm(x)}"' if live else '') for x in xs)
+        body = []
+        for label, params in rows:
+            cells = [f'<th>{escape(label)}</th>']
+            for x in xs:
+                try:
+                    value = mm(function_value(tree, x, params) or 0)
+                except (ArithmeticError, ValueError):
+                    value = '—'
+                cells.append(cell(value, f' data-y-for="{mm(x)}"' if live else ''))
+            body.append(tr(''.join(cells)))
+        cls = 'ws-explore-table' if live else 'ws-explore-print-table'
+        return f'<table class="ws-data {cls}"><tbody>{tr(header)}{"".join(body)}</tbody></table>'
+
+    def explore(self, block):
+        params = {p['name']: p['value'] for p in block['params']}
+        tree = function_tree(block['fn'], params)
         xs = block.get('table', [])
-        cells_x, cells_y = [], []
-        for value in xs:
-            cells_x.append(f'<td data-x="{mm(value)}">{escape(mm(value).replace("-", "−"))}</td>')
-            try:
-                result = mm(function_value(tree, value, params))
-            except (ArithmeticError, ValueError, OverflowError):
-                result = '—'
-            cells_y.append(f'<td data-y-for="{mm(value)}">{escape(result.replace("-", "−"))}</td>')
-        table_html = ('<table class="ws-data ws-explore-table"><tbody><tr><th>x</th>' + ''.join(cells_x) +
-                      '</tr><tr><th>y</th>' + ''.join(cells_y) + '</tr></tbody></table>') if xs else ''
+        figure = self.explore_figure(block, tree, params)
+        values = self.explore_table(xs, tree, [('y', params)], live=True)
+        if block.get('print'):
+            snapshots, rows = [], []
+            fit = (min(44, (self.content_mm - 1.5) / 2), 45)
+            for overrides in block['print']:
+                scope = {**params, **overrides}
+                label = ', '.join(f'{name}={mm(value)}' for name, value in scope.items()).replace('-', '−')
+                snapshots.append(self.explore_figure(block, tree, scope, label, fit))
+                rows.append((f'y ({label})', scope))
+            content = (f'<div class="ws-solve-only">{figure}{values}</div><div class="ws-print-only">'
+                       f'<div class="ws-explore-snapshots">{"".join(snapshots)}</div>'
+                       f'{self.explore_table(xs, tree, rows, live=False)}</div>')
+        else:
+            note = '<p class="ws-print-only ws-explore-note">화면에서는 값을 바꾸며 살펴볼 수 있습니다.</p>'
+            content = figure + values + note
         attrs = f' data-fn="{escape(block["fn"])}" data-params="{escape(json.dumps(block["params"], ensure_ascii=False, separators=(",", ":")))}" data-table="{escape(json.dumps(xs, separators=(",", ":")))}"'
         prompt = editable('p', block['prompt'], 'ws-explore-prompt') if 'prompt' in block else ''
-        return f'<div class="ws-explore"{attrs}>{prompt}{figure}{table_html}<p class="ws-print-only ws-explore-note">화면에서 값을 바꿔 보세요.</p></div>'
+        return f'<div class="ws-explore"{attrs}>{prompt}{content}</div>'
 
     def video(self, block):
         title = editable('span', block['title'], 'ws-video-title')
@@ -801,7 +851,8 @@ class Renderer:
                 rhs = '\n'.join(self.block(child, item_id) for child in block['right'])
             finally:
                 self.content_mm = original
-            return (f'<div class="ws-split" data-ratio="{ratio}" style="--split-l:{left};--split-r:{right}">'
+            cls = 'ws-split ws-solve-only' if solve_only(block) else 'ws-split'
+            return (f'<div class="{cls}" data-ratio="{ratio}" style="--split-l:{left};--split-r:{right}">'
                     f'<div class="ws-split-col">{lhs}</div><div class="ws-split-col">{rhs}</div></div>')
         if kind == 'ox':
             return self.ox(block)
@@ -830,7 +881,8 @@ class Renderer:
             slot = self.slot('self')
             title = editable('p', block['title'], 'ws-checklist-title') if block.get('title') else ''
             entries = ''.join(f'<li><span class="ws-check-box"></span>{editable("span", value)}</li>' for value in block['items'])
-            return f'<div class="ws-checklist"{slot}>{title}<ul>{entries}</ul></div>'
+            cls = 'ws-checklist ws-solve-only' if solve_only(block) else 'ws-checklist'
+            return f'<div class="{cls}"{slot}>{title}<ul>{entries}</ul></div>'
         return editable('p', block['text'], 'ws-text')
 
     def render_items(self):
@@ -845,7 +897,8 @@ class Renderer:
                     parts += '<div class="ws-hints ws-solve-only">' + ''.join(editable('p', hint, 'ws-hint') for hint in item['hints']) + '</div>'
             finally:
                 blank_hook.reset(token)
-            items.append(section(id_, parts, ' data-break="1"' if item.get('break') else ''))
+            items.append(section(id_, parts, ' data-break="1"' if item.get('break') else '',
+                                 screen_only=all(solve_only(b) for b in item['blocks'])))
         return '\n'.join(items)
 
     def render_teacher(self):
@@ -902,7 +955,8 @@ def font_chars(data):
     # Includes generated interface and header labels, even on a tiny manuscript.
     chars.update('수행평가영역단원학년도학기점수학생확인교사용메모예시답안채점요소다른타당한답예상오개념이름학번짝활동좌표평면모눈'
                  '확인 정답 보기 풀이 보기 힌트 맞음 다시 생각해 봐요 답을 넣어 저장 내 답 지우기 학생 화면 미리보기 교사 화면으로 '
-                 'A4로 보기 풀기 화면 화면에서 값을 바꿔 보세요 예시 답안과 비교 맞힌 수 동영상 재생 지우개 모두 지우기')
+                 'A4로 보기 풀기 화면 화면에서는 값을 바꾸며 살펴볼 수 있습니다 예시 답안과 비교 맞힌 수 동영상 재생 지우개 모두 지우기'
+                 '확인 필요 예상한 답과 달라요 같은 뜻이면 선생님께 확인받아요 먼저 답을 써 보세요 안에 순서대로 쓰시오 써 봅시다')
 
     def add_text(entry):
         if isinstance(entry, str):

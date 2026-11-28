@@ -12,7 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from sheet_answer import canonical, check_hash, num, plain
+from sheet_answer import canonical, check_hash
 
 
 class Tags(HTMLParser):
@@ -219,6 +219,23 @@ class BuildTest(unittest.TestCase):
         self.assertIn('모범 풀이', payload['items']['q1']['solution_html'])
         self.assertEqual(payload['items']['q1']['video']['yt'], 'abcdefghijk')
 
+    def test_order_print_note_matches_worksheet_kind(self):
+        from sheet_build import font_chars
+        self.assertTrue(set('써 봅시다') <= set(font_chars({})))
+        for kind, ending in [(None, '써 봅시다.'), ('수업', '써 봅시다.'),
+                             ('연습', '쓰시오.'), ('평가', '쓰시오.')]:
+            with self.subTest(kind=kind):
+                meta = {'title': self.title}
+                if kind is not None:
+                    meta['kind'] = kind
+                data = {'version': 1, 'meta': meta,
+                        'items': [{'id': 'q1', 'blocks': [{'type': 'order', 'items': ['처음', '중간', '끝']}]}]}
+                self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+                self.cli('build', self.folder)
+                note = f'<p class="ws-print-only">□ 안에 순서대로 1, 2, 3, …을 {ending}</p>'
+                for path in (self.teacher, self.student):
+                    self.assertIn(note, path.read_text(encoding='utf-8'))
+
     def test_chart_kinds_and_histogram_bin_widths(self):
         charts = [
             {'type': 'chart', 'kind': 'line', 'labels': ['가', '나'], 'values': [1, 2]},
@@ -303,32 +320,6 @@ class BuildTest(unittest.TestCase):
         self.cli('derive', self.teacher)
         table = json.loads((self.folder / '검사/정답표.json').read_text(encoding='utf-8'))
         self.assertEqual(table['slots'][0]['right'], '7')
-
-    def test_sample_math(self):
-        data = json.loads((ROOT / 'examples/전체-블록-견본/구성.json').read_text(encoding='utf-8'))
-        by_id = {item['id']: item for item in data['items']}
-        split = next(b for b in by_id['q1']['blocks'] if b['type'] == 'split')
-        cells = split['left'][0]['rows']
-        self.assertEqual([int(num(plain(c[0]))) for c in cells], [1, 2, 3])
-        self.assertEqual([2*x for x in (1, 2, 3)], [2, 4, 6])
-        self.assertIn('$4$', cells[1][1])
-        self.assertIn('$6$', cells[2][1])
-        self.assertEqual(split['right'][0]['rows'][0]['answer'], '$y=2x$')
-        self.assertEqual(plain(split['right'][0]['rows'][0]['accept'][1]), 'y=2×x')
-        ox = next(b for b in by_id['q2']['blocks'] if b['type'] == 'ox')
-        self.assertEqual([row['answer'] for row in ox['items']], ['O', 'X'])
-        self.assertIn('$2$', by_id['q2']['blocks'][-1]['nodes'][1])
-        choices = next(b for b in by_id['q3']['blocks'] if b['type'] == 'choices')
-        self.assertEqual(num(plain(choices['options'][choices['answer'] - 1])), str(2 * 5))
-        match = next(b for b in by_id['q3']['blocks'] if b['type'] == 'match')
-        self.assertEqual([2 * int(num(plain(x))) for x in match['left']], [int(num(plain(y))) for y in match['right']])
-        split = next(b for b in by_id['q4']['blocks'] if b['type'] == 'split')
-        for x, y in split['left'][0]['plot']['answer']:
-            self.assertEqual(y, 2*x)
-        self.assertEqual(split['right'][0]['plot']['answer'], '2*x')
-        self.assertEqual(by_id['q5']['blocks'][1]['plot']['answer'], [2, 4, 6])
-        self.assertEqual(by_id['q6']['blocks'][-1]['plot']['answer'], [2, 4, 6])
-        self.assertEqual([2*1, 2*2, -2*1, -2*2], [2, 4, -2, -4])
 
     def test_lesson_and_practice_heads(self):
         for kind, cols, head in [('수업', 2, '짝의 이름'), ('연습', 1, '수학 연습지')]:

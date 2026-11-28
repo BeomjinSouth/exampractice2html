@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import unicodedata
 
 import cdp
 
@@ -342,6 +343,119 @@ def _audit_answers(table, slots, results, problems):
                      "정답·오답 자료와 학생용 판별 해시를 확인하고 다시 조립하세요.")
 
 
+def _flat(text):
+    """비교용: NFKC, 빼기 기호 통일, 보이지 않는 서식 문자·공백 제거, 소문자."""
+    text = unicodedata.normalize("NFKC", str(text)).translate(str.maketrans("−‒–—―⁄", "-----/"))
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return re.sub(r"\s+", "", text).lower()
+
+
+def _audit_later_answers(table, items, problems):
+    """앞 문항에서 구하게 한 식이 뒤 문항의 학생용 글(상자·발문·표·힌트)에 그대로 보이면 경고한다.
+
+    `answer-leak`은 지워진 정답의 잔여만 본다. 원래 보이는 글이 앞 답을 알려 주는 경우는 여기서 본다.
+    낱말 답은 뒤 문항에서 용어로 계속 쓰이므로 등호가 하나인 식만 대상으로 한다."""
+    if table is None or not isinstance(items, list):
+        return
+    entries = [entry for entry in items if isinstance(entry, dict) and isinstance(entry.get("id"), str)]
+    order = [entry["id"] for entry in entries]
+    texts = {entry["id"]: _flat(entry.get("text", "")) for entry in entries}
+    for row in table["slots"]:
+        right = row.get("right")
+        if row.get("kind") != "text" or not isinstance(right, str):
+            continue
+        target = _flat(right)
+        if target.count("=") != 1 or len(target) < 3 or re.search(r"[<>≤≥≠]", target):
+            continue
+        left, rhs = target.split("=")
+        variants = {target, f"{rhs}={left}"}
+        item = str(row.get("slot", "")).split(".")[0]
+        if item not in order:
+            continue
+        for later in order[order.index(item) + 1:]:
+            if any(variant in texts[later] for variant in variants):
+                _problem(problems, "warning", "later-answer-shown", None, later,
+                         f"{row['slot']} 자리의 답 ‘{right}’이 뒤 문항 {later}의 학생용 글에 보입니다.",
+                         "뒤 문항·개념 상자·힌트에서 그 식을 빼고 ‘앞에서 구한 관계식’처럼 가리키세요.")
+                break
+
+
+def _reload_keeping_answers(protocol):
+    """자동 저장된 답을 지우지 않고 같은 주소를 다시 연다."""
+    protocol.events = [event for event in getattr(protocol, "events", []) if event.get("method") != "Page.loadEventFired"]
+    protocol.call("Page.reload", {"ignoreCache": False})
+    protocol.wait_event("Page.loadEventFired")
+    ready = protocol.evaluate(_READY_JS, True)
+    if ready != "ready":
+        raise CheckError(f"답을 넣은 뒤 다시 연 활동지의 엔진을 준비하지 못했습니다 ({ready})")
+
+
+def _pdf_text(data):
+    """PDF의 글자(공백 제거). PyMuPDF가 없으면 None."""
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    with pymupdf.open(stream=data, filetype="pdf") as document:
+        return re.sub(r"\s+", "", "".join(page.get_text() for page in document))
+
+
+def _audit_filled_text(info, pdf, problems):
+    """서술 칸에 넣은 두 줄 답이 채움 인쇄 PDF에 두 줄 모두 남았는지 센다."""
+    boxes = (info.get("filled_inputs") or {}).get("open_box", 0)
+    text = _pdf_text(pdf)
+    if text is None:
+        info["filled_text"] = "skipped-no-pymupdf"
+        return
+    found = min(text.count(_flat(line)) for line in _FILL_LINES)
+    info["filled_text"] = {"open_box": boxes, "found": found}
+    if found < boxes:
+        _problem(problems, "error", "filled-print-missing", None, None,
+                 f"서술 칸 {boxes}곳에 넣은 두 줄 답 가운데 {found}곳만 채움 인쇄에 보입니다.",
+                 "A4 보기에서 서술 칸의 입력이 잘리거나 숨지 않는지 확인하세요.")
+
+
+_READY_JS = """(async()=>{
+      if(!window.sheet) return 'missing';
+      try { return await Promise.race([
+        Promise.resolve(window.sheet.ready).then(()=> 'ready'),
+        new Promise(resolve=>setTimeout(()=>resolve('timeout'),20000))
+      ]); } catch(e) { return 'rejected:' + String(e); }
+    })()"""
+
+# 채움 인쇄: 정답표의 자동 판별 자리 + 서술 칸(여러 줄)·빈칸·그리기·이름 칸까지 넣는다.
+_FILL_JS = """(async()=>{
+  for (const row of %s) sheet.answer(row.slot, row.right);
+  const kinds = {open_box: 0, open_blank: 0, draw: 0, name: 0};
+  const nodes = [...document.querySelectorAll('[data-slot]')];
+  for (const s of sheet.slots()) {
+    if (s.auto) continue;
+    const el = nodes.find(n => n.dataset.slot === s.slot);
+    let value;
+    if (s.kind === 'open') {
+      if (el && el.matches('.ws-ans')) { value = '%s\\n%s'; kinds.open_box++; }
+      else { value = '검사'; kinds.open_blank++; }
+    } else if (s.kind === 'draw') { value = {strokes: [[[0.15, 0.25], [0.5, 0.75], [0.85, 0.35]]]}; kinds.draw++; }
+    else if (s.kind === 'name') { value = '검사'; kinds.name++; }
+    else continue;
+    sheet.answer(s.slot, value);
+  }
+  return {kinds, values: sheet.values()};
+})()"""
+_FILL_LINES = ("검사 서술 첫째 줄", "검사 서술 둘째 줄")
+_RESTORED_JS = """(async()=>{
+  await sheet.view('a4');
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  return Object.assign({}, sheet.report(), {values: sheet.values()});
+})()"""
+# 문항별 학생에게 보이는 글(정답·교사 전용·화면 단추 제외, 힌트 포함)
+_ITEM_TEXT_JS = """(() => [...document.querySelectorAll('.ws-item[data-id]')].map(item => {
+  const copy = item.cloneNode(true);
+  copy.querySelectorAll('.ws-key, .ws-teacher-only, [data-sheet-runtime], script, style').forEach(x => x.remove());
+  return {id: item.dataset.id, text: copy.textContent};
+}))()"""
+
+
 def _navigate(browser, path, teacher):
     protocol = browser.cdp
     protocol.events = [event for event in protocol.events if event.get("method") != "Page.loadEventFired"]
@@ -350,13 +464,7 @@ def _navigate(browser, path, teacher):
     if result.get("errorText"):
         raise CheckError("HTML을 열지 못했습니다: " + result["errorText"])
     protocol.wait_event("Page.loadEventFired")
-    ready = protocol.evaluate("""(async()=>{
-      if(!window.sheet) return 'missing';
-      try { return await Promise.race([
-        Promise.resolve(window.sheet.ready).then(()=> 'ready'),
-        new Promise(resolve=>setTimeout(()=>resolve('timeout'),20000))
-      ]); } catch(e) { return 'rejected:' + String(e); }
-    })()""", True)
+    ready = protocol.evaluate(_READY_JS, True)
     if ready != "ready":
         raise CheckError(f"활동지 엔진을 준비하지 못했습니다: {path.name} ({ready})")
     protocol.evaluate("""(async()=>{
@@ -406,6 +514,7 @@ def _interactive_check(protocol, out, table, problems):
         _problem(problems, "error", "answer-table-invalid", None, None,
                  "정답표와 학생용 HTML의 salt가 다릅니다.", "build를 다시 실행해 같은 정답표를 만드세요.")
         table = None
+    _audit_later_answers(table, protocol.evaluate(_ITEM_TEXT_JS), problems)
     try:
         for name, width, height in (("화면-폰.png", 390, 844), ("화면-태블릿.png", 1024, 768)):
             protocol.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height,
@@ -461,14 +570,25 @@ def _interactive_check(protocol, out, table, problems):
                 _audit_answers(table, slots, results, problems)
                 info["grading"] = "failed" if len(problems) > before else "passed"
             data = json.dumps(rows, ensure_ascii=True)
-            filled = protocol.evaluate("""(async()=>{
-              for (const row of %s) sheet.answer(row.slot, row.right);
-              await sheet.view('a4');
-              await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-              return sheet.report();
-            })()""" % data, True)
+            entered = protocol.evaluate(_FILL_JS % (data, *_FILL_LINES), True)
+            if not isinstance(entered, dict) or not isinstance(entered.get("values"), dict):
+                raise CheckError("채움 인쇄에 쓸 입력을 넣지 못했습니다.")
+            info["filled_inputs"] = {"auto": len(rows), **(entered.get("kinds") or {})}
+            # 자동 저장 → 다시 열기 → 인쇄 순서로, 학생이 쓴 답이 실제로 남아 인쇄되는지 본다.
+            _reload_keeping_answers(protocol)
+            filled = protocol.evaluate(_RESTORED_JS, True)
             if not isinstance(filled, dict) or filled.get("view") != "a4":
                 raise CheckError("채움 인쇄 전에 A4 보기로 전환하지 못했습니다.")
+            restored = filled.get("values") if isinstance(filled.get("values"), dict) else {}
+            canon = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True)
+            lost = sorted(slot for slot, value in entered["values"].items()
+                          if canon(value) != canon(restored.get(slot)))
+            info["filled_restored"] = not lost
+            if lost:
+                _problem(problems, "error", "filled-restore-failed", None, None,
+                         f"다시 열었을 때 입력이 사라지거나 바뀐 자리: {', '.join(lost[:8])}"
+                         + (f" 외 {len(lost) - 8}곳" if len(lost) > 8 else ""),
+                         "자동 저장과 복원(엔진의 저장 형식)을 확인하세요.")
             info["filled_print_leaks"] = filled.get("print_leaks")
             leaks = info["filled_print_leaks"]
             if type(leaks) is not int or leaks < 0:
@@ -649,6 +769,7 @@ def cmd_check(folder: Path) -> int:
                 _problem(problems, "error", "pdf-page-count", None, None,
                          f"학생 채움 PDF {actual}쪽과 HTML {student_count}쪽이 다릅니다.", "채움 인쇄 쪽 나눔을 확인하세요.")
             image_pdfs.append(("학생-채움", filled_pdf))
+            _audit_filled_text(interactive_info, filled_pdf, problems)
         images = _render_pages(out, image_pdfs, problems)
         outputs.extend(str(path) for _, _, path in images)
         sheets = _contact_sheets(out, [image for image in images if image[0] != "학생-채움"], problems)

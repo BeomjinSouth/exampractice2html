@@ -16,41 +16,84 @@ UNITS = ('cm2', 'km2', 'cm3', '마리', '개월', '시간', '그루', '송이', 
          'ml', 'm2', 'm3', '원', '개', '명', '권', '장', '쪽', '번', '회', '배', '살', '세',
          '점', '일', '년', '분', '초', '시', '도', '칸', '줄', '대', 'm', 'g', 'l', '°', '%',
          '가지', '쌍', '켤레', '자루', '벌', '조각', '묶음', '상자', '봉지', '바퀴', '층', '곳', '군데', 'dl')
-_UNIT_SUFFIX = re.compile('(' + '|'.join(map(re.escape, sorted(UNITS, key=len, reverse=True))) + r'|[가-힣]{1,3})$')
+_POWER_UNITS = {f'{unit[:-1]}^{unit[-1]}': unit for unit in UNITS if unit.endswith(('2', '3'))}
+_UNIT_PATTERN = '|'.join(map(re.escape, sorted((*UNITS, *_POWER_UNITS), key=len, reverse=True)))
+_KNOWN_UNIT_SUFFIX = re.compile(f'(?:{_UNIT_PATTERN})$')
+_UNIT_SUFFIX = re.compile(rf'(?:{_UNIT_PATTERN}|[가-힣]{{1,3}})$')
 FRACTION_FORMS = ('기약분수', '분수', '자유')
-# Match a request, not a mention of the term. Keep negative clauses local to their own request.
-_FRACTION_REQUEST = re.compile(r'(기약분수|분수)\s*로|약분\s*하')
-_FORM_OPTIONAL = re.compile(r'지\s*(?:않|말)|(?:이|가)?\s*아니어도|안\s*(?:해도|하여도|써도|나타내도)|필요\s*없')
+RADICAL_FORMS = ('유리화', '자유')
+_FRACTION_REQUEST = re.compile(r'(기약분수|분수)\s*(?:로|(?:가|이)\s*되도록)|약분\s*(?=하|해|안)')
+_RADICAL_REQUEST = re.compile(r'분모\s*(?:를\s*유리화(?=\s*(?:하|해|안|$))|의\s*유리화(?=\s*를\s*하))')
+_FORM_OPTIONAL = re.compile(r'지\s*(?:않|말)|아니어도|안\s*(?:해도|하여도|써도|나타내도)|필요\s*(?:가\s*)?없|'
+                            r'(?:해|하여|써|나타내)도\s*(?:된|됩|좋|괜찮|무방)')
+_FORM_CHOICE = re.compile(r'또는|혹은|거나')
+_CLAUSE_JOIN = re.compile(r'(?:나타내|표현하|정리하|구하|유리화하|쓰|적)(?:고|며)(?=\s)')
+
+
+def _required_forms(texts, pattern):
+    # A choice requires only the form common to all alternatives; negation is local.
+    fraction = pattern is _FRACTION_REQUEST
+    for text in texts:
+        for clause in re.split(r'[.!?。;,\n]', _CLAUSE_JOIN.sub(r'\g<0>\n', text)):
+            arms = _FORM_CHOICE.split(clause)
+            options = []
+            for arm in arms:
+                requests = list(pattern.finditer(arm))
+                forms = set()
+                for i, match in enumerate(requests):
+                    after = arm[match.end():requests[i + 1].start() if i + 1 < len(requests) else None]
+                    if not _FORM_OPTIONAL.search(after):
+                        forms.add((match[1] or '기약분수') if fraction else '유리화')
+                if not requests and fraction and len(arms) > 1:
+                    # The first option can omit '로 쓰시오': 기약분수 또는 분수로 쓰시오.
+                    if noun := re.search(r'(기약분수|분수)\s*$', arm):
+                        forms.add(noun[1])
+                options.append(forms)
+            if len(options) == 1:
+                yield from options[0]
+            elif all(options):
+                yield ('기약분수' if all('기약분수' in forms for forms in options) else '분수') if fraction else '유리화'
 
 
 def fraction_requirement(texts):
-    forms = set()
-    for text in texts:
-        for clause in re.split(r'[.!?。;\n]', text):
-            for match in _FRACTION_REQUEST.finditer(clause):
-                between = clause[match.end():]
-                following = _FRACTION_REQUEST.search(between)
-                if not _FORM_OPTIONAL.search(between[:following.start()] if following else between):
-                    forms.add(match[1] or '기약분수')
+    forms = set(_required_forms(texts, _FRACTION_REQUEST))
     return next((form for form in FRACTION_FORMS if form in forms), '자유')
 
 
-def _with_unit(value, parse):
+def radical_requirement(texts):
+    return next(_required_forms(texts, _RADICAL_REQUEST), '자유')
+
+
+def _ungroup(text):
+    if not (text.startswith('(') and text.endswith(')')):
+        return text
+    depth = 0
+    for i, char in enumerate(text):
+        depth += (char == '(') - (char == ')')
+        if depth == 0:
+            return text[1:-1].removeprefix('+') if i == len(text) - 1 else text
+    return text
+
+
+def _with_unit(value, parse, authored=False):
     if value is None:
         return None
     text = re.sub(r'^[a-z]=', '', norm(value), count=1).removeprefix('+')
-    if parse is _number:
-        text = text.replace('파이', 'π')
-    if parts := parse(text):
-        return [*parts, '']
-    unit = _UNIT_SUFFIX.search(text)
-    if unit and unit[0] not in ('파이', '루트') and (parts := parse(text[:unit.start()])):
-        return [*parts, '°' if unit[0] == '도' else unit[0]]
+    bare = _ungroup(text)
+    if parts := parse(bare):
+        return [*parts, '', bare]
+    unit = (_KNOWN_UNIT_SUFFIX if authored else _UNIT_SUFFIX).search(text)
+    if unit and unit[0] not in ('파이', '루트'):
+        bare = _ungroup(text[:unit.start()])
+        if parts := parse(bare):
+            return [*parts, normalized_unit(unit[0]) or unit[0], bare]
     return None
 
 
 def norm(value):
-    text = unicodedata.normalize('NFKC', str(value)).translate(str.maketrans('−‒–—―⁄', '-----/'))
+    # Preserve the exponent before compatibility normalization can flatten it (2³ ≠ 23).
+    source = re.sub(r'[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾]+', r'^\g<0>', str(value))
+    text = unicodedata.normalize('NFKC', source).translate(str.maketrans('−‒–—―⁄', '-----/'))
     return re.sub(r'\s+', '', text).lower().rstrip('.。')
 
 
@@ -63,9 +106,7 @@ def text_candidates(value):
 
 
 def _number(text):
-    if text.startswith('(') and text.endswith(')'):
-        text = text[1:-1].removeprefix('+')
-    text = text.replace('pi', 'π')
+    text = text.replace('파이', 'π').replace('pi', 'π')
     pi = ''
     if text.endswith('π'):
         pi, text = 'π', text[:-1]
@@ -90,9 +131,23 @@ def _number(text):
         return None
 
 
-def numeric_details(value):
-    parts = _with_unit(value, _number)
+def numeric_details(value, *, authored=False):
+    parts = _with_unit(value, _number, authored)
     return [parts[0], parts[2], parts[1]] if parts else None
+
+
+_QUALIFIER = re.compile(r'약(.+)|(.+?)(?:번째|쯤|정도|가량)')
+
+
+def qualified_details(value):
+    # Ordinal and approximate labels keep the number's meaning; a range word (3 이상) changes it.
+    match = _QUALIFIER.fullmatch(norm(value))
+    return numeric_details(match[1] or match[2], authored=True) if match else None
+
+
+def qualified_number(value):
+    parts = qualified_details(value)
+    return parts[0] if parts else None
 
 
 def number_parts(value):
@@ -102,7 +157,7 @@ def number_parts(value):
 
 def normalized_unit(value):
     unit = norm(value) if isinstance(value, str) else ''
-    return '°' if unit == '도' else unit if unit in UNITS else ''
+    return '°' if unit == '도' else unit if unit in UNITS else _POWER_UNITS.get(unit, '')
 
 
 def inferred_unit(tail, column='', row='', table=''):
@@ -128,20 +183,24 @@ def inferred_unit(tail, column='', row='', table=''):
 
 
 def number_forms(values, unit=''):
-    parts = [number_parts(value) for value in values]
+    parts = [numeric_details(value, authored=True) for value in values]
     if not all(parts):
         return []
-    inferred = '' if any(u for _, u in parts) else unit
-    return list(dict.fromkeys([n for n, _ in parts] + [f'{n}@{u or inferred}' for n, u in parts if u or inferred]))
+    inferred = '' if any(u for _, u, _ in parts) else unit
+    return list(dict.fromkeys([n for n, _, _ in parts] + [f'{n}@{u or inferred}' for n, u, _ in parts if u or inferred]))
 
 
 _ROOT = r'([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))'
 _ROOT_NUMERATOR = re.compile(r'(-?)' + _ROOT + r'(?:/([0-9]{1,128}))?')
 _ROOT_DENOMINATOR = re.compile(r'(-?)([0-9]{1,128})/(?:' + _ROOT + r'|\(' + _ROOT + r'\))')
+_ROOT_COEFFICIENT = re.compile(r'\(([+-]?)([0-9]{1,128})/([0-9]{1,128})\)√')
 
 
 def _radical(text):
     text = text.replace('루트', '√')
+    if coefficient := _ROOT_COEFFICIENT.match(text):
+        sign, numerator, denominator = coefficient.groups()
+        text = ('-' if sign == '-' else '') + (numerator if numerator != '1' else '') + '√' + text[coefficient.end():] + '/' + denominator
     if match := _ROOT_NUMERATOR.fullmatch(text):
         sign, coefficient, bare, grouped, denominator = match.groups()
         root = bare or grouped
@@ -160,22 +219,33 @@ def _radical(text):
     return [shape, f'square:{Fraction(-top if sign else top, bottom)}']
 
 
-def radical_parts(value):
-    return _with_unit(value, _radical)
+def radical_parts(value, *, authored=False):
+    parts = _with_unit(value, _radical, authored)
+    return parts[:3] if parts else None
 
 
-def writing_forms(kind, values, unit=''):
+_QUALIFIED = '\0qualified:'
+
+
+def writing_forms(kind, values, unit='', *, auto=False):
     if kind == 'number':
         forms = number_forms(values, unit)
-        return forms + [f'written:{norm(value)}' for value in values] if forms else []
+        return forms + [f'written:{_with_unit(value, _number, True)[3]}' for value in values] if forms else []
     if kind == 'radical':
-        parts = [radical_parts(value) for value in values]
+        parts = [radical_parts(value, authored=True) for value in values]
         if not all(parts):
             return []
         inferred = '' if any(u for _, _, u in parts) else unit
         return list(dict.fromkeys(v for shape, square, u in parts for key in (shape, square)
                                   for v in ((key, f'{key}@{u or inferred}') if u or inferred else (key,))))
-    return [norm(value) for value in values]
+    forms = [norm(value) for value in values]
+    if auto and values and qualified_number(values[0]) is not None:
+        forms.append(_QUALIFIED)
+        for key, unit, _ in filter(None, map(qualified_details, values)):
+            forms.append(f'{_QUALIFIED}{key}')
+            if unit:
+                forms.append(f'{_QUALIFIED}{key}@{unit}')
+    return forms
 
 
 def writing_result(kind, value, matches, form='', check_unit=False):
@@ -183,25 +253,35 @@ def writing_result(kind, value, matches, form='', check_unit=False):
     if value is None or not str(value).strip():
         return [None, '']
     if kind == 'text':
-        return [True if any(map(matches, text_candidates(value))) else 'review', '']
+        if any(map(matches, text_candidates(value))):
+            return [True, '']
+        if matches(_QUALIFIED):
+            # The same number, bare or with the authored unit, keeps an ordinal or approximate answer.
+            parts = number_parts(value)
+            if not parts:
+                return ['review', '']
+            key, unit = parts
+            return [matches(f'{_QUALIFIED}{key}@{unit}' if unit else f'{_QUALIFIED}{key}'), '']
+        return ['review', '']
     if kind not in ('radical', 'number'):
         return [None, '']
-    parts = radical_parts(value) if kind == 'radical' else numeric_details(value)
+    radical = kind == 'radical'
+    parts = _with_unit(value, _radical if radical else _number)
     if not parts:
         return [False, '']
-    key, alternate, unit = parts if kind == 'radical' else (parts[0], parts[2], parts[1])
-
-    def match_unit(candidate):
-        return matches(f'{candidate}@{unit}' if check_unit and unit else candidate)
-
-    exact_shape = match_unit(key)
-    if not exact_shape and (kind == 'number' or not match_unit(alternate)):
+    key, alternate, unit, written = parts
+    if not (matches(key) or radical and matches(alternate)):
         return [False, '']
-    if unit and not check_unit:
-        return ['review', 'unit']
-    if kind == 'radical':
-        return [True, ''] if exact_shape else ['review', 'radical']
-    if matches(f'written:{norm(value)}'):
+    if unit:
+        if not check_unit:
+            return ['review', 'unit']
+        if not (matches(f'{key}@{unit}') or radical and matches(f'{alternate}@{unit}')):
+            return [False, 'wrong-unit']
+    if radical:
+        if re.search(r'/[0-9]*√', key):
+            return [False, 'rationalize'] if form == '유리화' else [True, 'rationalize-tip']
+        return [True, ''] if matches(f'{key}@{unit}' if unit else key) else ['review', 'radical']
+    if matches(f'written:{written}'):
         return [True, '']
     if form == '기약분수' and alternate != 'reduced':
         return [False, 'reduced']

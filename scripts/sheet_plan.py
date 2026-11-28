@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from sheet_common import (KINDS, LABEL_MM, PICTURE_CELL_PADDING_MM, PLACEHOLDER, RASTER_MIMES, ROOT, SOURCE,
                           SPLIT_RATIOS, box_five, box_tick_values, content_width_mm, figure_width_mm, image_path,
                           situation_cell_mm, split_widths_mm, youtube_id)
-from sheet_answer import FRACTION_FORMS, UNITS, norm, normalized_unit, num, plain
+from sheet_answer import FRACTION_FORMS, RADICAL_FORMS, UNITS, norm, normalized_unit, num, plain
 
 
 def ambiguous_answer(value):
@@ -1893,11 +1893,14 @@ class Validator:
         sheet_blocks = []
         for i, item in enumerate(self.list(data.get('items'), 'items') or []):
             path = f'items[{i}]'
-            if not self.object(item, path, ('id', 'break', 'blocks', 'hints', 'fraction_form')):
+            if not self.object(item, path, ('id', 'break', 'blocks', 'hints', 'fraction_form', 'radical_form')):
                 continue
             if 'fraction_form' in item and item['fraction_form'] not in FRACTION_FORMS:
                 self.error(path + '.fraction_form', '분수 요구 꼴을 읽을 수 없습니다.',
                            '기약분수, 분수, 자유 중 하나를 쓰세요.', 'fraction-form')
+            if 'radical_form' in item and item['radical_form'] not in RADICAL_FORMS:
+                self.error(path + '.radical_form', '근호 요구 꼴을 읽을 수 없습니다.',
+                           '유리화, 자유 중 하나를 쓰세요.', 'radical-form')
             item_id = item.get('id')
             if (not isinstance(item_id, str) or not re.fullmatch(r'[A-Za-z0-9-]+', item_id) or
                     item_id == 'head'):

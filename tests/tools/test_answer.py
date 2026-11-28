@@ -17,7 +17,7 @@ class AnswerTest(unittest.TestCase):
 
     def test_contract_cases(self):
         self.assertEqual(set(answer.UNITS), set(self.cases['units']))
-        for name in ('norm', 'num', 'number_parts', 'text_candidates', 'plain', 'line', 'points', 'fraction_requirement'):
+        for name in ('norm', 'num', 'number_parts', 'text_candidates', 'plain', 'line', 'points', 'fraction_requirement', 'radical_requirement'):
             for source, expected in self.cases[name]:
                 with self.subTest(kind=name, source=source):
                     self.assertEqual(getattr(answer, name)(source), expected)

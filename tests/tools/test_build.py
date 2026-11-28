@@ -527,6 +527,55 @@ class BuildTest(unittest.TestCase):
                     self.assertEqual(set(attrs['data-check-hash'].split(',')),
                                      {check_hash(salt, 'number', v) for v in (number, f'{number}@{unit}', f'written:{number}')})
 
+    def test_assembled_writing_verdicts(self):
+        from sheet_answer import writing_result
+        from sheet_build import Renderer
+        cases = json.loads((ROOT / 'tests/engine/answer-cases.json').read_text(encoding='utf-8'))
+        for spec in cases['assembled_writing']:
+            blocks = [{'type': 'question', 'text': spec.get('prompt', '답을 쓰세요.') +
+                       ' {{|' + spec['blank'] + '}}' + spec.get('tail', '')}]
+            if 'situation' in spec:
+                blocks.insert(0, {'type': 'situation', 'lines': [spec['situation']]})
+            item = {'id': spec['id'], 'blocks': blocks}
+            if 'radical_form' in spec:
+                item['radical_form'] = spec['radical_form']
+            renderer = Renderer({'meta': {'title': self.title}, 'items': [item]}, self.folder, [])
+            tags = Tags(renderer.render_items()).tags
+            section = next(attrs for _, attrs in tags if attrs.get('data-id') == spec['id'])
+            slot = next(attrs for _, attrs in tags if attrs.get('data-slot') == spec['id'] + '.1')
+            kind = slot['data-check-kind']
+            form = section.get('data-radical-form' if kind == 'radical' else 'data-fraction-form', '')
+            hashes = slot['data-check-hash'].split(',')
+            for value, expected in spec['cases']:
+                with self.subTest(case=spec['id'], value=value):
+                    self.assertEqual(kind, spec['kind'])
+                    self.assertEqual(writing_result(kind, value,
+                        lambda key: check_hash(renderer.salt, kind, key) in hashes,
+                        form, slot.get('data-check-unit') == '1'), expected)
+
+    def test_writing_shapes_include_open_work_but_not_during_an_assessment(self):
+        cases = json.loads((ROOT / 'tests/engine/answer-cases.json').read_text(encoding='utf-8'))['writing_shapes']
+        for kind, index in [('수업', 2), ('평가', 3)]:
+            with self.subTest(kind=kind):
+                data = {'version': 1, 'meta': {'title': self.title, 'kind': kind, 'interactive': True},
+                        'items': [{'id': 'q1', 'blocks': [{'type': 'answer', 'rows': [
+                            {'label': f'풀이 {i}', 'answer': row[0], 'lines': 3} for i, row in enumerate(cases, 1)]}]}]}
+                self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+                self.cli('build', self.folder)
+                for after_derive in (False, True):
+                    if after_derive:
+                        self.cli('derive', self.teacher)
+                    slots = [a for _, a in Tags(self.student.read_text(encoding='utf-8')).tags
+                             if a.get('data-slot', '').startswith('q1.')]
+                    self.assertEqual([(a['data-check-kind'], a['data-writing-shape']) for a in slots],
+                                     [(row[1], row[index]) for row in cases])
+
+    def test_plan_rejects_invalid_radical_form(self):
+        data = {'version': 1, 'meta': {'title': self.title}, 'items': [{'id': 'q1', 'radical_form': '분수',
+                'blocks': [{'type': 'question', 'text': '값을 쓰시오.'}]}]}
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.assertIn('radical-form', self.cli('plan', self.folder, status=1))
+
     def test_plan_rejects_invalid_table_unit(self):
         data = {'version': 1, 'meta': {'title': self.title}, 'items': [{'id': 'q1', 'blocks': [
             {'type': 'table', 'unit': '점수', 'header': ['값'], 'rows': [['{{|45}}']]}]}]}

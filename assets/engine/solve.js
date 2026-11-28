@@ -458,7 +458,29 @@
       row.restoredDrawing = !!drawing?.strokes.length;
     }
   }
-  let sheetSymbols = '', activeSymbols;
+  const symbolKeys = [['π', 'π', '파이'], ['√', '√', '루트'], ['/', 'fraction', '분수 기호']];
+  const numericField = row => ['number', 'radical'].includes(row.kind);
+  const openMathField = row => row.kind === 'open' && root.dataset.kind !== '평가' &&
+    symbolKeys.some(([, shape]) => writingShape(row.el).includes(shape));
+  let sheetSymbols = '', activeSymbols, symbolHint, symbolHintDismissed = false;
+  function syncSymbolHint() {
+    if (symbolHintDismissed || !sheetSymbols || mode !== 'solve' || !usable() || !mainNode ||
+        ![...records.values()].some(r => numericField(r) || openMathField(r))) {
+      symbolHint?.remove();
+      return;
+    }
+    const symbols = [...sheetSymbols];
+    const last = symbols.pop(), list = symbols.length ? `${symbols.join(', ')}와 ${last}` : last;
+    symbolHint ??= solveOnly('p', 'ws-symbol-hint');
+    symbolHint.textContent = `칸을 누르면 ${list}를 쓸 수 있어요`;
+    if (symbolHint !== mainNode.firstChild) mainNode.prepend(symbolHint);
+  }
+  function dismissSymbolHint() {
+    if (symbolHintDismissed) return;
+    symbolHintDismissed = true;
+    symbolHint?.remove();
+    store('setItem', `${storageKey}:symbols-used`, '1');
+  }
   function hideSymbols() {
     if (activeSymbols) activeSymbols.bar.hidden = true;
     activeSymbols = undefined;
@@ -469,9 +491,31 @@
     const viewport = window.visualViewport;
     const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0;
     const right = left + (viewport?.width ?? window.innerWidth), bottom = top + (viewport?.height ?? window.innerHeight);
+    let x0 = Math.max(rect.left, left), y0 = Math.max(rect.top, top);
+    let x1 = Math.min(rect.right, right), y1 = Math.min(rect.bottom, bottom);
+    const clips = /^(auto|scroll|hidden|clip|overlay)$/;
+    for (let parent = input.parentElement; parent && parent !== root && x0 < x1 && y0 < y1; parent = parent.parentElement) {
+      const { overflowX, overflowY } = getComputedStyle(parent);
+      if (!clips.test(overflowX) && !clips.test(overflowY)) continue;
+      const box = parent.getBoundingClientRect();
+      if (clips.test(overflowX)) {
+        const edge = box.left + parent.clientLeft;
+        x0 = Math.max(x0, edge); x1 = Math.min(x1, edge + parent.clientWidth);
+      }
+      if (clips.test(overflowY)) {
+        const edge = box.top + parent.clientTop;
+        y0 = Math.max(y0, edge); y1 = Math.min(y1, edge + parent.clientHeight);
+      }
+    }
+    if (x0 >= x1 || y0 >= y1) {
+      if (bar.contains(document.activeElement)) input.focus({ preventScroll: true });
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
     const margin = 4, gap = 4, width = bar.offsetWidth, height = bar.offsetHeight;
-    const x = clamp(rect.left, left + margin, Math.max(left + margin, right - width - margin));
-    const preferredY = rect.bottom + gap + height <= bottom - margin ? rect.bottom + gap : rect.top - gap - height;
+    const x = clamp(x0, left + margin, Math.max(left + margin, right - width - margin));
+    const preferredY = y1 + gap + height <= bottom - margin ? y1 + gap : y0 - gap - height;
     const y = clamp(preferredY, top + margin, Math.max(top + margin, bottom - height - margin));
     bar.style.left = `${x}px`;
     bar.style.top = `${y}px`;
@@ -492,27 +536,21 @@
         if (!slotReveal.has(el)) slotReveal.set(el, Object.hasOwn(initialReveal.slots ?? {}, old) ? initialReveal.slots[old] : undefined);
         if (item.dataset.id === 'head' && old.startsWith('head.')) row.slot = old;
         else row.slot = el.dataset.slot = `${item.dataset.id}.${++i}`;
-        const previousKind = row.kind;
         row.kind = kind;
-        if (previousKind !== kind) row.control?.syncSymbols?.();
         row.hashes = (el.dataset.checkHash || '').split(',').filter(Boolean);
         row.auto = canGrade && automatic.has(kind) && row.hashes.length > 0;
         if (!row.auto) row.result = null;
         records.set(row.slot, row);
       }
     }
-    const shapes = new Set([...records.values()].filter(row => ['number', 'radical'].includes(row.kind))
+    const shapes = new Set([...records.values()].filter(row => numericField(row) || openMathField(row))
       .flatMap(row => writingShape(row.el)));
     for (const item of core.items()) {
       if (item.querySelector('msqrt, mroot')) shapes.add('√');
       if (all(item, 'math mi').some(node => node.textContent === 'π')) shapes.add('π');
     }
-    const nextSymbols = [['π', 'π'], ['√', '√'], ['/', 'fraction']]
-      .filter(([, shape]) => shapes.has(shape)).map(([symbol]) => symbol).join('');
-    if (sheetSymbols !== nextSymbols) {
-      sheetSymbols = nextSymbols;
-      for (const row of records.values()) row.control?.syncSymbols?.();
-    }
+    sheetSymbols = symbolKeys.filter(([, shape]) => shapes.has(shape)).map(([symbol]) => symbol).join('');
+    for (const row of records.values()) row.control?.syncSymbols?.();
   }
   const values = () => Object.fromEntries([...records.values()].filter(r => r.value !== undefined).map(r => [r.slot, clone(r.value)]));
   const slots = () => [...records.values()].map(({ slot, kind, item, auto }) => ({ slot, kind, item: item.dataset.id, auto }));
@@ -527,7 +565,10 @@
     return applyValue(row, same(next, row.value) ? row.value : next, evaluate);
   }
   function applyValue(row, next, evaluate = false) {
-    if (next !== row.value) { row.value = next; row.result = null; row.confirmed = false; saveValues(); }
+    if (next !== row.value) {
+      if (row.confirmed && row.recheck) row.needsRecheck = true;
+      row.value = next; row.result = null; row.confirmed = false; saveValues();
+    }
     if (evaluate) row.result = check(row);
     if (usable()) {
       row.control?.paint(row.value);
@@ -546,6 +587,7 @@
     closeRestorePrompt();
     for (const row of records.values()) {
       row.value = undefined; row.penValue = undefined; row.result = null; row.confirmed = false;
+      row.needsRecheck = false;
       delete row.el.dataset.value; delete row.el.dataset.penValue;
       row.control?.reset?.();
       row.control?.paint(undefined); updateRow(row);
@@ -717,11 +759,10 @@
       event.preventDefault();
       button.click();
     });
-    let symbols;
+    let symbols, offered = '';
     function showSymbols() {
       if (!symbols || !usable() || mode !== 'solve') return;
       if (activeSymbols?.bar !== symbols) hideSymbols();
-      symbols.hidden = false;
       activeSymbols = { input, bar: symbols };
       positionSymbols();
     }
@@ -729,36 +770,58 @@
       if (event.relatedTarget === input || symbols?.contains(event.relatedTarget)) return;
       if (activeSymbols?.bar === symbols) hideSymbols();
     }
+    function closeSymbols() {
+      if (!symbols || activeSymbols?.bar !== symbols) return;
+      input.focus({ preventScroll: true });
+      hideSymbols();
+      dismissSymbolHint();
+    }
+    function escapeSymbols(event) {
+      if (event.key !== 'Escape' || event.isComposing || !symbols || symbols.hidden) return;
+      event.preventDefault();
+      closeSymbols();
+    }
     input.addEventListener('focus', showSymbols);
+    input.addEventListener('click', showSymbols);
     input.addEventListener('blur', leaveSymbols);
+    input.addEventListener('keydown', escapeSymbols);
     function syncSymbols() {
+      const next = numericField(row) || openMathField(row) ? sheetSymbols : '';
+      if (offered === next) return;
+      offered = next;
       if (activeSymbols?.bar === symbols) hideSymbols();
       symbols?.remove();
       symbols = undefined;
-      if (!['number', 'radical'].includes(row.kind)) return;
-      for (const [symbol, label] of [['π', '파이'], ['√', '루트'], ['/', '분수 기호']]) {
-        if (!sheetSymbols.includes(symbol)) continue;
-        if (!symbols) {
-          symbols = solveOnly('span', 'ws-symbols');
-          symbols.hidden = true;
-          symbols.addEventListener('focusout', leaveSymbols);
-          // Keep the ink immediately after the input for A4, and the buttons next in tab order.
-          ink.after(symbols);
-        }
+      if (!offered) return;
+      symbols = solveOnly('span', 'ws-symbols');
+      symbols.hidden = true;
+      symbols.addEventListener('focusout', leaveSymbols);
+      symbols.addEventListener('keydown', escapeSymbols);
+      // Keep the ink immediately after the input for A4, and the buttons next in tab order.
+      ink.after(symbols);
+      for (const [symbol,, label] of symbolKeys) {
+        if (!offered.includes(symbol)) continue;
         const button = make('button', '', symbol);
         button.type = 'button';
         button.dataset.symbol = symbol;
         button.setAttribute('aria-label', label);
         button.addEventListener('pointerdown', event => event.preventDefault());
         button.addEventListener('click', () => {
-          if (!usable() || mode !== 'solve') return;
+          if (!usable() || mode !== 'solve' || activeSymbols?.bar !== symbols) return;
+          positionSymbols();
+          if (symbols.hidden) return;
           const start = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? start;
           input.focus({ preventScroll: true });
           input.setRangeText(symbol, start, end, 'end');
           input.dispatchEvent(new Event('input', { bubbles: true }));
+          dismissSymbolHint();
         });
         symbols.append(button);
       }
+      const close = uiButton('×', 'close-symbols', closeSymbols);
+      close.setAttribute('aria-label', '기호 막대 닫기');
+      close.addEventListener('pointerdown', event => event.preventDefault());
+      symbols.append(close);
       if (document.activeElement === input) showSymbols();
     }
     syncSymbols();
@@ -1039,7 +1102,7 @@
     status.setAttribute('aria-live', 'polite');
     const initialTool = alongsidePlot ? 'plot' : 'ink';
     let selected, gesture, radius = 0, restoreFrame;
-    let enlarged = false, panGesture;
+    let enlarged = false, panGesture, edgeFrame;
     const viewport = runtime(make('div', 'ws-pen-viewport'));
     const stage = runtime(make('div', 'ws-pen-stage'));
     viewport.append(stage);
@@ -1238,22 +1301,62 @@
       if (event.isTrusted) canvas.setPointerCapture(event.pointerId);
       paintCanvas(gesture, gesture);
     });
+    function traceSample(sample, rect) {
+      const p = point(sample, rect);
+      if (same(p, gesture.last)) return;
+      if (gesture.which === 'erase') gesture.strokes = eraseAt(gesture.strokes,[gesture.last,p]);
+      else if (gesture.which === 'ink') gesture.strokes.at(-1).push(p);
+      else if (distancePx(gesture.start, p, rect.width, rect.height) >= 5) gesture.dragged = true;
+      gesture.last = p;
+    }
+    function edgeDelta(cursor, min, max, seconds) {
+      const band = Math.min(28, (max - min) / 3);
+      if (band <= 0) return 0;
+      const depth = clamp((cursor - max + band) / band, 0, 1) - clamp((min + band - cursor) / band, 0, 1);
+      return Math.sign(depth) * Math.ceil(Math.abs(depth) * 600 * seconds);
+    }
+    function scrollDrawing(time) {
+      edgeFrame = undefined;
+      if (!gesture?.pointer || !viewport.isConnected || mode !== 'solve' || !usable()) return;
+      const { clientX, clientY } = gesture.pointer;
+      const box = viewport.getBoundingClientRect(), screen = window.visualViewport;
+      const screenX = screen?.offsetLeft ?? 0, screenY = screen?.offsetTop ?? 0;
+      const left = Math.max(box.left + viewport.clientLeft, screenX);
+      const right = Math.min(box.left + viewport.clientLeft + viewport.clientWidth, screenX + (screen?.width ?? innerWidth));
+      const top = Math.max(box.top + viewport.clientTop, screenY);
+      const bottom = Math.min(box.top + viewport.clientTop + viewport.clientHeight, screenY + (screen?.height ?? innerHeight));
+      if (left >= right || top >= bottom) return;
+      const seconds = Math.min(32, Math.max(1, time - (gesture.edgeTime ?? time - 16))) / 1000;
+      const x = viewport.scrollLeft, y = viewport.scrollTop;
+      const dx = edgeDelta(clientX, left, right, seconds), dy = edgeDelta(clientY, top, bottom, seconds);
+      if (dx || dy) viewport.scrollTo({ left: x + dx, top: y + dy, behavior: 'instant' });
+      if (x === viewport.scrollLeft && y === viewport.scrollTop) return;
+      // The pointer can stay still while the picture moves beneath it.
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      traceSample(gesture.pointer, rect);
+      paintCanvas(gesture, gesture);
+      gesture.edgeTime = time;
+      edgeFrame = requestAnimationFrame(scrollDrawing);
+    }
     function move(event) {
       if (gesture?.id !== event.pointerId) return;
       const rect = canvas.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       const samples = event.getCoalescedEvents?.();
-      for (const sample of samples?.length ? samples : [event]) {
-        const p = point(sample, rect);
-        if (same(p, gesture.last)) continue;
-        if (gesture.which === 'erase') gesture.strokes = eraseAt(gesture.strokes,[gesture.last,p]);
-        else if (gesture.which === 'ink') gesture.strokes.at(-1).push(p);
-        else if (distancePx(gesture.start, p, rect.width, rect.height) >= 5) gesture.dragged = true;
-        gesture.last = p;
+      for (const sample of samples?.length ? samples : [event]) traceSample(sample, rect);
+      if (event.type === 'pointermove' && enlarged && viewport.isConnected && gesture.which !== 'erase') {
+        gesture.pointer = { clientX: event.clientX, clientY: event.clientY };
+        if (edgeFrame == null) {
+          gesture.edgeTime = undefined;
+          edgeFrame = requestAnimationFrame(scrollDrawing);
+        }
       }
       paintCanvas(gesture, gesture);
     }
     function stopTracking() {
+      if (edgeFrame != null) cancelAnimationFrame(edgeFrame);
+      edgeFrame = undefined;
       gesture?.listeners.abort();
       gesture = undefined;
     }
@@ -1314,6 +1417,10 @@
   function updateRow(row) {
     const active = usable(), ok = active && row.result === true, no = active && row.result === false;
     const review = active && row.result === 'review';
+    if (row.recheck) {
+      const message = active && row.needsRecheck ? '답을 바꿨어요. 다시 확인해 보세요' : '';
+      if (row.recheck.textContent !== message) row.recheck.textContent = message;
+    }
     toggle(row.el, 'ws-ok', ok); toggle(row.el, 'ws-no', no); toggle(row.el, 'ws-review', review);
     if ((ok || no || review) && !row.verdict) {
       row.verdict = solveOnly(row.el.matches('.ws-blank,.ws-name-slot') ? 'span' : 'div', 'ws-verdict');
@@ -1403,13 +1510,21 @@
     if (hasCheck) {
       bar.append(uiButton('확인', 'check', () => {
         panel.emptyAttempt = policy === '시도 후' && !panel.rows.some(hasResponse);
-        if (panel.emptyAttempt) { updatePanel(item); return; }
-        panel.attempted = true;
         for (const row of panel.rows) {
-          row.confirmed = hasResponse(row);
-          row.result = policy === '시도 후' && !row.confirmed ? null : check(row);
+          row.needsRecheck = false;
+          if (!panel.emptyAttempt) {
+            row.confirmed = hasResponse(row);
+            row.result = policy === '시도 후' && !row.confirmed ? null : check(row);
+            if (row.confirmed && !row.recheck && !['draw', 'self', 'name'].includes(row.kind)) {
+              row.recheck = solveOnly('span', 'ws-recheck');
+              row.recheck.setAttribute('aria-live', 'polite');
+              auxiliary(row, row.recheck);
+            }
+          }
           updateRow(row);
         }
+        if (panel.emptyAttempt) { updatePanel(item); return; }
+        panel.attempted = true;
         updatePanel(item); updateScore();
         document.dispatchEvent(new CustomEvent('sheet:check', { detail: { item: item.dataset.id } }));
       }));
@@ -1443,7 +1558,8 @@
       (policy === '바로' || r.confirmed) &&
       (multiple.has(r.kind) ? completeResponse(r) : policy === '바로' || hasResponse(r)));
     const answerReady = unlocked && answerRows.length > 0;
-    const solutionReady = unlocked && !missing && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
+    const solutionReady = unlocked && !missing && (policy === '바로' || panel.rows
+      .filter(r => r.kind !== 'draw' && r.kind !== 'self').every(completeResponse));
     setButton(panel.answerButton, answerReady, panel.answers);
     setButton(panel.solutionButton, solutionReady, panel.solution);
     const compareReady = active && !!panel.compareButton && panel.rows.every(row => {
@@ -1738,6 +1854,7 @@
         bindVideo(frame, video.dataset, video.querySelector('figcaption')?.textContent.trim()); mediaBound.add(frame);
       }
     }
+    syncSymbolHint();
     updateScore();
   }
   const narrowScreen = window.matchMedia('screen and (max-width: 719.98px)');
@@ -1815,6 +1932,7 @@
   function init() {
     const build = core.buildMeta();
     storageKey = `pbj-sheet:${build.edition || build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
+    symbolHintDismissed = store('getItem', `${storageKey}:symbols-used`) === '1';
     const content = document.getElementById('sheet-reveal')?.textContent.trim();
     if (canReveal && content) {
       try { initialReveal = decodeReveal(salt(), content) || {}; } catch { /* input and hashing are still available */ }

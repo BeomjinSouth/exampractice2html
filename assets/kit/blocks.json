@@ -136,6 +136,6 @@
   "checklist": {
     "description": "화면에서만 보이는 자기 점검 목록(인쇄에는 기본으로 넣지 않음, 평가에는 사용 불가)", "fields": {"title": "제목", "items": "점검 문장 배열", "print": "true면 인쇄에도 표시"},
     "required": ["items"], "limits": {"title": 40, "items[]": 120},
-    "example": {"type": "checklist", "title": "스스로 점검", "items": ["풀이를 확인했나요?"]}
+    "example": {"type": "checklist", "title": "스스로 점검", "items": ["답에 빠뜨린 조건이 없는지 살폈어요."]}
   }
 }

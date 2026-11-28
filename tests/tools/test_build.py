@@ -479,19 +479,88 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(len(attrs[0]['data-check-hash'].split(',')), 3)
         self.assertEqual(len(attrs[1]['data-check-hash'].split(',')), 2)
 
-    def test_derive_reads_teacher_data_check(self):
-        self.interactive_fixture()
-        data = json.loads(self.source.read_text(encoding='utf-8'))
-        data['items'][0]['blocks'][-1]['rows'].append({'label': '자유 응답', 'answer': '설명', 'check': 'off'})
+    def test_derive_rebuilds_edited_quartile_and_writing_slots_like_build(self):
+        data = {'version': 1, 'meta': {'title': self.title, 'reveal': '교사만', 'theme': '정본'},
+                'items': [{'id': 'q2', 'blocks': [
+                    {'type': 'text', 'text': '자료: $8, 10, 12, 14, 15, 16, 19, 21, 24$'},
+                    {'type': 'table', 'header': ['항목', '시간 (분)'], 'rows': [['제1사분위수', '{{|$11$}}']]},
+                    {'type': 'answer', 'rows': [{'label': '값', 'answer': '$5$', 'accept': ['$7$']},
+                                               {'label': '설명', 'answer': '$2$', 'check': 'off'},
+                                               {'label': '식', 'answer': '이전 식', 'check': 'text'}]}]}]}
         self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
         self.cli('build', self.folder)
         source = self.teacher.read_text(encoding='utf-8')
-        old = '&quot;right&quot;:&quot;5&quot;'
-        self.assertIn(old, source)
-        self.teacher.write_text(source.replace(old, '&quot;right&quot;:&quot;7&quot;', 1), encoding='utf-8')
+        edited = (source.replace('8, 10, 12, 14,', '8, 10, 14, 14,').replace('<mn>12</mn>', '<mn>14</mn>', 1)
+                  .replace('{{|$11$}}', '{{|$12$}}').replace('<mn>11</mn>', '<mn>12</mn>')
+                  .replace('data-src="$5$"><math><mn>5</mn>', 'data-src="$6.0$"><math><mn>6.0</mn>')
+                  .replace('data-src="이전 식">이전 식', 'data-src="$y=2x$">새 식'))
+        self.teacher.write_text(edited, encoding='utf-8')
         self.cli('derive', self.teacher)
-        table = json.loads((self.folder / '검사/정답표.json').read_text(encoding='utf-8'))
-        self.assertEqual(table['slots'][0]['right'], '7')
+        table_path = self.folder / '검사/정답표.json'
+        derived_table = table_path.read_bytes()
+        table = json.loads(derived_table)
+        self.assertEqual([(a['slot'], a['right'], a['wrong']) for a in table['slots'][:2]],
+                         [('q2.1', '12', '13'), ('q2.2', '6.0', '8')])
+        def slots(path):
+            return {a['data-slot']: a for _, a in Tags(path.read_text(encoding='utf-8')).tags
+                    if a.get('data-slot', '').startswith('q2.')}
+        student_slots, teacher_slots = slots(self.student), slots(self.teacher)
+        self.assertEqual(student_slots['q2.2']['data-input-mode'], 'decimal')
+        self.assertEqual(student_slots['q2.3']['data-check-kind'], 'open')
+        self.assertEqual(student_slots['q2.4']['data-check-kind'], 'text')
+        self.assertIn(check_hash(table['salt'], 'number', '12@분'), student_slots['q2.1']['data-check-hash'])
+        self.assertNotIn(check_hash(table['salt'], 'number', '11'), student_slots['q2.1']['data-check-hash'])
+        blocks = data['items'][0]['blocks']
+        blocks[0]['text'] = blocks[0]['text'].replace('12, 14', '14, 14')
+        blocks[1]['rows'][0][1] = '{{|$12$}}'
+        blocks[2]['rows'][0]['answer'] = '$6.0$'
+        blocks[2]['rows'][2]['answer'] = '$y=2x$'
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.cli('build', self.folder)
+        self.assertEqual(slots(self.student), student_slots)
+        self.assertEqual(slots(self.teacher), teacher_slots)
+        self.assertEqual(table_path.read_bytes(), derived_table)
+
+    def test_derive_rejects_changed_blank_count_or_slot_name_before_writing(self):
+        self.interactive_fixture()
+        self.cli('build', self.folder)
+        original = self.teacher.read_text(encoding='utf-8')
+        table = self.folder / '검사/정답표.json'
+        before = [path.read_bytes() for path in (self.student, self.record, table)]
+        for edited, detail in [(original.replace('{{㉠|$5$;;$+5$}}', '{{㉠|$5$}}와 {{|$6$}}'), '빈칸'),
+                               (original.replace('data-slot="q1.1"', 'data-slot="q9.1"'), 'q9.1'),
+                               (original.replace('data-slot="q1.1"', 'data-slot="q1.99"'), 'q1.99')]:
+            with self.subTest(detail=detail):
+                self.teacher.write_text(edited, encoding='utf-8')
+                output = self.cli('derive', self.teacher, status=1)
+                self.assertIn('q1', output)
+                self.assertIn(detail, output)
+                self.assertEqual(self.teacher.read_text(encoding='utf-8'), edited)
+                self.assertEqual([path.read_bytes() for path in (self.student, self.record, table)], before)
+
+    def test_derive_policy_transitions_match_fresh_student_build(self):
+        def state():
+            tags = Tags(self.student.read_text(encoding='utf-8')).tags
+            self.assertFalse(any('data-check' in attrs or 'data-src' in attrs for _, attrs in tags))
+            published = any(attrs.get('id') == 'sheet-reveal' for _, attrs in tags)
+            return [attrs for _, attrs in tags if attrs.get('data-slot')], self.public_data() if published else None
+        for start, end in [('교사만', '없음'), ('바로', '없음'), ('없음', '시도 후')]:
+            with self.subTest(start=start, end=end):
+                self.interactive_fixture(start)
+                self.cli('build', self.folder)
+                edited = self.teacher.read_text(encoding='utf-8').replace(f'data-reveal="{start}"', f'data-reveal="{end}"', 1)
+                self.teacher.write_text(edited, encoding='utf-8')
+                self.cli('derive', self.teacher)
+                after = state()
+                if end == '없음':
+                    self.assertIsNone(after[1])
+                    self.assertFalse(any({'data-check-hash', 'data-check-unit'} & a.keys() for a in after[0]))
+                else:
+                    self.assertGreater(sum('data-check-hash' in a for a in after[0]), 5)
+                    self.assertIn('모범 풀이', after[1]['items']['q1']['solution_html'])
+                self.interactive_fixture(end)
+                self.cli('build', self.folder)
+                self.assertEqual(state(), after)
 
     def test_lesson_and_practice_heads(self):
         for kind, cols, head in [('수업', 2, '짝의 이름'), ('연습', 1, '수학 연습지')]:

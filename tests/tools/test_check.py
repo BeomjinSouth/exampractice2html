@@ -100,6 +100,37 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertEqual((folder / '검사/_이전/교사-99.png').read_bytes(), b'old page kept')
         self.assertFalse(old.exists())
 
+    def test_check_uses_new_quartile_after_derive(self):
+        folder = self.run_root / '사분위수-편집'
+        folder.mkdir()
+        plan = {'version': 1, 'meta': {'title': '사분위수', 'kind': '연습', 'grade': '중3', 'reveal': '교사만', 'sync': False},
+                'items': [{'id': 'q2', 'blocks': [
+                    {'type': 'question', 'text': '제1사분위수를 쓰시오.'},
+                    {'type': 'table', 'header': ['자료', '제1사분위수 (분)'],
+                     'rows': [['$8, 10, 12, 14, 15, 16, 19, 21, 24$', '{{|$11$}}']]}]}]}
+        (folder / '구성.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
+        teacher, student = folder / '사분위수 (교사용).html', folder / '사분위수.html'
+        with patch.dict(os.environ, {'SHEET_FONT_DIR': str(folder)}), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sheet_build.cmd_build(folder), 0, output.getvalue())
+            source = teacher.read_text(encoding='utf-8')
+            edited = (source.replace('12, 14, 15', '14, 14, 15').replace('<mn>12</mn>', '<mn>14</mn>', 1)
+                      .replace('{{|$11$}}', '{{|$12$}}').replace('<mn>11</mn>', '<mn>12</mn>'))
+            teacher.write_text(edited, encoding='utf-8')
+            self.assertEqual(sheet_build.cmd_derive(teacher), 0, output.getvalue())
+        table = json.loads((folder / '검사/정답표.json').read_text(encoding='utf-8'))
+        self.assertEqual(table['slots'], [{'slot': 'q2.1', 'kind': 'number', 'right': '12', 'wrong': '13'}])
+        self.assertNotIn('answer-check-failed', self.inspect(folder, 0))
+        info = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))['interactive_check']
+        self.assertEqual((info['grading'], info['grading_tested']), ('passed', 1))
+        with sheet_check.sheet_browser() as browser:
+            protocol = browser.cdp
+            protocol.call('Page.enable')
+            protocol.call('Runtime.enable')
+            protocol.call('Page.navigate', {'url': student.resolve().as_uri() + '?nosync'})
+            protocol.wait_event('Page.loadEventFired')
+            result = protocol.evaluate("(async()=>{await sheet.ready;return [sheet.answer('q2.1','12분'),sheet.answer('q2.1','11')]})()", True)
+        self.assertEqual(result, [True, False])
+
     def test_filled_phone_detects_real_clipped_flow_and_clears_answers(self):
         folder = self.run_root / '채움-흐름'
         folder.mkdir(parents=True, exist_ok=True)

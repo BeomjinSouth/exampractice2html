@@ -1077,6 +1077,13 @@ def _page_images_missing(out, report):
             if not (out / f'{prefix}-{page["n"]:02d}.png').is_file()]
 
 
+def _has_review_reason(reason):
+    letters = ''.join(c for c in unicodedata.normalize('NFKC', reason) if c.isalpha())
+    return len(letters) >= 2 and letters.casefold() not in {
+        '까닭', '이유', '사유', '작성', '미정', '생략', 'todo', 'tbd', 'xx', 'xxx',
+    }
+
+
 def _review_errors(text, report, plan_warnings=()):
     lines = text.splitlines()
     errors = []
@@ -1095,8 +1102,9 @@ def _review_errors(text, report, plan_warnings=()):
         else:
             section = re.split(r'(?m)^#{1,2}[ \t]+', text[heading.end():], maxsplit=1)[0]
             for code in plan_warnings:
-                if not re.search(rf'(?m)^[ \t]*[-*][ \t]+`?{re.escape(code)}`?[ \t]*:[ \t]*'
-                                 r'(?:고침|그대로 둠)[ \t]+[—–-][ \t]+\S', section):
+                decisions = re.findall(rf'(?m)^[ \t]*[-*][ \t]+(?:`{re.escape(code)}`|{re.escape(code)})[ \t]*:[ \t]*'
+                                       r'(?:고침|그대로[ \t]+둠)[ \t]*[—–:.-][ \t]*([^\r\n]*)$', section)
+                if not any(_has_review_reason(reason) for reason in decisions):
                     errors.append(f'원고 경고 {code}의 판단과 까닭이 없습니다')
     student_text = re.sub(r"교사용\s+\d+\s*쪽", "", text)
     for page in report.get("student", {}).get("pages", []):
@@ -1129,11 +1137,97 @@ def _plan_status(folder, *, warnings=None):
         return True, f"plan 확인 불가 ({exc})"
 
 
+_EDITED_STRUCTURE_NOTE = '편집본 미검사: 원고가 필요한 구조 검사(구성 필드·배점·검산식 등)는 하지 않았습니다.'
+
+
+def _edited_plan_status(teacher, build, warnings):
+    from sheet_build import _Document, plan_warning_counts, student_policy
+    from sheet_markup import MarkupError, inspect_markup
+    from sheet_plan import Validator, grade_level, visible_text
+
+    doc = _Document(teacher.read_text(encoding='utf-8-sig'))
+    public = doc.lookup('id', 'sheet-src')
+    root = next((el for el in doc.root.elements() if el.tag == 'html'), None)
+    if public is None or root is None:
+        raise ValueError('활동지 본문을 찾을 수 없습니다.')
+    grade, unit = build.get('grade'), build.get('unit')
+    if 'grade' not in build or 'unit' not in build:
+        source = teacher.parent / '구성.json'
+        try:
+            if build.get('source_sha256') == _sha(source):
+                original = _json(source).get('meta', {})
+                grade, unit = original.get('grade'), original.get('unit')
+        except (OSError, ValueError, AttributeError):
+            pass
+        head = next((el for el in public.elements() if el.attrs.get('data-id') == 'head'), None)
+        if head is not None and grade is None:
+            grade = next((el.text() for el in head.walk(public=True) if el.has('ws-head-name') or el.has('ws-head-1')
+                          if grade_level(el.text()) is not None), None)
+    validator = Validator(teacher.parent)
+    validator.grade = grade_level(grade)
+    validator.unit = unit or ''
+    validator.kind = root.attrs.get('data-kind', '수업')
+
+    def check_field(el, path):
+        source = el.attrs['data-src']
+        try:
+            parsed = inspect_markup(source)
+        except MarkupError as error:
+            validator.warn(path, f'편집본의 원본 표기를 읽을 수 없습니다: {error}',
+                           '글자 요소의 data-src와 수식·빈칸 표기를 확인하세요.', 'edited-text-markup')
+            return
+        text = visible_text(parsed)
+        validator.check_terms(text, path)
+        validator.check_expressions(text, path)
+        validator.check_math_notation(parsed.public_source, path)
+
+    for el in public.walk(public=True):
+        if 'data-src' not in el.attrs:
+            continue
+        item = el.closest(lambda node: node.has('ws-item'))
+        check_field(el, item.attrs.get('data-id', '본문') if item else '본문')
+    _, published = student_policy('data-interactive' in root.attrs, root.attrs.get('data-reveal', '시도 후'))
+    private = doc.lookup('id', 'sheet-teacher')
+    if published and private is not None:
+        public_ids = {el.attrs.get('data-id') for el in public.elements() if el.has('ws-item')}
+        for section in private.elements():
+            item = section.attrs.get('data-solution-for')
+            if item is not None and item not in public_ids:
+                continue
+            for field in section.elements():
+                if not any(field.has(cls) for cls in ('ws-t-ans', 'ws-t-steps', 'ws-t-rubric')):
+                    continue
+                for el in field.walk(public=True):
+                    if 'data-src' in el.attrs:
+                        check_field(el, f'{item or "문항"} 풀이')
+    warnings.update(plan_warning_counts(validator.issues))
+    if grade is None and 'grade' not in build:
+        return ' · 학년을 확인하지 못해 학년 용어 검사는 건너뜀'
+    return ''
+
+
+def _unchecked_html(folder, build):
+    known = {build[key].get('file', '').casefold() for key in ('student', 'teacher')
+             if isinstance(build.get(key), dict) and isinstance(build[key].get('file'), str)}
+    names = []
+    for directory, subdirs, files in os.walk(folder):
+        subdirs[:] = [name for name in subdirs if name != '검사']
+        parent = Path(directory).relative_to(folder)
+        for name in files:
+            if (Path(name).suffix.lower() != '.html' or
+                (parent == Path('.') and name.casefold() in known) or
+                    re.search(r' \(내 답\)(?: \([0-9]+\))?\.html$', name, re.I)):
+                continue
+            names.append(str(parent / name))
+    return [f'검사하지 않은 HTML: {name} — 정답 유출·인쇄·호환 검사를 거치지 않았습니다'
+            for name in sorted(names, key=str.casefold)]
+
+
 def _plan_warning_note(warnings):
     return '원고 경고: ' + (', '.join(f'{code} {count}건' for code, count in warnings.items()) or '0건')
 
 
-def _delivery_draft(student, teacher, report, metadata, plan_warnings=None):
+def _delivery_draft(student, teacher, report, metadata, plan_warnings=None, *, edited_note='', unchecked=()):
     print('\n전달 문안 초안 (경로·확인 범위는 다듬어도 되지만 맨 끝 ⭐ 줄은 답의 마지막 줄에 글자 그대로 붙이세요.)')
     print(f'학생용 HTML: {student}')
     print(f'학생용 PDF: {student.with_suffix(".pdf")}')
@@ -1142,6 +1236,10 @@ def _delivery_draft(student, teacher, report, metadata, plan_warnings=None):
     print(f'확인한 것: 학생 {len(report["student"]["pages"])}쪽, 교사 {len(report["teacher"]["pages"])}쪽의 검사와 검토.')
     if plan_warnings is not None:
         print(_plan_warning_note(plan_warnings))
+    if edited_note:
+        print(edited_note)
+    for note in unchecked:
+        print(note)
     info = report.get('interactive_check')
     if metadata.interactive or report['student'].get('interactive'):
         info = info if isinstance(info, dict) else {}
@@ -1217,20 +1315,22 @@ def cmd_status(folder: Path) -> int:
             edited = saved and isinstance(recorded_hash, str) and bool(re.fullmatch(r"[0-9a-fA-F]{64}", recorded_hash)) and recorded_hash.lower() != _sha(teacher)
         except (OSError, UnicodeError):
             pass
-    plan_warnings = {}
+    plan_warnings, edited_note = {}, ''
     if edited:
         plan_ok, plan_note = True, '편집본이 원본'
-        # 원고가 그 뒤에 바뀌어도, 편집본을 만들 때 나온 경고까지 사라지지는 않는다.
-        recorded = build.get('plan_warnings')
-        if isinstance(recorded, dict):
-            plan_warnings.update(sorted((code, count) for code, count in recorded.items()
-                                        if type(count) is int and count > 0))
-        elif source.is_file() and build.get('source_sha256') == _sha(source):
-            _plan_status(folder, warnings=plan_warnings)
+        edited_note = _EDITED_STRUCTURE_NOTE
+        try:
+            extra = _edited_plan_status(teacher, build, plan_warnings)
+            plan_note += ' · ' + _plan_warning_note(plan_warnings)
+            edited_note += extra
+        except (OSError, ValueError, ImportError) as exc:
+            edited_note += f' · 편집본 문장 검사 확인 불가 ({exc})'
+        plan_note += ' · ' + edited_note
     else:
         plan_ok, plan_note = _plan_status(folder, warnings=plan_warnings)
-    if plan_warnings or (not edited and plan_note.startswith('plan 오류')):
-        plan_note += ' · ' + _plan_warning_note(plan_warnings)
+        if plan_warnings or plan_note.startswith('plan 오류'):
+            plan_note += ' · ' + _plan_warning_note(plan_warnings)
+    unchecked = _unchecked_html(folder, build or {})
     build_ok = False
     if files_ok:
         if edited:
@@ -1309,6 +1409,8 @@ def cmd_status(folder: Path) -> int:
         delivery_note = "전달할 PDF가 없습니다 · check를 다시 실행하세요"
     else:
         delivery_note = "전달 가능" if ready else "앞 관문을 먼저 통과하세요"
+    if unchecked:
+        delivery_note += ' · ' + ' · '.join(unchecked)
     gates = [("구성", plan_ok, plan_note), ("조립", build_ok, file_note),
              ("검사", check_ok, check_note), ("검토", review_ok, review_note),
              ("전달", ready, delivery_note)]
@@ -1319,7 +1421,8 @@ def cmd_status(folder: Path) -> int:
             print(f"전달: {path}")
         print("다음 할 일: 전달할 파일을 확인하세요.")
         _delivery_draft(student, teacher, report, student_meta,
-                        plan_warnings if '원고 경고:' in plan_note else None)
+                        plan_warnings if '원고 경고:' in plan_note else None,
+                        edited_note=edited_note, unchecked=unchecked)
     else:
         action = next(label for label, ok, _ in gates if not ok)
         print(f"다음 할 일: {action} 관문을 확인하세요.")

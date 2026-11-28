@@ -219,7 +219,9 @@
 
   const salt = () => document.querySelector('meta[name="sheet-salt"]')?.content || '';
   const policy = root.dataset.reveal || '시도 후';
+  // Same student exposure rules as sheet_build.student_policy.
   const canReveal = policy === '시도 후' || policy === '바로';
+  const canGrade = canReveal || policy === '교사만';
   const automatic = new Set(['number','text','choice','ox','order','match','points','line','bars']);
   const slotsIn = item => all(item, '[data-slot]').filter(el => !el.closest('.ws-key, .ws-teacher-only'));
   const recordByNode = new WeakMap(), panels = new WeakMap(), itemReveal = new WeakMap(), slotReveal = new WeakMap();
@@ -381,7 +383,7 @@
         else row.slot = el.dataset.slot = `${item.dataset.id}.${++i}`;
         row.kind = kind;
         row.hashes = (el.dataset.checkHash || '').split(',').filter(Boolean);
-        row.auto = policy !== '없음' && automatic.has(kind) && row.hashes.length > 0;
+        row.auto = canGrade && automatic.has(kind) && row.hashes.length > 0;
         if (!row.auto) row.result = null;
         records.set(row.slot, row);
       }
@@ -509,7 +511,7 @@
     toggle(el, 'ws-picked', on);
     attr(el, aria, String(on));
   }
-  function tableHeadings(el) {
+  function tableHeadings(el, forGrading = false) {
     const cell = el.closest('td,th'), tr = cell?.parentElement, table = cell?.closest('table');
     const read = node => {
       if (!node) return '';
@@ -518,12 +520,23 @@
       return copy.textContent.trim();
     };
     if (!tr || !table) return { row: '', column: '' };
+    if (forGrading && table.matches('.ws-ans-table')) {
+      let row = tr, distance = 0;
+      while (row) {
+        const lab = row.querySelector(':scope > th.ws-lab');
+        if (lab) return { row: distance < lab.rowSpan ? read(lab.querySelector('.ws-lab-text') ?? lab) : '', column: '' };
+        row = row.previousElementSibling;
+        distance++;
+      }
+      return { row: '', column: '' };
+    }
+    if (forGrading && !table.matches('.ws-data, .ws-steps')) return { row: '', column: '' };
     const heads = table.tHead?.rows[0];
     const first = tr.cells[0];
     const rowHead = tr.querySelector(':scope > th.ws-lab, :scope > th.ws-step-n');
     const row = read(rowHead?.querySelector('.ws-lab-text') ?? rowHead ??
       (table.matches('.ws-data') && first !== cell && !first.querySelector('.ws-blank') ? first : null));
-    const column = read(heads?.cells[cell.cellIndex]);
+    const column = forGrading && tr.parentElement === table.tHead ? '' : read(heads?.cells[cell.cellIndex]);
     return { row, column };
   }
   function field(row) {
@@ -1505,12 +1518,11 @@
         let next = p;
         do { next += q; wrong = fraction(next, q); } while (valid.has(canonical(wrong)));
       } else {
-        const letters = Array.from(answer); letters.pop();
-        wrong = `${letters.join('')}가`;
-        while (text_candidates(wrong).some(v => valid.has(v))) wrong += '가';
+        wrong = answer + '오답';
+        while (text_candidates(wrong).some(v => valid.has(v))) wrong += '오답';
       }
       attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
-      if (policy !== '없음') {
+      if (canGrade) {
         if (kind === 'number') {
           const { column, row } = options.headings;
           const forms = number_forms(answers, inferred_unit(options.tail ?? '', column, row));
@@ -1589,13 +1601,13 @@
       for (const [i,el] of newBlanks.entries()) {
         el.dataset.slot = ''; // assigned after the edited nodes are inserted
         const { answer, accept, html, tail } = blanks[i];
-        const result = changedAnswer(el, answer, html, { accept, tail, headings: tableHeadings(target) }, true);
+        const result = changedAnswer(el, answer, html, { accept, tail, headings: tableHeadings(target, true) }, true);
         applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
       }
     }
     const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check','data-input-mode'].map(name => [name,writing.getAttribute(name)])) : null;
     const oldReveal = isAnswer ? slotReveal.get(writing) : undefined;
-    const updated = isAnswer ? changedAnswer(writing, source, html, { ...json(writing.dataset.check, {}), headings: tableHeadings(writing) }, false) : null;
+    const updated = isAnswer ? changedAnswer(writing, source, html, { ...json(writing.dataset.check, {}), headings: tableHeadings(writing, true) }, false) : null;
     function write(text, children, result) {
       target.dataset.src = text; target.replaceChildren(...children);
       if (isAnswer) {
@@ -1681,7 +1693,10 @@
       }
       script.textContent = encodeReveal(salt(), reveal);
     }
-    if (policy === '없음') for (const el of all(copy, '[data-check-hash]')) el.removeAttribute('data-check-hash');
+    if (!canGrade) for (const el of all(copy, '[data-check-hash], [data-check-unit]')) {
+      el.removeAttribute('data-check-hash');
+      el.removeAttribute('data-check-unit');
+    }
   }
 
   core.attach({ init, layoutFlow, afterLayout, studentPreview: () => preview, beforePrintButton, report,

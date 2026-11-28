@@ -2080,6 +2080,61 @@ def protected(teacher, folder):
     return not isinstance(previous, dict) or previous != {'file': teacher.name, 'sha256': digest.hexdigest()}
 
 
+FIRST_SETTINGS_FILE = '처음-설정.json'
+EDUCATION_COUNT_LABELS = {
+    'items': '문항 수', 'auto_slots': '자동 판별 자리 수', 'written_boxes': '서술 답 칸 수',
+    'pen_figures': '펜 그림 수', 'draw_boxes': '그리기 칸 수',
+}
+EDUCATION_FORM_KEYS = ('fraction_form', 'radical_form')
+
+
+def education_settings(data, student_doc, *, edited=False):
+    """기본값을 적용한 원고 설정과 학생용에 실제로 만들어진 자리 수를 기록한다."""
+    meta = data['meta']
+    kind = meta.get('kind', '수업')
+    interactive = meta.get('interactive', kind in ('수업', '연습'))
+    policy = meta.get('reveal', '시도 후')
+    public = student_doc.lookup('id', 'sheet-src')
+    if public is None:
+        raise ValueError('학생용 본문이 없습니다.')
+    items = {el.attrs['data-id']: el for el in public.elements()
+             if el.has('ws-item') and el.attrs.get('data-id') not in (None, 'head')}
+    forms = {item['id']: {key: item[key] for key in EDUCATION_FORM_KEYS if key in item}
+             for item in data['items']}
+    if edited:
+        root = next(el for el in student_doc.root.elements() if el.tag == 'html')
+        kind = root.attrs.get('data-kind', kind)
+        interactive = 'data-interactive' in root.attrs
+        policy = root.attrs.get('data-reveal', policy)
+        for id_, item in items.items():
+            if item.attrs.get('data-fraction-form-explicit') == '1' and item.attrs.get('data-fraction-form'):
+                forms.setdefault(id_, {})['fraction_form'] = item.attrs['data-fraction-form']
+    counts = dict.fromkeys(EDUCATION_COUNT_LABELS, 0)
+    counts['items'] = len(items) if edited else len(data['items'])
+    for item in items.values():
+        for el in item.walk():
+            if el.attrs.get('data-slot') and el.attrs.get('data-check-hash'):
+                counts['auto_slots'] += 1
+            if el.has('ws-ans'):
+                counts['draw_boxes' if el.attrs.get('data-kind') == 'draw' else 'written_boxes'] += 1
+            if el.tag == 'figure' and el.attrs.get('data-pen') == '1':
+                counts['pen_figures'] += 1
+    return {'version': 1, 'meta': {'kind': kind, 'interactive': interactive, 'reveal': policy},
+            **counts, 'forms': {id_: values for id_, values in forms.items() if values and id_ in items}}
+
+
+def _record_first_settings(path, data, student_doc):
+    if path.exists():
+        return
+    snapshot = json_bytes(education_settings(data, student_doc))
+    # 동시 조립에서도 처음 생성한 파일을 덮어쓰지 않는다.
+    try:
+        with path.open('xb') as output:
+            output.write(snapshot)
+    except FileExistsError:
+        pass
+
+
 def cmd_build(folder: Path, force=False) -> int:
     data, source, issues = load_plan(folder)
     print_issues(issues)
@@ -2123,6 +2178,7 @@ def cmd_build(folder: Path, force=False) -> int:
     atomic_write(teacher, teacher_data)
     atomic_write(student, student_data)
     update_answer_table(folder, answers)
+    _record_first_settings(record_path.parent / FIRST_SETTINGS_FILE, data, student_doc)
     atomic_write(record_path, json_bytes(record))
     for message in warnings:
         print(f'경고: {message}')

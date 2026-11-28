@@ -166,6 +166,30 @@ class BuildTest(unittest.TestCase):
             script = re.search(r'<script id="sheet-js">(.*?)</script>', content, re.S)[1]
             self.assertEqual(record['sheet_js_sha256'], hashlib.sha256(script.encode('utf-8')).hexdigest())
 
+    def test_build_records_first_education_settings_only_once(self):
+        path = self.folder / '검사/처음-설정.json'
+        self.cli('build', self.folder, status=1)
+        self.assertFalse(path.exists())
+        self.fixture(kind='연습')
+        data = json.loads(self.source.read_text(encoding='utf-8'))
+        data['items'][0]['fraction_form'] = '기약분수'
+        data['items'][0]['blocks'][5]['pen'] = True
+        data['items'][0]['blocks'][3]['rows'][0]['check'] = 'off'
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.cli('build', self.folder)
+        self.assertTrue(path.is_file())
+        first = path.read_bytes()
+        self.assertEqual(json.loads(first), {
+            'version': 1, 'meta': {'kind': '연습', 'interactive': True, 'reveal': '시도 후'},
+            'items': 2, 'auto_slots': 3, 'written_boxes': 3, 'pen_figures': 1, 'draw_boxes': 1,
+            'forms': {'q1': {'fraction_form': '기약분수'}},
+        })
+        data['meta'].update(reveal='없음', interactive=False)
+        data['items'].pop()
+        self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+        self.cli('build', self.folder, '--force')
+        self.assertEqual(path.read_bytes(), first)
+
     def test_build_without_fonttools_recommends_doctor_and_alternate_python(self):
         import sheet_build
 

@@ -326,6 +326,8 @@
   const undoStack = [];
   const originalMarks = new WeakMap();
   let boxBases = new WeakMap();
+  const drawWidths = new WeakMap();
+  const drawRatio = box => (drawWidths.get(box) || box.clientWidth || 1) / (drawHeight(box) * pxPerMm);
 
   function scale(name) { return Number.parseFloat(getComputedStyle(root).getPropertyValue(name)) || 1; }
   function newPage(isTeacher, withTop = false) {
@@ -424,7 +426,8 @@
       for (const box of all(item, '.ws-ans')) {
         const base = boxKind(box) === 'draw' ? drawHeight(box) : (5.64 * boxLines(box) - 1.1) * bodyScale;
         boxBases.set(box, base);
-        box.style.height = `${base}mm`;
+        box.style.height = root.dataset.view === 'solve' && boxKind(box) === 'draw' && box.hasAttribute('data-slot')
+          ? '' : `${base}mm`;
         delete box.dataset.extraMm;
       }
     }
@@ -478,6 +481,12 @@
     main.id = 'sheet-pages';
     placeItems(visible.filter(item => !item.matches('.ws-solve-only')), false);
     if (answersOn()) placeItems(teacherItems, true);
+    // Reuse the A4 content width in solve view, even after the columns stack or a row grows.
+    for (const box of all(main, '.ws-ans[data-kind="draw"][data-slot]')) {
+      const css = getComputedStyle(box);
+      const width = box.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      if (width > 0) drawWidths.set(box, width);
+    }
     for (const [i, info] of pages.entries()) {
       info.slots.forEach((slot, j) => {
         const used = usedHeight(slot);
@@ -1116,7 +1125,7 @@
   if (root.dataset.interactive === '1') window.__sheetCore = {
     attach(extension) { solve = extension; root.dataset.view = 'a4'; },
     items: () => studentItems, teacherItems: () => teacherItems, buildMeta,
-    layout, refreshFontLayout, renderMarkup, serialize, download, fileName,
+    layout, refreshFontLayout, renderMarkup, serialize, download, fileName, drawRatio,
     addToolbar(...nodes) { toolbar.append(...nodes); }, button, commitDraft,
     stopEditing() { if (edit) setEdit(false); },
     syncAnswerButton() { answerButton?.setAttribute('aria-pressed', String(answersOn())); },

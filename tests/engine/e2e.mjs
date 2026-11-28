@@ -535,7 +535,7 @@ try {
     const targets = [...standalone, grid];
     const layers = () => tab.js(`${quote(targets)}.map(s => {
       const el=document.querySelector(s), canvas=el.querySelector('canvas.ws-pen'), ink=el.querySelector('svg.ws-pen-ink');
-      const base=el.querySelector('svg:not(.ws-pen-ink), img') || el;
+      const base=el.querySelector('.ws-draw-frame, svg:not(.ws-pen-ink), img') || el;
       const geometry=n=>{const {left,top,width,height}=n.getBoundingClientRect();return [left,top,width,height];};
       return { canvas:canvas.checkVisibility(), ink:ink?.checkVisibility(), strokes:ink?.querySelectorAll('polyline').length,
         position:ink && geometry(ink), base:geometry(base), baseVisible:base.checkVisibility() };
@@ -563,6 +563,241 @@ try {
       await tab.js('sheet.clearAnswers()');
       assert.deepEqual((await layers()).map(r => r.strokes), [0,0,0]);
     } finally { await tab.js('sheet.clearAnswers()'); await tab.send('Emulation.setEmulatedMedia', {media:''}); await tab.js(`sheet.view('solve')`, true); }
+  }));
+  const penState = (tab, id = 'q1.5') => tab.js(`sheet.values()[${quote(id)}]?.strokes ?? []`);
+  async function penGesture(tab, selector, [x0, y0], moves = [], during) {
+    const [left, top] = await tab.js(`(() => {
+      const c = document.querySelector(${quote(selector)}); c.scrollIntoView({block:'center'});
+      const r = c.getBoundingClientRect(); return [r.left, r.top];
+    })()`);
+    const send = (type, x, y, extra) => tab.send('Input.dispatchMouseEvent', {type, x:left+x, y:top+y, ...extra});
+    await send('mousePressed', x0, y0, {button:'left', clickCount:1});
+    for (const [x,y] of moves) await send('mouseMoved', x, y, {buttons:1});
+    if (during) await during();
+    await send('mouseReleased', ...(moves.at(-1) || [x0,y0]), {button:'left', clickCount:1});
+  }
+  await test('폰에서 그린 45° 선과 컴퍼스 원이 인쇄에서도 같은 모양', async () => {
+    const html = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
+    const url = await saveFile('construction-student', html.replace('data-height-mm="25"', 'data-height-mm="85"'));
+    await usingTab(url, async tab => {
+      const draw = slot('q1.5'), canvas = `${draw} canvas.ws-pen`, btn = name => action(name, draw);
+      const select = s => `document.querySelector(${quote(s)})`;
+      const marks = (left, right) => tab.js(`(() => {
+        const c = ${select(canvas)}, {width} = c.getBoundingClientRect(), dpr = c.width/width;
+        const x = Math.round(${left}*dpr), w = Math.round(${right}*dpr)-x, h = c.height;
+        const data = c.getContext('2d').getImageData(x,0,w,h).data;
+        let minX=w, maxX=-1, minY=h, maxY=-1;
+        for (let row=0; row<h; row++) for (let col=0; col<w; col++) if (data[(row*w+col)*4+3] > 127) {
+          minX=Math.min(col,minX); maxX=Math.max(col,maxX); minY=Math.min(row,minY); maxY=Math.max(row,maxY);
+        }
+        return maxX < 0 ? null : [maxX-minX+1, maxY-minY+1];
+      })()`);
+      try {
+        await tab.click(btn('pen-line'));
+        assert.equal(await tab.js(`${select(btn('pen-line'))}.getAttribute('aria-pressed')`), 'true');
+        await penGesture(tab, canvas, [17,24], [[37,56],[67,74]], async () => {
+          assert.deepEqual(await penState(tab), [], '놓기 전에는 저장하지 않음');
+          assert(await marks(15,72), '끄는 동안 선 미리보기가 보임');
+        });
+        assert.equal((await penState(tab))[0].length, 2, '중간 지점을 거치지 않고 두 끝점을 이음');
+        await tab.click(btn('pen-compass'));
+        await penGesture(tab, canvas, [130,65]);
+        assert.equal(await tab.js(`${select(`${draw} [aria-live="polite"]`)}.textContent`), '먼저 끌어서 컴퍼스를 벌리세요');
+        assert.equal((await penState(tab)).length, 1);
+        await penGesture(tab, canvas, [122,65], [[149,65]], async () => {
+          assert.equal((await penState(tab)).length, 1);
+          assert(await marks(95,153), '컴퍼스 폭을 재는 동안 원 미리보기');
+        });
+        assert.equal(await marks(95,153), null, '폭만 잰 뒤 원은 남지 않음');
+        await penGesture(tab, canvas, [190,65]);
+        assert((await penState(tab))[1].length >= 72);
+        const [w,h] = await marks(155,225);
+        assert(Math.abs(w/h-1) <= .02, `폰 캔버스 원의 지름비 ${w/h}`);
+        assert(Math.abs(w/2 - 55) <= 2, '다른 점에서 잰 반지름을 그대로 사용');
+        await tab.js("sheet.view('a4')", true);
+        await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+        const [angle, aspect, visibleTools] = await tab.js(`(() => {
+          const [line,circle] = document.querySelectorAll(${quote(`${draw} svg.ws-pen-ink polyline`)});
+          const [a,b] = [line.points.getItem(0), line.points.getItem(1)].map(p =>
+            new DOMPoint(p.x,p.y).matrixTransform(line.getScreenCTM()));
+          const c = circle.getBoundingClientRect();
+          return [Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI,c.width/c.height,${select(btn('pen-line'))}.checkVisibility()];
+        })()`);
+        assert(Math.abs(angle-45) <= 1, `A4 선의 각 ${angle}°`);
+        assert(Math.abs(aspect-1) <= .02, `A4 원의 지름비 ${aspect}`);
+        assert.equal(visibleTools, false);
+      } finally {
+        await tab.send('Emulation.setEmulatedMedia', {media:''});
+        await tab.js('sheet.clearAnswers()');
+      }
+    }, metrics(390,844));
+  });
+  await test('펜 되돌리기는 자리별로 지우개와 모두 지우기도 복원', () => usingTab(studentInteractive, async tab => {
+    const draw = slot('q1.5'), canvas = `${draw} canvas`, btn = name => action(name, draw);
+    const disabled = () => tab.js(`document.querySelector(${quote(btn('pen-undo'))}).disabled`);
+    try {
+      assert.equal(await disabled(), true);
+      await penGesture(tab, canvas, [20,13], [[55,13]]);
+      const freehand = await penState(tab);
+      await tab.click(btn('pen-line'));
+      await penGesture(tab, canvas, [90,21], [[124,21]]);
+      const both = await penState(tab);
+      await tab.click(btn('eraser'));
+      await penGesture(tab, canvas, [23,13]);
+      assert.deepEqual(await penState(tab), both.slice(1));
+      await tab.click(btn('pen-clear'));
+      assert.deepEqual(await penState(tab), []);
+      for (const expected of [both.slice(1), both, freehand, []]) {
+        await tab.click(btn('pen-undo'));
+        assert.deepEqual(await penState(tab), expected);
+      }
+      assert.equal(await disabled(), true);
+      assert.equal(await tab.js(`document.querySelector(${quote(action('pen-undo', slot('q4.1')))}).disabled`), true);
+    } finally { await tab.js('sheet.clearAnswers()'); }
+  }, metrics(390,844)));
+  await test('화면 이동으로 그리기 틀 위를 밀면 잉크 없이 스크롤', () => usingTab(studentInteractive, async tab => {
+    const draw = slot('q1.5'), canvas = `${draw} canvas.ws-pen`;
+    try {
+      await tab.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+      await tab.click(action('pen-pan', draw));
+      const [x,y,before,passThrough] = await tab.js(`(() => {
+        const c = document.querySelector(${quote(canvas)}); c.scrollIntoView({block:'center'});
+        const r=c.getBoundingClientRect(), x=r.left+24, y=r.top+r.height/2;
+        return [x,y,scrollY,document.elementFromPoint(x,y)!==c];
+      })()`);
+      assert(passThrough);
+      for (const [type, dy] of [['touchStart',0],['touchMove',-25],['touchMove',-85],['touchMove',-150]]) {
+        await tab.send('Input.dispatchTouchEvent', {type, touchPoints:[{x,y:y+dy}]});
+      }
+      await eventually(() => tab.js(`scrollY > ${before}+30`), '그리기 틀에서 시작한 화면 이동');
+      await tab.send('Input.dispatchTouchEvent', {type:'touchEnd', touchPoints:[]});
+      assert.deepEqual(await penState(tab), []);
+      const plot = slot('q3.1');
+      await tab.click(action('pen-pan', plot));
+      await tab.js(`{ const svg=document.querySelector(${quote(`${plot} svg[data-map]`)}), r=svg.getBoundingClientRect();
+        svg.dispatchEvent(new MouseEvent('click',{bubbles:true, clientX:r.left+r.width/2, clientY:r.top+r.height/2})); }`);
+      assert.equal((await valuesOf(tab))['q3.1'], undefined, '화면 이동 중 점도 찍지 않음');
+      await tab.click(action('pen', draw));
+      assert.equal(await tab.js(`document.querySelector(${quote(action('pen-pan', draw))}).getAttribute('aria-pressed')`), 'false');
+      assert.equal(await tab.js(`getComputedStyle(document.querySelector(${quote(canvas)})).pointerEvents`), 'auto');
+    } finally { await tab.js('sheet.clearAnswers()'); }
+  }, metrics(390,844)));
+  await test('늘어난 그리기 칸과 2단·좌우 나눔에서 A4 틀 비율 유지', async () => {
+    for (const columns of [1,2]) {
+      const folder = path.join(work, `draw-columns-${columns}`), title = `그리기 틀 ${columns}단`;
+      const box = {type:'answer', rows:[{label:'작도', kind:'draw', height_mm:85, grow:true,
+        answer:{width_mm:12, svg:'<svg viewBox="0 0 30 20" aria-label="예시 그림"><path d="M2 2H28L15 18Z"/></svg>'}}]};
+      const split = {type:'split', ratio:'1:2', left:[box], right:[{type:'text',text:'다른 칸'}]};
+      const source = {version:1, meta:{title, kind:'수업', columns, sync:false}, items:[
+        {id:'draw', blocks:[{type:'question',text:'도형을 그려 봅시다.'}, columns === 1 ? split : box]},
+      ]};
+      await fs.mkdir(folder);
+      await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+      await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+        {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+      const s = slot('draw.1');
+      await usingTab(pathToFileURL(path.join(folder, `${title}.html`)).href, async tab => {
+        await tab.js("sheet.view('a4')", true);
+        const size = which => tab.js(`(() => {
+          const box=document.querySelector(${quote(s)}), layer=box.querySelector(${quote(which)});
+          const r=layer.getBoundingClientRect(), t=box.getBoundingClientRect();
+          return [r.width/r.height,r.height,t.bottom-r.bottom];
+        })()`);
+        const paper = await size('canvas.ws-pen');
+        assert(Math.abs(paper[1]*25.4/96 - 85) <= .4, quote(paper));
+        assert(paper[2] > 10, '늘어난 높이는 틀 아래 여백');
+        await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+        const print = await size('svg.ws-pen-ink');
+        assert(Math.abs(print[0]/paper[0] - 1) <= .015, quote({paper, print}));
+        await tab.send('Emulation.setEmulatedMedia', {media:''});
+        for (const [width,height] of [[390,844],[1024,768]]) {
+          await tab.send('Emulation.setDeviceMetricsOverride', metrics(width,height));
+          await tab.js("sheet.view('solve')", true);
+          const solve = await size('canvas.ws-pen');
+          assert(Math.abs(solve[0]/print[0]-1) <= .015, quote({columns,width,print,solve}));
+          if (width === 390) {
+            const [rows,gap,after] = await tab.js(`(() => {
+              const box=document.querySelector(${quote(s)}), frame=box.querySelector('.ws-draw-frame');
+              const tools=box.querySelector('.ws-pen-tools'), t=tools.getBoundingClientRect();
+              return [new Set([...tools.children].map(b=>b.offsetTop)).size,
+                t.top-frame.getBoundingClientRect().bottom,box.getBoundingClientRect().bottom-t.bottom];
+            })()`);
+            assert(rows <= 2 && gap >= 0 && after < 5, quote({rows,gap,after}));
+            assert.equal((await tab.report()).overflow_x, 0);
+          }
+        }
+      });
+      await usingTab(pathToFileURL(path.join(folder, `${title} (교사용).html`)).href, async tab => {
+        const answer = () => tab.js(`document.querySelector(${quote(`${s} .ws-key img`)}).checkVisibility()`);
+        assert(await answer());
+        await tab.click(action('edit'));
+        await tab.click(action('taller', s));
+        assert.equal(await tab.js(`document.querySelector(${quote(s)}).dataset.heightMm`), '90');
+        await tab.click(action('preview-student'));
+        assert.equal(await answer(), false);
+        await tab.js("sheet.view('a4')", true);
+        assert(Math.abs(await tab.js(`document.querySelector(${quote(`${s} canvas`)}).getBoundingClientRect().height*25.4/96`) - 90) <= .4);
+        await tab.click(action('return-teacher'));
+        assert(await answer());
+        assert.equal(await tab.js(`document.querySelector(${quote(action('pen', s))}).checkVisibility()`), false);
+      });
+    }
+  });
+  await test('펜을 붙인 그림·모눈·수직선의 비율은 화면과 인쇄에서 그대로', () => usingTab(studentInteractive, async tab => {
+    const ids = ['q4.1','q3.2','q3.1'];
+    const ratios = selector => tab.js(`${quote(ids)}.map(id => {
+      const el=document.querySelector('[data-slot="'+id+'"]'), r=el.querySelector(${quote(selector)}).getBoundingClientRect();
+      return r.width/r.height;
+    })`);
+    const phone = await ratios('canvas.ws-pen');
+    await tab.send('Emulation.setDeviceMetricsOverride', metrics(1024,768));
+    await tab.js("sheet.view('solve')",true);
+    const tablet = await ratios('canvas.ws-pen');
+    await tab.js("sheet.view('a4')",true);
+    await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+    const print = await ratios('svg.ws-pen-ink');
+    for (const [i,expected] of [72/32,1,120/16].entries()) {
+      for (const measured of [phone[i],tablet[i],print[i]]) assert(Math.abs(measured/expected-1) <= .015, quote({i,measured,expected}));
+    }
+  }, metrics(390,844)));
+  await test('저장 용량이 차면 경고하고 답과 펜이 모두 저장된 뒤 시각 갱신', () => usingTab(studentInteractive, async tab => {
+    const key = 'pbj-sheet:interactive-fixture:student', status = 'document.querySelector(".ws-save-status")';
+    const savedAt = () => tab.js(`localStorage.getItem(${quote(key + ':saved-at')})`);
+    const input = value => setInput(tab, `${slot('q1.1')} input`, value);
+    try {
+      await tab.js(`{ const original = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (key === window.failKey) throw new DOMException('가득 참','QuotaExceededError');
+          return original.call(this, key, value);
+        };
+        window.testTime=3000; Date.now=()=>window.testTime; }`);
+      await input('1');
+      assert.equal(await savedAt(), '3000');
+      await tab.js(`window.failKey=${quote(key)}; window.testTime=4000;`);
+      await input('2');
+      assert.equal((await valuesOf(tab))['q1.1'], '2');
+      assert.equal(await tab.js(`JSON.parse(localStorage.getItem(${quote(key)}))['q1.1']`), '1');
+      assert.equal(await savedAt(), '3000');
+      assert.equal(await tab.js(`${status}.getAttribute('aria-live')`), 'polite');
+      assert.match(await tab.js(`${status}.textContent`), /이 기기에 저장되지 않았어요.*답을 넣어 저장/);
+      await tab.js("sheet.view('a4')",true);
+      assert.equal(await tab.js(`${status}.checkVisibility()`), true);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      assert.equal(await tab.js(`${status}.checkVisibility()`), false);
+      await tab.send('Emulation.setEmulatedMedia', {media:''});
+      await tab.js("sheet.view('solve')",true);
+      await tab.js(`window.failKey=${quote(key+':pen')}; window.testTime=5000;`);
+      const plot = slot('q3.1');
+      await tab.click(action('pen', plot));
+      await tab.mouseClick(`${plot} canvas`);
+      assert.equal(await savedAt(), '3000', '겸용 펜 쓰기가 실패해도 시각을 그대로 둠');
+      assert.match(await tab.js(`${status}.textContent`), /저장되지 않았어요/);
+      await tab.js('window.failKey=null; window.testTime=6000;');
+      await input('3');
+      assert.equal(await savedAt(), '6000');
+      assert.equal(await tab.js(`${status}.textContent`), '');
+      assert.equal(await tab.js(`JSON.parse(localStorage.getItem(${quote(key+':pen')}))['q3.1'].strokes.length`), 1);
+    } finally { await tab.send('Emulation.setEmulatedMedia', {media:''}); await tab.js('sheet.clearAnswers()'); }
   }));
   await test('공개 정책 네 가지·힌트 단계·서술형 예시 답안과 점검표', async () => {
     for (const policy of ['시도 후','바로','교사만','없음']) {

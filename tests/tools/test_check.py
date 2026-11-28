@@ -161,7 +161,8 @@ class CheckIntegrationTest(unittest.TestCase):
         });</script>'''
         css = '''.test-ink {display:none!important}
         @media print {
-          #sheet-pages canvas.ws-pen, #sheet-pages .ws-pen-ink:not(.test-ink) {display:none!important}
+          #sheet-pages canvas.ws-pen {display:none!important}
+          #sheet-pages .ws-pen-ink:not(.test-ink) {visibility:hidden!important}
           #sheet-pages .test-ink {position:absolute;inset:0;width:100%;height:100%}
           #sheet-pages .test-ink {display:block!important}
           #sheet-pages .test-ink:not(.test-stroked) path {visibility:hidden}
@@ -332,6 +333,16 @@ class FakeInteractiveProtocol:
 
 
 class CheckBoundaryTest(unittest.TestCase):
+    def test_pen_aspect_mismatch_compares_each_slot_with_a4(self):
+        screen = {'q1.1': 1.029, 'q1.2': 1.970, 'q2.1': 3.046, 'q2.2': 4}
+        printed = {'q1.1': 1.015, 'q1.2': 2, 'q2.1': 3, 'q3.1': 5}
+        problems = []
+        sheet_check._audit_pen_aspects(screen, printed, '화면-폰.png', problems)
+        self.assertEqual([(p['level'], p['code'], p['item']) for p in problems],
+                         [('error', 'pen-aspect-mismatch', 'q2')] * 2 + [('error', 'pen-aspect-mismatch', 'q3')])
+        for problem, slot in zip(problems, ('q2.1', 'q2.2', 'q3.1')):
+            self.assertIn(slot, problem['msg'])
+
     def test_filled_phone_reports_overflow_and_clipping(self):
         out = TRIALS / ('filled-screen-' + uuid4().hex[:10])
         out.mkdir(parents=True, exist_ok=True)

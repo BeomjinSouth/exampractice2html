@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from sheet_answer import num, plain
+from sheet_plan import validate
 
 SAMPLE = ROOT / 'examples/전체-블록-견본/구성.json'
 
@@ -52,6 +53,10 @@ class SampleMathTest(unittest.TestCase):
         ys = [value(c) if '{{' not in c else value(blanks(c)[0]) for c in cells]
         self.assertEqual(xs, [1, 2, 3, 4])
         self.assertEqual(ys, [2 * x for x in xs])
+        solution = next(s for s in self.data['teacher']['solutions'] if s['item'] == 'q1')
+        self.assertEqual([(v['given']['x'], v['given']['y']) for v in solution['verify']],
+                         list(zip(xs[1:], ys[1:])))
+        self.assertFalse([i for i in validate(self.data, SAMPLE.parent) if i.code.startswith('verify-')])
 
     def test_definition_and_relation(self):
         line = self.block('q2', 'callout')['lines'][0]

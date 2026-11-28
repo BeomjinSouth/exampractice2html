@@ -5,6 +5,7 @@ from functools import lru_cache
 from fractions import Fraction
 import json
 from html.parser import HTMLParser
+from itertools import product
 import math
 import operator
 from pathlib import Path
@@ -69,8 +70,30 @@ def load_registry():
     return json.loads((ROOT / 'assets/kit/blocks.json').read_text(encoding='utf-8'))
 
 
+@lru_cache(maxsize=1)
+def load_expressions():
+    return json.loads((ROOT / 'assets/kit/expressions.json').read_text(encoding='utf-8'))['expressions']
+
+
 def is_number(value):
     return type(value) in (int, float) and abs(value) <= 1e100
+
+
+def on_step(value, low, step):
+    """슬라이더 눈금은 min을 기준으로 하며 소수 연산 오차만 허용한다."""
+    index = (Fraction(str(value)) - Fraction(str(low))) / Fraction(str(step))
+    return abs(index - round(index)) <= Fraction(1, 100_000_000)
+
+
+def slider_endpoints(low, high, step, excluded):
+    low, high, step = (Fraction(str(v)) for v in (low, high, step))
+    excluded = {Fraction(str(v)) for v in excluded}
+    first, last = 0, (high - low) // step
+    while first <= last and low + first * step in excluded:
+        first += 1
+    while first <= last and low + last * step in excluded:
+        last -= 1
+    return [float(low + i * step) for i in dict.fromkeys((first, last))] if first <= last else []
 
 
 BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
@@ -107,17 +130,29 @@ def function_tree(source, params=()):
     return tree
 
 
-def function_value(tree, x, params=None):
+def function_value(tree, x, params=None, *, exact=False):
     values = {'x': x, **(params or {})}
+    number = (lambda value: Fraction(str(value))) if exact else float
+
     def calculate(node):
         if isinstance(node, ast.Constant):
-            return float(node.value)
+            return number(node.value)
         if isinstance(node, ast.Name):
-            return float(values[node.id])
+            return number(values[node.id])
         if isinstance(node, ast.UnaryOp):
             return UNOPS[type(node.op)](calculate(node.operand))
-        result = BINOPS[type(node.op)](calculate(node.left), calculate(node.right))
-        if type(result) is not float or not math.isfinite(result):
+        left, right = calculate(node.left), calculate(node.right)
+        if exact and isinstance(node.op, ast.Pow):
+            if right.denominator != 1 or abs(right.numerator) > 1000:
+                raise ValueError('검산의 거듭제곱 지수는 -1000~1000의 정수여야 합니다.')
+            if max(left.numerator.bit_length(), left.denominator.bit_length()) * abs(right.numerator) > 16384:
+                raise ValueError('검산할 수가 너무 큽니다.')
+            right = right.numerator
+        result = BINOPS[type(node.op)](left, right)
+        if exact:
+            if max(result.numerator.bit_length(), result.denominator.bit_length()) > 16384:
+                raise ValueError('검산할 수가 너무 큽니다.')
+        elif type(result) is not float or not math.isfinite(result):
             raise ValueError('유한한 실수가 아닙니다.')
         return result
 
@@ -220,9 +255,10 @@ class Validator:
         self.numbered = {}
         self.limits = {}
         self.local_marks = set()
+        self.expression_context = ''
 
-    def error(self, path, message, hint):
-        self.issues.append(Issue('error', path, message, hint))
+    def error(self, path, message, hint, code=''):
+        self.issues.append(Issue('error', path, message, hint, code))
 
     def warn(self, path, message, hint, code=''):
         self.issues.append(Issue('warning', path, message, hint, code))
@@ -251,6 +287,19 @@ class Validator:
                     hint += ' ' + entry['note']
                 self.warn(path, f'‘{term}’ 용어는 {level}에서 처음 나옵니다.', hint, 'term-beyond-grade')
                 break
+
+    def check_expressions(self, parsed, path, private):
+        if private:
+            visible = parsed.plain
+        else:
+            text = StudentText()
+            text.feed(parsed.html)
+            visible = ''.join(text.parts)
+        for entry in load_expressions():
+            if entry['avoid'] in visible and any(word in self.expression_context for word in entry['context']):
+                self.warn(path, f'교과서 표현을 확인하세요: ‘{entry["avoid"]}’.',
+                          f'{entry["reason"]} 문맥에 맞게 ‘{entry["preferred"]}’ 표현으로 이으세요.',
+                          'textbook-expression')
 
     def object(self, value, path, allowed):
         if not isinstance(value, dict):
@@ -284,7 +333,8 @@ class Validator:
             if key in value and type(value[key]) is not bool:
                 self.error(f'{path}.{key}', '참·거짓 값이 필요합니다.', 'true 또는 false를 쓰세요.')
 
-    def text(self, value, path, *, empty=False, private=False, local=False, field=None, term_visible=None):
+    def text(self, value, path, *, empty=False, private=False, local=False, field=None, term_visible=None,
+             expression_visible=None):
         if not isinstance(value, str) or (not empty and not value.strip()):
             self.error(path, '글자 내용이 필요합니다.', '비어 있지 않은 문자열을 쓰세요.')
             return None
@@ -305,6 +355,8 @@ class Validator:
             self.error(path, '표기 안에 실제 내용이 없습니다.', '화면에 보일 글자나 수식을 쓰세요.')
         if term_visible is True or (term_visible is None and not private):
             self.check_terms(parsed, path)
+        if expression_visible is True or (expression_visible is None and (not private or term_visible is True)):
+            self.check_expressions(parsed, path, private=private and term_visible is not True)
         limit = self.limits.get(field)
         if limit is not None and len(parsed.plain) > limit:
             self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.')
@@ -447,7 +499,7 @@ class Validator:
             if kind == 'draw' and isinstance(answer, dict):
                 self.figure(answer, where + '.answer', private=True)
             else:
-                self.text(answer, where + '.answer', private=True, field='rows[].answer')
+                self.text(answer, where + '.answer', private=True, expression_visible=True, field='rows[].answer')
 
     def grid(self, block, path):
         mode = block.get('mode')
@@ -613,6 +665,9 @@ class Validator:
                 self.positive(block[name], path + '.' + name)
         if 'y_max' in block and not is_number(block['y_max']):
             self.error(path + '.y_max', '유한한 수가 필요합니다.', '세로축 최댓값을 숫자로 쓰세요.')
+        elif kind in ('histogram', 'polygon') and 'y_max' in block and block['y_max'] <= 0:
+            self.error(path + '.y_max', '도수 그래프의 세로축 최댓값은 양수여야 합니다.',
+                       '0보다 큰 y_max를 쓰세요.', 'frequency-y-max')
         for name in ('x_label', 'y_label'):
             if name in block:
                 self.text(block[name], path + '.' + name, field=name)
@@ -702,7 +757,7 @@ class Validator:
             if kind == 'ask':
                 self.lines(block, path, required=True)
                 self.bools(block, path, 'grow')
-                text('answer', private=True)
+                text('answer', private=True, expression_visible=True)
         elif kind == 'answer':
             self.answer_rows(block, path, pending_marks)
         elif kind == 'steps':
@@ -817,6 +872,7 @@ class Validator:
             text('prompt', False)
             params = self.list(block.get('params'), path + '.params', 1, 3) or []
             names, ranges = set(), {}
+            defaults_valid = True
             for i, param in enumerate(params):
                 where = f'{path}.params[{i}]'
                 if not self.object(param, where, ('name', 'label', 'min', 'max', 'step', 'value', 'except')):
@@ -833,7 +889,9 @@ class Validator:
                         self.error(where + '.label', '슬라이더 이름에는 빈칸을 넣을 수 없습니다.', '$a$의 값처럼 글과 수식으로 쓰세요.')
                 low, high, step, value = (param.get(k) for k in ('min', 'max', 'step', 'value'))
                 bounded = is_number(low) and is_number(high) and low < high
-                if not (bounded and is_number(step) and step > 0 and is_number(value) and low <= value <= high):
+                valid_step = is_number(step) and step > 0
+                valid_value = is_number(value) and bounded and low <= value <= high
+                if not (bounded and valid_step and valid_value):
                     self.error(where, '매개변수 범위가 맞지 않습니다.', 'min < max, 양수 step, 범위 안의 value를 쓰세요.')
                 excluded = set()
                 for j, v in enumerate(self.list(param.get('except', []), where + '.except', 0) or []):
@@ -843,31 +901,78 @@ class Validator:
                         excluded.add(v)
                 if is_number(value) and value in excluded:
                     self.error(where + '.value', '처음 값은 건너뛸 값과 같을 수 없습니다.', 'except에 없는 값을 쓰세요.')
-                if valid_name and bounded:
-                    ranges[name] = (low, high, excluded)
+                    valid_value = False
+                if bounded and valid_step and valid_value and not on_step(value, low, step):
+                    self.error(where + '.value', '처음 값이 슬라이더 눈금에 없습니다.',
+                               'min + k×step인 값을 쓰세요.', 'explore-step')
+                    valid_value = False
+                defaults_valid = defaults_valid and valid_value
+                if valid_name and bounded and valid_step:
+                    ranges[name] = (low, high, step, value, excluded)
+            snapshots = []
             if 'print' in block:
                 for i, snapshot in enumerate(self.list(block['print'], path + '.print', 1, 4) or []):
                     where = f'{path}.print[{i}]'
                     if not self.object(snapshot, where, names):
                         continue
+                    valid_snapshot = bool(snapshot) and all(name in ranges for name in snapshot)
                     if not snapshot:
                         self.error(where, '인쇄할 값이 필요합니다.', '매개변수 이름과 값을 한 쌍 이상 쓰세요.')
                     for name, value in snapshot.items():
                         if name in ranges:
-                            low, high, excluded = ranges[name]
+                            low, high, step, _, excluded = ranges[name]
                             if not is_number(value) or not low <= value <= high or value in excluded:
                                 self.error(f'{where}.{name}', '인쇄할 값이 허용 범위에 없습니다.', 'min~max 사이에서 except에 없는 수를 쓰세요.')
+                                valid_snapshot = False
+                            elif not on_step(value, low, step):
+                                self.error(f'{where}.{name}', '인쇄할 값이 슬라이더 눈금에 없습니다.',
+                                           'min + k×step인 값을 쓰세요.', 'explore-step')
+                                valid_snapshot = False
+                    if valid_snapshot:
+                        snapshots.append(snapshot)
+            tree = None
             try:
                 if not isinstance(block.get('fn'), str):
                     raise ValueError('함수 식이 필요합니다.')
-                function_tree(block['fn'], names)
+                tree = function_tree(block['fn'], names)
             except ValueError as error:
                 self.error(path + '.fn', str(error), 'x와 선언한 매개변수로 식을 쓰세요.')
             self.grid({'mode': 'coord', 'x': block.get('x'), 'y': block.get('y'), 'unit_mm': block.get('unit_mm')}, path)
             if 'table' in block:
-                for i, x in enumerate(self.list(block['table'], path + '.table', 0) or []):
+                xs = self.list(block['table'], path + '.table', 0) or []
+                for i, x in enumerate(xs):
                     if not is_number(x):
                         self.error(f'{path}.table[{i}]', '수만 넣을 수 있습니다.', '표에 넣을 x값을 쓰세요.')
+                bounds = block.get('y')
+                if (tree is not None and len(ranges) == len(params) and params and defaults_valid and
+                        isinstance(bounds, list) and len(bounds) == 2 and
+                        all(is_number(v) for v in bounds) and bounds[0] < bounds[1]):
+                    defaults = {name: values[3] for name, values in ranges.items()}
+                    edges = [slider_endpoints(low, high, step, excluded)
+                             for low, high, step, _, excluded in ranges.values()]
+                    scopes = [defaults, *({**defaults, **snapshot} for snapshot in snapshots)]
+                    scopes.extend({**defaults, name: value} for name, ends in zip(ranges, edges) for value in ends)
+                    scopes.extend(dict(zip(ranges, values)) for values in product(*edges))
+                    outside = None
+                    for scope in scopes:
+                        for x in xs:
+                            if not is_number(x):
+                                continue
+                            try:
+                                y = function_value(tree, x, scope)
+                            except (ValueError, ArithmeticError):
+                                continue
+                            if y < bounds[0] - 1e-9 or y > bounds[1] + 1e-9:
+                                outside = (x, scope, y)
+                                break
+                        if outside:
+                            break
+                    if outside:
+                        x, scope, y = outside
+                        values = ', '.join(f'{key}={value:g}' for key, value in scope.items())
+                        self.warn(path + '.table', f'표의 값이 그래프 세로 범위를 벗어납니다: x={x:g}, {values}일 때 y={y:g}.',
+                                  '슬라이더 끝 눈금과 인쇄값에서 표의 점이 보이도록 y 범위나 표를 조정하세요.',
+                                  'explore-table-out-of-range')
         elif kind == 'video':
             self.video(block, path)
         elif kind == 'checklist':
@@ -903,6 +1008,40 @@ class Validator:
                 self.error('meta.total_points', f'라벨 배점의 합({math.fsum(self.points):g}점)과 총점이 다릅니다.',
                            '연속 병합한 라벨은 첫 행 배점만 더해 총점을 맞추세요.')
 
+    def verify(self, checks, path):
+        for i, check in enumerate(self.list(checks, path) or []):
+            where = f'{path}[{i}]'
+            if not self.object(check, where, ('given', 'holds')):
+                continue
+            given = check.get('given')
+            valid_given = isinstance(given, dict)
+            if not valid_given:
+                self.error(where + '.given', '대입할 문자와 값의 객체가 필요합니다.', '예: {"x": 2}로 쓰세요.', 'verify-expression')
+                given = {}
+            for name, value in given.items():
+                if not isinstance(name, str) or not re.fullmatch(r'[a-z]', name) or not is_number(value):
+                    self.error(f'{where}.given.{name}', '문자 이름 또는 대입값이 맞지 않습니다.',
+                               '영문 소문자 한 글자와 유한한 수를 쓰세요.', 'verify-expression')
+                    valid_given = False
+            for j, equation in enumerate(self.list(check.get('holds'), where + '.holds') or []):
+                slot = f'{where}.holds[{j}]'
+                try:
+                    if not isinstance(equation, str) or equation.count('=') != 1:
+                        raise ValueError('등호가 한 개 있는 식을 쓰세요.')
+                    left, right = (function_tree(part, given) for part in equation.split('='))
+                    used = {node.id for tree in (left, right) for node in ast.walk(tree) if isinstance(node, ast.Name)}
+                    if not used <= given.keys():
+                        raise ValueError('식에 쓴 모든 문자의 대입값이 필요합니다.')
+                    if not valid_given:
+                        continue
+                    lhs, rhs = (function_value(tree, given.get('x', 0), given, exact=True) for tree in (left, right))
+                    if abs(lhs - rhs) > Fraction(1, 1_000_000_000):
+                        self.error(slot, f'대입한 양변이 다릅니다: {lhs} ≠ {rhs}.',
+                                   '정답의 문자별 값과 원래 조건을 함께 확인하세요.', 'verify-failed')
+                except (ValueError, TypeError, ArithmeticError, KeyError, RecursionError) as error:
+                    self.error(slot, f'대입 검산 식을 계산할 수 없습니다: {error}',
+                               '곱셈은 *, 거듭제곱은 **로 쓰고 0으로 나누지 마세요.', 'verify-expression')
+
     def teacher(self, teacher):
         self.limits = {}
         solutions = set()
@@ -912,9 +1051,12 @@ class Validator:
             for i, entry in enumerate(entries):
                 path = f'teacher.solutions[{i}]'
                 groups = ('steps', 'rubric', 'alternatives', 'misconceptions')
-                if not self.object(entry, path, ('item', 'answer', 'video', *groups)):
+                if not self.object(entry, path, ('item', 'answer', 'video', 'verify', *groups)):
                     continue
                 item = entry.get('item')
+                self.expression_context = self.expression_meta
+                if isinstance(item, str):
+                    self.expression_context += self.expression_items.get(item, '') + json.dumps(entry, ensure_ascii=False)
                 if not isinstance(item, str) or item not in self.ids:
                     self.error(path + '.item', '이 id의 item이 없습니다.', 'items에 실제로 있는 id를 쓰세요.')
                 elif item in solutions:
@@ -924,15 +1066,67 @@ class Validator:
                 if not entry.get('steps'):
                     self.warn(path + '.steps', '교사용 풀이에 풀이 과정이 없습니다.',
                               '정답만 두지 말고 steps에 풀이 과정을 쓰세요(필요하면 rubric·misconceptions도).')
-                self.text(entry.get('answer'), path + '.answer', private=True)
+                self.text(entry.get('answer'), path + '.answer', private=True, expression_visible=True)
                 for key in groups:
                     if key in entry:
-                        self.texts(entry[key], f'{path}.{key}', minimum=0, private=True)
+                        self.texts(entry[key], f'{path}.{key}', minimum=0, private=True, expression_visible=True)
+                if 'verify' in entry:
+                    self.verify(entry['verify'], path + '.verify')
                 if 'video' in entry:
                     self.video(entry['video'], path + '.video', solution=True)
         for item, path in self.numbered.items():
             if item not in solutions:
                 self.warn(path, '번호 있는 발문의 교사용 풀이가 없습니다.', 'teacher.solutions에 이 item의 풀이를 쓰세요.')
+
+    def assessment(self, data):
+        if self.kind != '평가':
+            return
+        teacher = data.get('teacher', {})
+        entries = teacher.get('solutions', []) if isinstance(teacher, dict) else []
+        solutions = ({s['item']: s for s in entries if isinstance(s, dict) and isinstance(s.get('item'), str)}
+                     if isinstance(entries, list) else {})
+
+        def scored_rows(blocks, path):
+            found = []
+            if not isinstance(blocks, list):
+                return found
+            for i, block in enumerate(blocks):
+                if not isinstance(block, dict):
+                    continue
+                where = f'{path}[{i}]'
+                if block.get('type') == 'split':
+                    for side in ('left', 'right'):
+                        found.extend(scored_rows(block.get(side), where + '.' + side))
+                elif block.get('type') == 'answer' and isinstance(block.get('rows'), list):
+                    previous = None
+                    for j, row in enumerate(block['rows']):
+                        if not isinstance(row, dict):
+                            previous = None
+                            continue
+                        group = row.get('group')
+                        same = bool(group) and group == previous
+                        previous = group
+                        if (not same and row.get('kind', 'text') == 'text' and
+                                is_number(row.get('points')) and row['points'] > 0):
+                            found.append((f'{where}.rows[{j}].points', row['points']))
+            return found
+
+        for i, item in enumerate(data.get('items', []) if isinstance(data.get('items'), list) else []):
+            if not isinstance(item, dict):
+                continue
+            rows = scored_rows(item.get('blocks'), f'items[{i}].blocks')
+            if not rows:
+                continue
+            key = item.get('id')
+            solution = solutions.get(key, {}) if isinstance(key, str) else {}
+            rubric = solution.get('rubric')
+            criteria = [v for v in rubric if isinstance(v, str) and v.strip()] if isinstance(rubric, list) else []
+            if not criteria:
+                self.warn(rows[0][0], '배점 있는 서술 칸에 교사용 채점 기준이 없습니다.',
+                          '해당 item의 teacher.solutions에 rubric을 쓰세요.', 'rubric-missing')
+            elif len(rows) == 1 and rows[0][1] > 1 and len(criteria) > 1:
+                self.warn(rows[0][0], '한 배점 칸에 여러 채점 요소가 묶였습니다.',
+                          '채점 요소마다 실제 답 칸과 라벨·배점을 대응시키세요.', 'rubric-coverage')
 
     def check(self, data):
         if not self.object(data, '$', ('version', 'meta', 'items', 'teacher')):
@@ -942,6 +1136,19 @@ class Validator:
         self.kind = meta.get('kind', '수업') if isinstance(meta, dict) else '수업'
         self.grade = grade_level(meta.get('grade')) if isinstance(meta, dict) else None
         self.columns = meta.get('columns', 1) if isinstance(meta, dict) else 1
+        context_meta = {key: meta.get(key) for key in ('title', 'header_title', 'unit')} if isinstance(meta, dict) else {}
+        self.expression_meta = json.dumps(context_meta, ensure_ascii=False)
+        self.expression_context = self.expression_meta
+        self.expression_items = {}
+        items = data.get('items', [])
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and isinstance(item.get('id'), str):
+                self.expression_items[item['id']] = json.dumps(item, ensure_ascii=False)
+        teacher = data.get('teacher', {})
+        entries = teacher.get('solutions', []) if isinstance(teacher, dict) else []
+        for entry in entries if isinstance(entries, list) else []:
+            if isinstance(entry, dict) and isinstance(entry.get('item'), str) and entry['item'] in self.expression_items:
+                self.expression_items[entry['item']] += json.dumps(entry, ensure_ascii=False)
         if isinstance(meta, dict):
             title = self.text(meta.get('title'), 'meta.title', private=True, term_visible=True)
             if title and title.blanks:
@@ -970,6 +1177,7 @@ class Validator:
                 self.error(path + '.id', '이미 있는 id입니다.', '문서 전체에서 유일한 id로 바꾸세요.')
             else:
                 self.ids.add(item_id)
+            self.expression_context = self.expression_meta + self.expression_items.get(item_id, '')
             self.bools(item, path, 'break')
             if 'hints' in item:
                 self.texts(item['hints'], path + '.hints', minimum=1, maximum=3)
@@ -983,6 +1191,7 @@ class Validator:
                               'mark를 같은 item의 빈칸과 맞추거나 필요 없으면 지우세요.')
         self.meta(meta)
         self.teacher(data.get('teacher', {}))
+        self.assessment(data)
         return self.issues
 
 

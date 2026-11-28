@@ -156,6 +156,11 @@ svg .ws-key { stroke: var(--ws-key-color); }
   border-radius: 50%;
 }
 .ws-data, .ws-steps { text-align: center; }
+/* A4 pagination measures these rows before printing; the solve flow is unaffected.
+   13.5mm is the low end of the HWPX reference's stacked-fraction boxes. */
+#sheet-pages .ws-data > :is(thead, tbody) > tr:has(> :is(th, td) .ws-blank[data-writing-shape~="fraction"]) {
+  height: 13.5mm;
+}
 :root[data-kind="수업"] :is(.ws-data, .ws-steps) thead th,
 :root[data-kind="수업"] .ws-ask th { background: #daeef3; }
 :root[data-kind="수업"] .ws-sit { background: #f8f8f8; }

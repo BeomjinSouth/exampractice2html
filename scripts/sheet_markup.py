@@ -60,14 +60,14 @@ def is_math_space(part):
 
 def fraction_operand(text, parts, *, denominator):
     grouped = fraction_term(text, denominator=denominator)
-    if grouped != text.strip():
+    # A product numerator reads the same either way (2x/3), so only a denominator needs it.
+    if grouped != text.strip() or not denominator:
         return grouped
     factors = [part for part in parts if not is_math_space(part)]
     if factors and factors[0][0].startswith('<mo form="prefix"') and factors[0][1] in ('+', '−'):
         factors = factors[1:]
-    # Keep the established compact spelling of a radical or pi coefficient in the numerator.
-    compact = not denominator and re.fullmatch(r'[+−-]?[0-9.]+(?:π|√(?:[0-9]+|\([^()]+\)))', grouped)
-    return f'({grouped})' if len(factors) > 1 and not compact else grouped
+    # 1/(2x) must not read as (1/2)x.
+    return f'({grouped})' if len(factors) > 1 else grouped
 
 
 class MathParser:

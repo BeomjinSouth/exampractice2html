@@ -34,12 +34,12 @@
   }
   function fractionOperand(text, parts, denominator) {
     const grouped = fractionTerm(text, denominator);
-    if (grouped !== text.trim()) return grouped;
+    // A product numerator reads the same either way (2x/3), so only a denominator needs it.
+    if (grouped !== text.trim() || !denominator) return grouped;
     const factors = parts.filter(part => !isMathSpace(part));
     if (factors[0]?.[0].startsWith('<mo form="prefix"') && ['+', '−'].includes(factors[0][1])) factors.shift();
-    // Keep the established compact spelling of a radical or pi coefficient in the numerator.
-    const compact = !denominator && /^[+−-]?[0-9.]+(?:π|√(?:[0-9]+|\([^()]+\)))$/u.test(grouped);
-    return factors.length > 1 && !compact ? `(${grouped})` : grouped;
+    // 1/(2x) must not read as (1/2)x.
+    return factors.length > 1 ? `(${grouped})` : grouped;
   }
   class MathParser {
     constructor(source, answer = false, label = false) {

@@ -414,7 +414,8 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   #sheet-flow .ws-pen-viewport.ws-pen-pan { touch-action: none; cursor: grab; }
   #sheet-flow .ws-pen-viewport.ws-pen-pan svg[data-map] { cursor: grab; }
   #sheet-flow .ws-pen-stage { position: relative; width: 200%; }
-  #sheet-flow .ws-pen-stage > :is(img, svg) { display: block; width: 100%; height: auto; }
+  #sheet-flow .ws-pen-stage > :is(img, svg) { display: block; width: 100% !important; max-width: none !important; height: auto !important; }
+  #sheet-flow .ws-pen-stage > .ws-fig-answer { position: absolute; inset: 0; pointer-events: none; }
 }
 :root[data-role="student"] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],
 :root[data-sheet-preview] .ws-answer-live :is(li, .ws-ox-pick > span)[tabindex="0"],

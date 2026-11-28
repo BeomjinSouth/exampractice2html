@@ -538,6 +538,16 @@ _PEN_ZOOM_JS = """(async () => {
 })()"""
 
 
+def _audit_pen_zoom(normal, enlarged, problems):
+    for slot, before in normal.items():
+        after = enlarged.get(slot)
+        if after and before['width_px'] > 0 and after['width_px'] <= before['width_px'] * 1.3:
+            _problem(problems, 'warning', 'pen-zoom-ineffective', None, slot.rsplit('.', 1)[0],
+                     f"{slot}: 펜 그림이 보통 {before['width_px']:.2f}×{before['height_px']:.2f}px에서 "
+                     f"크게 {after['width_px']:.2f}×{after['height_px']:.2f}px로 충분히 커지지 않습니다.",
+                     '크게 보기에서 펜 그림의 너비와 스타일을 확인하세요.')
+
+
 def _print_pen_aspects(protocol):
     protocol.call('Emulation.setEmulatedMedia', {'media': 'print'})
     try:
@@ -846,6 +856,7 @@ def _interactive_check(protocol, out, table, problems):
                 if zoom is not None:
                     screen_entry['pen_zoom'] = zoom
                     _audit_pen_aspects(_pen_aspects(zoom['pen_sizes']), printed_aspects, '폰 화면 크게 보기', problems)
+                    _audit_pen_zoom(pen_sizes, zoom['pen_sizes'], problems)
                     if zoom['overflow_x'] > 1:
                         _problem(problems, 'error', 'screen-overflow', None, None,
                                  f"폰 화면에서 펜 그림을 크게 펼치면 가로로 {zoom['overflow_x']}px 넘칩니다.",

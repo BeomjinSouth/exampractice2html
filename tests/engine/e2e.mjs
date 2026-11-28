@@ -652,6 +652,133 @@ try {
       }
     }, metrics(390,844));
   });
+  await test('폰의 좁은 펜 그림 확대와 정답·화면·인쇄 획의 자리 일치', async () => {
+    const html = await fs.readFile(fileURLToPath(interactive), 'utf8');
+    const image = svg => `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+    const base = image('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 82"><circle cx="42" cy="41" r="30" fill="none" stroke="black"/></svg>');
+    const answer = image('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 82"><path d="M10 10L70 70" stroke="red"/></svg>');
+    const figure = `<div class="ws-split" data-ratio="1:1"><div class="ws-split-col"><figure class="ws-fig" data-pen="1" data-slot="q4.1" data-check-kind="draw"><img src="${base}" style="width:82mm" alt="그림"><img class="ws-key ws-fig-answer" src="${answer}" style="width:82mm" alt="" aria-hidden="true"></figure></div><div class="ws-split-col">설명</div></div>`;
+    const source = html.replace(/<figure class="ws-fig" data-pen="1" data-slot="q4\.1"[\s\S]*?<\/figure>/, figure);
+    assert.notEqual(source, html);
+    const teacher = await saveFile('narrow-pen-teacher', source);
+    const student = await usingTab(teacher, tab => tab.js('sheet.exportStudent()'));
+    const select = s => `document.querySelector(${quote(s)})`;
+    const draw = slot('q4.1'), canvas = `${draw} canvas.ws-pen`, btn = name => action(name, draw);
+    const geometry = (tab, selector) => tab.js(`(() => {const r=${select(selector)}.getBoundingClientRect();return [r.left,r.top,r.width,r.height];})()`);
+    const sameBox = (a, b, message) => assert(a.every((value, i) => Math.abs(value-b[i]) < .1), `${message}: ${quote({a,b})}`);
+    await usingTab(await saveFile('narrow-pen-student', student), async tab => {
+      try {
+        await tab.js('sheet.clearAnswers()');
+        const small = await geometry(tab, `${draw} > img`);
+        sameBox(await geometry(tab, canvas), small, '보통 크기의 그림과 캔버스');
+        await tab.mouseClick(btn('pen-zoom'));
+        const large = await geometry(tab, `${draw} .ws-pen-stage > img`);
+        const viewportWidth = await tab.js(`${select(`${draw} .ws-pen-viewport`)}.clientWidth`);
+        assert(large[2] >= small[2] * 1.9 && large[2] <= small[2] * 2.5, quote({small,large}));
+        assert(Math.abs(large[2] / viewportWidth - 2) < .02, quote({large,viewportWidth}));
+        assert(Math.abs((large[2]/large[3]) / (small[2]/small[3]) - 1) <= .015);
+        sameBox(await geometry(tab, canvas), large, '확대한 그림과 캔버스');
+        assert.equal((await tab.report()).overflow_x, 0);
+        const [scrollX, scrollY] = await tab.js(`(() => {const box=${select(`${draw} .ws-pen-viewport`)};
+          box.scrollLeft=100; box.scrollTop=70; return [box.scrollLeft,box.scrollTop];})()`);
+        assert(scrollX > 0 && scrollY > 0, '확대한 그림 안에서 가로·세로 이동');
+        sameBox(await geometry(tab, canvas), await geometry(tab, `${draw} .ws-pen-stage > img`), '이동한 그림과 캔버스');
+        await tab.click(btn('pen-line'));
+        await penGesture(tab, canvas, [scrollX+40,scrollY+50], [[scrollX+140,scrollY+150]]);
+        const stroke = await penState(tab, 'q4.1');
+        assert.equal(stroke.length, 1);
+        const expected = [[(scrollX+40)/large[2], (scrollY+50)/large[3]], [(scrollX+140)/large[2], (scrollY+150)/large[3]]];
+        for (const [i, point] of stroke[0].entries()) for (const [j, value] of point.entries()) {
+          assert(Math.abs(value-expected[i][j]) < .001, '스크롤한 그림에서 그은 선의 상대 좌표');
+        }
+        await tab.click(btn('pen-zoom'));
+        sameBox(await geometry(tab, canvas), await geometry(tab, `${draw} > img`), '축소한 그림과 캔버스');
+        assert.deepEqual(await penState(tab, 'q4.1'), stroke);
+        await tab.click(btn('pen-zoom'));
+        await tab.js("sheet.view('a4')", true);
+        await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+        const paper = await geometry(tab, `${draw} > img`);
+        sameBox(await geometry(tab, `${draw} svg.ws-pen-ink`), paper, '인쇄 그림과 펜 SVG');
+        const points = await tab.js(`(() => {const line=${select(`${draw} svg.ws-pen-ink polyline`)};
+          return [...line.points].map(p=>{const absolute=new DOMPoint(p.x,p.y).matrixTransform(line.getScreenCTM());
+            return [p.x,p.y,absolute.x,absolute.y];});})()`);
+        for (const [i, point] of points.entries()) {
+          for (const [j, value] of point.slice(0,2).entries()) {
+            assert(Math.abs(value-stroke[0][i][j]) < .00001, '확대해 그린 선의 인쇄 좌표');
+            assert(Math.abs(point[j+2]-(paper[j]+value*paper[j+2])) < .1, '인쇄 그림에서 선이 놓인 자리');
+          }
+        }
+        assert.deepEqual(await penState(tab, 'q4.1'), stroke);
+      } finally { await tab.send('Emulation.setEmulatedMedia', {media:''}); await tab.js('sheet.clearAnswers()'); }
+    }, metrics(390,844));
+    await usingTab(teacher, async tab => {
+      await tab.click(action('preview-student'));
+      // 미리보기는 정답을 숨긴다. 배치만 확인하기 위해 이 탭에서 잠시 표시한다.
+      await tab.js("document.documentElement.dataset.answers='on'");
+      sameBox(await geometry(tab, `${draw} .ws-fig-answer`), await geometry(tab, `${draw} > img:not(.ws-fig-answer)`), '보통 크기의 정답층');
+      await tab.click(btn('pen-zoom'));
+      sameBox(await geometry(tab, `${draw} .ws-fig-answer`), await geometry(tab, `${draw} .ws-pen-stage > img:not(.ws-fig-answer)`), '확대한 정답층');
+      sameBox(await geometry(tab, canvas), await geometry(tab, `${draw} .ws-fig-answer`), '확대한 정답층과 캔버스');
+      assert.equal((await tab.report()).overflow_x, 0);
+      await tab.js(`{const box=${select(`${draw} .ws-pen-viewport`)}; box.scrollLeft=100; box.scrollTop=70;}`);
+      sameBox(await geometry(tab, `${draw} .ws-fig-answer`), await geometry(tab, `${draw} .ws-pen-stage > img:not(.ws-fig-answer)`), '이동한 정답층');
+      sameBox(await geometry(tab, canvas), await geometry(tab, `${draw} .ws-fig-answer`), '이동한 정답층과 캔버스');
+      assert.equal(await tab.js(`new DOMParser().parseFromString(sheet.serialize(),'text/html').querySelectorAll(${quote(`#sheet-src ${draw} > .ws-fig-answer`)}).length`), 1);
+      assert.equal(await tab.js(`!!new DOMParser().parseFromString(sheet.exportStudent(),'text/html').querySelector('#sheet-src .ws-fig-answer')`), false);
+      await tab.js("sheet.view('a4')", true);
+      await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+      sameBox(await geometry(tab, `${draw} .ws-fig-answer`), await geometry(tab, `${draw} > img:not(.ws-fig-answer)`), '인쇄 정답층');
+    }, metrics(390,844));
+  });
+  await test('아주 작은 그림과 SVG 속성·인라인 최대 폭도 스크롤 틀 기준으로 확대', async () => {
+    const html = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 82"><circle cx="42" cy="41" r="30"/></svg>';
+    const src = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+    const cases = [
+      ['small', `<img src="${src}" style="width:18mm" alt="작은 그림">`],
+      ['max-width', `<img src="${src}" style="width:82mm;max-width:60mm" alt="그림">`],
+      ['svg', '<svg width="82mm" height="80.05mm" style="max-width:60mm" viewBox="0 0 84 82"><circle cx="42" cy="41" r="30"/></svg>'],
+    ];
+    for (const [name, picture] of cases) {
+      const figure = `<div class="ws-split" data-ratio="1:1"><div class="ws-split-col"><figure class="ws-fig" data-pen="1" data-slot="q4.1" data-check-kind="draw">${picture}</figure></div><div class="ws-split-col">설명</div></div>`;
+      const source = html.replace(/<figure class="ws-fig" data-pen="1" data-slot="q4\.1"[\s\S]*?<\/figure>/, figure);
+      assert.notEqual(source, html);
+      await usingTab(await saveFile(`narrow-${name}`, source), async tab => {
+        const draw = slot('q4.1'), canvas = `${draw} canvas.ws-pen`;
+        const size = selector => tab.js(`(() => {const r=document.querySelector(${quote(selector)}).getBoundingClientRect();return [r.width,r.height];})()`);
+        await tab.js('sheet.clearAnswers()');
+        const normal = await size(canvas);
+        await tab.click(action('pen-zoom', draw));
+        const large = await size(canvas);
+        const viewport = await tab.js(`document.querySelector(${quote(`${draw} .ws-pen-viewport`)}).clientWidth`);
+        assert(large[0] > normal[0] * 1.3 && Math.abs(large[0]/viewport-2) < .02, quote({name,normal,large,viewport}));
+        assert(Math.abs((large[0]/large[1]) / (normal[0]/normal[1]) - 1) <= .015, quote({name,normal,large}));
+        assert.equal((await tab.report()).overflow_x, 0, name);
+        const saved = await tab.js(`(() => {const d=new DOMParser().parseFromString(sheet.serialize(),'text/html');
+          const figure=d.querySelector(${quote(`#sheet-src ${draw}`)}); return [!!figure.querySelector('.ws-pen-viewport'),figure.querySelector('img,svg').getAttribute('style')];})()`);
+        assert.equal(saved[0], false);
+        assert.match(saved[1], name === 'small' ? /18mm/ : /60mm/);
+        await tab.click(action('pen-zoom', draw));
+        const restored = await size(canvas);
+        assert(Math.abs(restored[0]-normal[0]) < .1 && Math.abs(restored[1]-normal[1]) < .1, quote({name,normal,restored}));
+      }, metrics(390,844));
+    }
+  });
+  await test('펜 확대 경고의 1.3배 경계', async () => {
+    const script = `
+import sys
+sys.path.insert(0, sys.argv[1])
+from sheet_check import _audit_pen_zoom
+normal = {name: {'width_px': 100, 'height_px': 50} for name in ('q.1', 'q.2', 'q.3')}
+large = {name: {'width_px': width, 'height_px': 100} for name, width in zip(normal, (129, 130, 130.01))}
+problems = []
+_audit_pen_zoom(normal, large, problems)
+assert len(problems) == 2 and all(p['code'] == 'pen-zoom-ineffective' for p in problems)
+assert 'q.1' in problems[0]['msg'] and '100.00×50.00' in problems[0]['msg'] and '129.00×100.00' in problems[0]['msg']
+assert 'q.2' in problems[1]['msg']
+`;
+    await run(process.env.PYTHON || 'python', ['-B', '-X', 'utf8', '-c', script, path.join(here, '../../scripts')]);
+  });
   await test('경계에 잘려 보이는 원도 한 번에 지우고 되돌리며 다시 열 수 있음', async () => {
     const draw = slot('q4.1'), canvas = `${draw} canvas`, btn = name => action(name, draw);
     const phone = metrics(390,844);

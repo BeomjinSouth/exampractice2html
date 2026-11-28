@@ -491,6 +491,18 @@ def svg_smallest_label(root, width_mm, *, viewport=None):
         size = svg_length(svg_property(node, 'font-size'), inherited, 16 if root_size is None else root_size)
         size = inherited if size is None else size
         matrix = svg_compose_linear(matrix, svg_linear_transform(svg_property(node, 'transform')))
+        if node is not root and tag == 'svg' and node.get('viewBox'):
+            box = svg_viewbox(node)
+            width = svg_length(svg_property(node, 'width'))
+            height = svg_length(svg_property(node, 'height'))
+            # Percentages and missing or invalid viewports cannot be resolved reliably here.
+            if box is None or width is None or height is None or width <= 0 or height <= 0:
+                continue
+            x_scale, y_scale = width / box[2], height / box[3]
+            align = node.get('preserveAspectRatio', '').split()
+            if 'none' not in align:
+                x_scale = y_scale = (max if 'slice' in align else min)(x_scale, y_scale)
+            matrix = svg_compose_linear(matrix, (x_scale, 0, 0, y_scale))
         in_text = in_text or tag == 'text'
         if in_text and ((node.text or '').strip() or any((child.tail or '').strip() for child in node)):
             height = size * math.hypot(matrix[2], matrix[3])
@@ -516,7 +528,7 @@ QUADRATIC_MATH = re.compile(r'<msup><mi>x</mi><mn>2</mn></msup>')
 EXPRESSION_CORRECTION = re.compile(
     r'\s*(?:(?:하면|면|해서는|해선|하여서는)\s*안\s*[되된돼됩]|'
     r'(?:하|열리|리)?지\s*(?:않|말|마)|'
-    r'(?:할|될|릴)\s*수(?:는)?\s*없|'
+    r'(?:할|될|릴)\s*수(?:는|가|도)?\s*없|'
     r'(?:하는\s*(?:것은|것이)|한다는\s*말은)\s*(?:(?:옳|맞|올바르)지\s*않|아니)|'
     r'[’”\'\"]?\s*(?:(?:라는|이라는)\s*(?:말|표현)(?:은|을)|라고)?\s*(?:쓰지|사용하지)\s*(?:않|말|마))')
 INLINE_PARTS = re.compile(r'\\[\\${]|\$((?:\\[\\$]|[^$])*)\$')
@@ -538,8 +550,8 @@ LENGTH_NUMBER = re.compile(
 # Expression checks see rendered text, including numbers with grouping commas.
 RENDERED_NUMBER = r'(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)'
 LENGTH_VALUE = re.compile(
-    rf'\s*(?:[+−-]?√?(?:\({RENDERED_NUMBER}\)/\({RENDERED_NUMBER}\)|{RENDERED_NUMBER})|[A-Za-zΑ-Ωα-ω])'
-    rf'(?=(?:\s+|(?<=\d)){LENGTH_UNIT}(?![A-Za-z0-9_^²³])|[+−×÷/=<>≤≥≠^²³-]|'
+    rf'\s*(?:[+−-]?√?(?:\({RENDERED_NUMBER}\)/\({RENDERED_NUMBER}\)|{RENDERED_NUMBER})π?|[A-Za-zΑ-Ωα-ω])'
+    rf'(?=(?:\s+|(?<=[\dπ])){LENGTH_UNIT}(?![A-Za-z0-9_^²³])|[+−×÷/=<>≤≥≠^²³-]|'
     r'\s*(?:이(?:고|다|며|면|므로|거나|상|하|\s)|인|일|임|보다|으?로|[,.](?!\d)|[;:)]|$))')
 NON_LENGTH_OBJECT_BEFORE = re.compile(r'(?:행렬|집합)\s*(?:\*\*)?\s*$')
 NON_LENGTH_OBJECT_AFTER = re.compile(r'\s*(?:인\s*)?(?:행렬|집합)')
@@ -562,6 +574,9 @@ PAPER_LOCATION = re.compile(r'(?:종이(?:\s*\(인쇄본\))?|인쇄본|공책)(?
 MARK_LOCATION = re.compile(r'좌표|선분|직선|교점|외심|내심|중점|그래프|수직선|모눈|상자그림|히스토그램|도수분포다각형|'
                            r'(?<![가-힣])(?:점|각|원|변)(?=[을를에]|\s+[A-Z]|$)')
 CATEGORY_HEADER_UNIT = re.compile(r'\s*(?:모둠|학급|반|구분|항목|이름|번호|종류)\s*\(\s*단위\s*:\s*[^()]+\)\s*')
+SCREEN_TOOL_QUOTED = re.compile(r'''[‘'“"]\s*(?:곧은\s*선|지우개|되돌리기|모두\s*지우기|크게)\s*[’'”"]''')
+SCREEN_PEN_QUOTED = re.compile(r'''[‘'“"]\s*펜\s*[’'”"]\s*(?:을|를|은|는)?\s*(?:고르|골라|선택|누르|눌러|단추|도구|모드)''')
+SCREEN_BUTTON_ACTION = re.compile(r'단추\s*(?:를|을)?\s*(?:누르|눌러)')
 
 
 def math_contexts(value):
@@ -637,7 +652,9 @@ def box_table_rows(blocks):
             values = re.split(r'\s*[,，]\s*', cells[0]) if raw else cells
             if (raw and len(values) < 2) or not all(len(v) <= 90 and BOX_CELL_NUMBER.fullmatch(v) for v in values):
                 continue
-            yield row[0], raw is not None, raw[1] if raw else None, [
+            unit = (raw[1] if raw and raw[1] else None) or block.get('unit')
+            unit = (normalized_unit(unit) or unit.strip()) if isinstance(unit, str) else None
+            yield row[0], raw is not None, unit, [
                 Fraction(v.replace('−', '-')) for v in values], f'{path}.rows[{i}]'
 
 
@@ -824,7 +841,7 @@ class Validator:
                 self.error(f'{path}.{key}', '참·거짓 값이 필요합니다.', 'true 또는 false를 쓰세요.')
 
     def text(self, value, path, *, empty=False, private=False, local=False, field=None, term_visible=None,
-             expression_visible=None):
+             expression_visible=None, print_visible=None):
         if not isinstance(value, str) or (not empty and not value.strip()):
             self.error(path, '글자 내용이 필요합니다.', '비어 있지 않은 문자열을 쓰세요.')
             return None
@@ -852,6 +869,12 @@ class Validator:
                 self.check_terms(text, path)
             if check_expressions:
                 self.check_expressions(text, path)
+        if (not private if print_visible is None else print_visible):
+            printed = visible_text(parsed)
+            if any(pattern.search(printed) for pattern in (SCREEN_TOOL_QUOTED, SCREEN_PEN_QUOTED, SCREEN_BUTTON_ACTION)):
+                self.warn(path, '종이에는 없는 화면 도구나 단추를 학생에게 지시합니다.',
+                          '꼭짓점에서 A, B까지 각각 선분을 그으세요처럼 종이와 화면에 공통인 동작으로 쓰세요.',
+                          'screen-only-instruction')
         limit = self.limits.get(field)
         if limit is not None and len(parsed.plain) > limit:
             self.warn(path, f'글자 수 권장 한도({limit}자)를 넘었습니다.', '문장을 줄이거나 여러 문단으로 나누세요.', 'text-length')
@@ -1277,7 +1300,8 @@ class Validator:
                 continue
             groups = [g for g in block['groups'] if isinstance(g, dict) and isinstance(g.get('label'), str)]
             unit = block.get('x_label')
-            unit = re.fullmatch(r'\(([^()]+)\)', unit) if isinstance(unit, str) else None
+            unit = re.search(r'\(([^()]+)\)\s*$', unit) if isinstance(unit, str) else None
+            unit = (normalized_unit(unit[1]) or unit[1].strip()) if unit else None
             for group in groups:
                 key = 'data' if 'data' in group else 'five'
                 values = group.get(key)
@@ -1287,8 +1311,8 @@ class Validator:
                 # Keep decimal midpoints exact when checking written values against the chart.
                 values = [Fraction(str(v)) for v in values]
                 if key == 'data':
-                    candidates.setdefault((group['label'], True), []).append((path, unit[1] if unit else None, sorted(values)))
-                candidates.setdefault((group['label'], False), []).append((path, None, box_five({key: values})))
+                    candidates.setdefault((group['label'], True), []).append((path, unit, sorted(values)))
+                candidates.setdefault((group['label'], False), []).append((path, unit, box_five({key: values})))
         if not candidates:
             return
         for name, raw, unit, values, path in box_table_rows(blocks):
@@ -1654,8 +1678,8 @@ class Validator:
             self.bools(block, path, 'print')
             if self.kind == '평가':
                 self.error(path, '평가에는 자기 점검표를 쓸 수 없습니다.', '점검표를 빼거나 활동지 종류를 바꾸세요.')
-            text('title', False)
-            self.texts(block.get('items'), path + '.items', field='items[]')
+            text('title', False, print_visible=block.get('print') is True)
+            self.texts(block.get('items'), path + '.items', field='items[]', print_visible=block.get('print') is True)
 
     def meta(self, meta):
         if not self.object(meta, 'meta', ('title', 'kind', 'columns', 'subject', 'grade', 'term', 'unit',
@@ -1665,6 +1689,9 @@ class Validator:
         kind = meta.get('kind', '수업')
         if kind not in KINDS:
             self.error('meta.kind', '활동지 유형을 알 수 없습니다.', '수업, 연습, 평가 중 하나를 쓰세요.')
+        if kind in ('연습', '평가') and meta.get('theme') == '산뜻':
+            self.warn('meta.theme', '연습·평가지에 색 테마를 사용합니다.',
+                      '인쇄 PDF에도 색 채움이 남습니다. 디자인을 요청받은 경우에만 쓰세요.', 'theme-print-color')
         columns = meta.get('columns', 1)
         self.integer(columns, 'meta.columns', 1, 2)
         self.bools(meta, 'meta', 'pair', 'interactive', 'sync')
@@ -1832,17 +1859,22 @@ class Validator:
         self.interactive = settings.get('interactive', self.kind in ('수업', '연습')) is True
         self.public_solution = self.interactive and settings.get('reveal', '시도 후') in ('시도 후', '바로')
         if isinstance(meta, dict):
-            title = self.text(meta.get('title'), 'meta.title', private=True, term_visible=True)
+            header_title = meta.get('header_title')
+            title_visible = not meta.get('unit') or (self.kind == '수업' and not header_title)
+            title = self.text(meta.get('title'), 'meta.title', private=True, term_visible=True, print_visible=title_visible)
             if title and title.blanks:
                 self.error('meta.title', '제목에는 빈칸 표기를 넣을 수 없습니다.', '빈칸은 상황이나 발문에 넣으세요.')
             for key in ('term', 'grade', 'subject', 'header_title', 'unit', 'goal'):
                 if key in meta and (key != 'header_title' or meta[key] is not None):
+                    in_head = (key in ('unit', 'header_title') or
+                               self.kind in ('연습', '평가') and
+                               (key == 'grade' or key in ('term', 'subject') and not header_title))
                     parsed = self.text(meta[key], 'meta.' + key, empty=key in ('term', 'grade', 'subject', 'unit'),
-                                       private=True, term_visible=key != 'goal')
+                                       private=True, term_visible=key != 'goal', print_visible=in_head)
                     if parsed and parsed.blanks:
                         self.error('meta.' + key, '머리표 정보에는 빈칸 표기를 넣을 수 없습니다.', '빈칸은 상황이나 발문에 넣으세요.')
             for i, name in enumerate(self.texts(meta['name_fields'], 'meta.name_fields', minimum=1, maximum=3,
-                                                private=True, term_visible=True) or []
+                                                private=True, term_visible=True, print_visible=True) or []
                                      if 'name_fields' in meta else []):
                 if isinstance(name, str) and '{{' in name:
                     self.error(f'meta.name_fields[{i}]', '이름 항목에는 빈칸 표기를 넣을 수 없습니다.', '라벨만 쓰세요. 쓰기 공간은 자동으로 붙습니다.')
@@ -1862,7 +1894,7 @@ class Validator:
                 self.ids.add(item_id)
             self.bools(item, path, 'break')
             if 'hints' in item:
-                self.texts(item['hints'], path + '.hints', minimum=1, maximum=3)
+                self.texts(item['hints'], path + '.hints', minimum=1, maximum=3, print_visible=False)
             self.local_marks = set()
             marks = []
             self.figure_scales = []

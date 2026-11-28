@@ -435,6 +435,58 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(paths, {'items[0].blocks[0].text', 'items[0].blocks[1].items[1].text',
                                  'items[0].blocks[2].options[0]'})
 
+    def test_arc_expression_uses_unit_or_title_and_whole_words(self):
+        examples = ('호를 그린다.', '두 호가 만난다.', '두 호와 직선을 그린다.', '두 호의 교점을 찾는다.',
+                    '이 호는 같은 원의 일부다.', '다른 호도 그린다.', '짧은 호로 나타낸다.', '호 $AB$를 그린다.')
+        controls = ('1호, 호수, 기호, 번호, 괄호, 호도법을 살펴본다.', '컴퍼스로 그린 두 원의 교점을 찾는다.',
+                    '호를 쓰지 말고 원의 일부라고 쓴다.')
+        data = document(*({'type': 'text', 'text': text} for text in (*examples, *controls)))
+        data['meta'].update(grade='중1', interactive=True, reveal='바로')
+        data['teacher'] = {'solutions': [{'item': 'q1', 'answer': '두 호의 교점이다.',
+                                           'steps': ['두 호가 만나는 점을 잡는다.']}]}
+        expected_paths = {*(f'items[0].blocks[{i}].text' for i in range(len(examples))),
+                          'teacher.solutions[0].answer', 'teacher.solutions[0].steps[0]'}
+        for unit, title, expected in [('작도와 합동', '도형 탐구', expected_paths),
+                                      ('', '삼각형의 작도', expected_paths),
+                                      ('기본 도형', '도형 탐구', expected_paths),
+                                      ('삼각형의 합동', '도형 탐구', expected_paths),
+                                      ('원과 부채꼴', '호의 길이', set()),
+                                      ('원과 부채꼴', '부채꼴의 작도', set()),
+                                      ('평면도형', '호의 길이', set())]:
+            with self.subTest(unit=unit, title=title):
+                data['meta'].update(unit=unit, title=title)
+                self.assertEqual({i.path for i in validate(data, ROOT) if i.code == 'textbook-expression'}, expected)
+
+    def test_variance_uses_statistical_context_in_the_same_sentence(self):
+        fields = ('자료의 분산을 구하시오.', '분산과 평균을 비교하시오.', '편차의 제곱으로 분산을 알아보자.',
+                  '분산을 구해 봅시다.', '분산 투자로 위험을 줄인다.', '평균 수익률과 분산 투자를 비교한다.',
+                  '자료 분산 처리 방법을 찾는다.', '자료를 모았다. 분산하자.')
+        data = document(*({'type': 'text', 'text': text} for text in fields))
+        for grade, expected in [('중1', range(4)), ('중2', range(4)), ('중3', ())]:
+            with self.subTest(grade=grade):
+                data['meta']['grade'] = grade
+                warnings = {i.path for i in validate(data, ROOT) if i.code == 'term-beyond-grade'}
+                self.assertEqual(warnings, {f'items[0].blocks[{i}].text' for i in expected})
+
+    def test_terms_ignore_unrelated_compounds_but_keep_math_compounds(self):
+        controls = ('성적분포를 비교한다.', '누적분포를 살핀다.', '미분양과 미분류 자료를 살핀다.', '소인수분해를 한다.')
+        examples = ('함수의 미분법을 살핀다.', '정적분과 부정적분을 구한다.', '함수의 적분을 구한다.',
+                    '미분 양쪽의 결과를 비교한다.', '적분 포스터를 만든다.', '인수분해를 한다.')
+        data = document(*({'type': 'text', 'text': text} for text in (*controls, *examples)))
+        data['meta']['grade'] = '중2'
+        warnings = {i.path for i in validate(data, ROOT) if i.code == 'term-beyond-grade'}
+        self.assertEqual(warnings, {f'items[0].blocks[{i}].text' for i in range(len(controls), len(controls) + len(examples))})
+
+    def test_textbook_expression_ignores_explicit_correction_not_other_occurrences(self):
+        fields = ('분모를 이항하면 안 됩니다.', '분모를 이항하지 말고 양변에 같은 수를 곱하시오.',
+                  '분모를 이항해서는 안 된다.', '분모를 이항하는 것은 올바르지 않다.',
+                  '분모를 이항하면 양변이 같지 않다.', '분모를 이항하지 마세요. 그런데 여기서는 분모를 이항한다.',
+                  '분모를 이항하지 말고, 분모를 이항하시오.', '포물선은 위로 열리지 않고 아래로 열린다.')
+        data = document(*({'type': 'text', 'text': text} for text in fields))
+        issues = [i for i in validate(data, ROOT) if i.code == 'textbook-expression']
+        self.assertEqual([i.path for i in issues], [f'items[0].blocks[{i}].text' for i in range(4, 8)])
+        self.assertIn('아래로 열', issues[-1].message)
+
     def test_grade_long_and_short_simultaneous_equations(self):
         for term in ('연립방정식', '연립일차방정식', '피타고라스 정리', '피타고라스의 정리'):
             data = document({'type': 'question', 'text': term + '을 푸시오.'})
@@ -531,6 +583,30 @@ class PlanTest(unittest.TestCase):
                 issues = validate(document({'type': 'text', 'text': source}), ROOT)
                 self.assertEqual(any(i.code == 'segment-length-overline' and i.level == 'warning' for i in issues), expected)
 
+    def test_segment_numeric_equality_requires_length_context(self):
+        bad = ('선분 $AB$의 길이는 $AB=6$ cm이다.', '길이는 $AB=6$이다.', '길이는 $6=AB$이다.',
+               '$AB=6$ mm이다.', '$AB=6 cm$이다.', r'$AB=6\text{ cm}$이다.', '$AB=2.5$ m이다.',
+               '선분 $AB$의 길이는 $AB=6.5$이다.')
+        good = (r'선분 $AB$의 길이는 $\overline{AB}=6$ cm이다.', '선분 $AB$를 찾으시오.',
+                '행렬 $AB=6$을 비교하시오.', r'집합 $\{AB=6\}$을 말하시오.', '길이를 구한다. $AB=6$을 본다.',
+                '$AB=6$ kg이다.', '$AB=6$ cm²이다.', '상자의 길이는 $3$ cm이고 행렬 $AB=6$을 비교한다.',
+                r'각의 길이를 묻지 않는다. $\angle AB=6$이다.')
+        for source in (*bad, *good):
+            with self.subTest(source=source):
+                issues = validate(document({'type': 'text', 'text': source}), ROOT)
+                self.assertEqual(sum(i.code == 'segment-length-overline' for i in issues), int(source in bad))
+
+    def test_single_letter_m_warns_only_as_spaced_length_unit(self):
+        bad = ('철사의 길이는 $3 m$이다.', '학교까지의 거리는 $1.5 m$이다.', '$3 m$인 높이를 잰다.',
+               '선분의 길이가 $AB=3 m$이다.')
+        good = ('식은 $y=mx$이다.', '기울기는 $3 m$이다.', '철사의 길이는 $3m$으로 나타낸다.',
+                '철사의 길이는 $3$ m이다.', r'철사의 길이는 $3\mathrm{m}$이다.',
+                '길이를 확인했다. 기울기는 $3 m$이다.', '길이 관계는 $y=3 m x$이다.')
+        for source in (*bad, *good):
+            with self.subTest(source=source):
+                issues = validate(document({'type': 'text', 'text': source}), ROOT)
+                self.assertEqual(sum(i.code == 'math-unit-upright' for i in issues), int(source in bad))
+
     def test_screen_drawing_requires_student_space_in_the_same_item(self):
         question = {'type': 'question', 'text': '삼각형의 수직이등분선을 그어 봅시다.'}
         figure = {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40}
@@ -564,6 +640,50 @@ class PlanTest(unittest.TestCase):
         data['meta']['interactive'] = True
         self.assertFalse(any(i.code == 'interactive-drawing-missing' for i in validate(data, ROOT)))
 
+    def test_screen_drawing_handles_connected_verbs_and_graph_targets(self):
+        prompts = ('그래프를 그린 후 설명하시오.', '삼각형을 그린 뒤 두 변을 비교하시오.',
+                   '삼각형을 그려서 비교하시오.', '그래프를 그려 보시오.', '삼각형을 작도한 후 이유를 쓰시오.',
+                   '자료를 상자그림으로 나타내시오.', '자료를 히스토그램으로 나타내시오.',
+                   '자료를 도수분포다각형으로 나타내시오.', '관계를 그래프로 나타내시오.',
+                   '값을 수직선 위에 나타내시오.', '종이에 답을 쓰고, 그래프를 그린 뒤 설명하시오.')
+        controls = ('관계를 식으로 나타내시오.', '크기를 기호로 나타내시오.', '그려 놓은 그래프로 설명하시오.',
+                    '그려놓은 그림을 보시오.', '작도한 삼각형이 주어져 있다.', '인쇄본에 그리세요.',
+                    '공책에 그래프를 그린 후 설명하시오.', '종이 위에 상자그림으로 나타내시오.',
+                    '수직선 위에 나타낸 점의 값을 쓰시오.', '그래프로 나타내는 과정을 말하시오.')
+        for text in (*prompts, *controls):
+            with self.subTest(text=text):
+                data = document({'type': 'question', 'text': text})
+                data['meta']['interactive'] = True
+                issues = [i for i in validate(data, ROOT) if i.code == 'interactive-drawing-missing']
+                self.assertEqual(len(issues), int(text in prompts))
+                if issues:
+                    self.assertIn('같은 viewBox', issues[0].hint)
+                    self.assertIn('kind: "box"', issues[0].hint)
+                    self.assertNotIn('teacher_only', issues[0].hint)
+
+    def test_graph_representation_can_use_matching_plot(self):
+        cases = (
+            ('자료를 히스토그램으로 나타내시오.',
+             {'type': 'chart', 'kind': 'histogram', 'bins': [0, 1, 2], 'values': [0, 0], 'plot': {'answer': [1, 2]}}),
+            ('수를 수직선 위에 나타내시오.',
+             {'type': 'numberline', 'range': [-2, 2], 'step': 1, 'plot': {'answer': [1]}}),
+        )
+        for prompt, plot in cases:
+            with self.subTest(prompt=prompt):
+                data = document({'type': 'question', 'text': prompt}, plot)
+                data['meta']['interactive'] = True
+                self.assertFalse(any(i.code == 'interactive-drawing-missing' for i in validate(data, ROOT)))
+                data['items'][0]['blocks'][0]['text'] = '자료를 상자그림으로 나타내시오.'
+                self.assertTrue(any(i.code == 'interactive-drawing-missing' for i in validate(data, ROOT)))
+
+    def test_table_unit_warns_only_on_explicit_category_headers(self):
+        data = document({'type': 'table',
+                         'header': ['모둠 (단위: 분)', '시간(분)', '거리 (단위: m)', '번호(단위 : 번)', '항목 (비고)'],
+                         'rows': [['가 모둠', '$20$', '$4$', '$1$', '나']]},
+                        {'type': 'text', 'text': '통학 시간 (단위: 분)'})
+        warnings = [i for i in validate(data, ROOT) if i.code == 'table-category-unit']
+        self.assertEqual([i.path for i in warnings], ['items[0].blocks[0].header[0]', 'items[0].blocks[0].header[3]'])
+
     def test_frequency_graph_y_max_must_be_positive(self):
         for kind in ('histogram', 'polygon'):
             block = {'type': 'chart', 'kind': kind, 'bins': [0, 1, 2], 'values': [0, 0]}
@@ -594,6 +714,19 @@ class PlanTest(unittest.TestCase):
                        '"tolerance": 0.001', '### 공개 정책별 필드', '교사용 최종 답과 일치', '대입한 결과를 한 줄로'):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, authoring)
+
+    def test_drawing_and_statistics_guidance_keeps_answers_at_student_scale(self):
+        design = (ROOT / 'references/내용-설계.md').read_text(encoding='utf-8')
+        authoring = (ROOT / 'references/구성-쓰기.md').read_text(encoding='utf-8')
+        for phrase in ('같은 `viewBox`의 SVG', '그 행의 `answer`에 그림 객체', '`viewBox` 1단위 = 1mm',
+                       '현의 길이', '새 반직선의 방향을 정한 교점', 'kind: "box"', '가운데 약 절반',
+                       '상자 바깥 두 구간', '채점 요소에도 그림과 해석', '20~25mm', '쪽 아래 여백'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, design)
+        self.assertNotIn('`teacher_only: true`', design)
+        self.assertNotIn('남는 높이를 `kind: "draw"` 칸에 먼저', design)
+        self.assertIn('‘시간(분)’처럼 양을 나타내는 머리', authoring)
+        self.assertIn('범주를 나타내는 머리에는 단위를 붙이지 않는다', authoring)
 
     def test_all_warnings_nonblocking(self):
         data = document({'type': 'question', 'text': '1. 점 A □ ' + '가' * 161},

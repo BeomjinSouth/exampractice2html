@@ -47,6 +47,7 @@
     {"term": "탄젠트", "level": "중3"},
     {"term": "원주각", "level": "중3"},
     {"term": "산포도", "level": "중3"},
+    {"term": "분산", "level": "중3", "context": "평균|편차|변량|자료|산포|통계|분산(?:을|은|이)?\\s*(?:구하|구해|계산)", "skip_if_followed_by": "\\s*(?:투자|처리|배치)"},
     {"term": "표준편차", "level": "중3"},
     {"term": "사분위수", "level": "중3"},
     {"term": "상자그림", "level": "중3"},
@@ -60,8 +61,8 @@
     {"term": "복소수", "level": "고등"},
     {"term": "등차수열", "level": "고등"},
     {"term": "등비수열", "level": "고등"},
-    {"term": "미분", "level": "고등"},
-    {"term": "적분", "level": "고등"},
+    {"term": "미분", "level": "고등", "skip_if_followed_by": "[양류리]"},
+    {"term": "적분", "level": "고등", "skip_if_followed_by": "포"},
     {"term": "필요조건", "level": "고등"},
     {"term": "충분조건", "level": "고등"}
   ]

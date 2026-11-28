@@ -77,9 +77,9 @@ class StatusTest(unittest.TestCase):
         for path in (self.student, self.teacher, self.student.with_suffix('.pdf'), self.teacher.with_suffix('.pdf')):
             self.assertIn(str(path), output)
 
-    def build_education_fixture(self, **settings):
+    def build_education_fixture(self, text='관계식을 구하시오.', **settings):
         data = {'version': 1, 'meta': {'title': '활동', 'kind': '연습', 'sync': False, **settings},
-                'items': [{'id': 'q1', 'blocks': [{'type': 'question', 'text': '관계식을 구하시오.'}]}]}
+                'items': [{'id': 'q1', 'blocks': [{'type': 'question', 'text': text}]}]}
         self.source.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
         with patch.dict(os.environ, {'SHEET_FONT_DIR': str(self.folder)}), contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(sheet_build.cmd_build(self.folder), 0, out.getvalue())
@@ -90,14 +90,20 @@ class StatusTest(unittest.TestCase):
                 review.write('## 화면 확인\n폰·태블릿 확인.\n')
             self.stamp(self.review, 3)
 
+    def record_first_settings(self, snapshot):
+        """첫 조립을 흉내 내어 조립 기록의 사본과 읽기용 파일을 함께 바꾼다."""
+        record = json.loads(self.build.read_text(encoding='utf-8'))
+        record['first_settings'] = snapshot
+        self.build.write_text(json.dumps(record, ensure_ascii=False), encoding='utf-8')
+        (self.out / '처음-설정.json').write_bytes(sheet_build.json_bytes(snapshot))
+
     def test_education_downgrade_needs_exact_records_for_each_change(self):
         self.build_education_fixture(reveal='교사만', interactive=False)
-        first = self.out / '처음-설정.json'
-        first.write_text(json.dumps({
+        self.record_first_settings({
             'version': 1, 'meta': {'kind': '연습', 'interactive': True, 'reveal': '시도 후'},
             'items': 2, 'auto_slots': 3, 'written_boxes': 2, 'pen_figures': 1, 'draw_boxes': 1,
             'forms': {'q1': {'fraction_form': '기약분수', 'radical_form': '유리화'}},
-        }, ensure_ascii=False), encoding='utf-8')
+        })
         result, output = self.status()
         self.assertEqual(result, 1, output)
         self.assertIn('✗ 4 검토', output)
@@ -136,12 +142,43 @@ class StatusTest(unittest.TestCase):
 
     def test_corrupt_first_settings_does_not_count_as_legacy(self):
         self.build_education_fixture()
-        (self.out / '처음-설정.json').write_text('{}', encoding='utf-8')
+        self.record_first_settings({})
         result, output = self.status()
         self.assertEqual(result, 1, output)
         self.assertIn('✗ 4 검토', output)
         self.assertIn('현재 교육 설정을 비교할 수 없습니다', output)
         self.assertNotIn('비교를 건너뜁니다', output)
+
+    def test_deleting_or_editing_first_settings_file_keeps_the_recorded_baseline(self):
+        self.build_education_fixture(reveal='시도 후')
+        first = self.out / '처음-설정.json'
+        first.unlink()
+        self.build_education_fixture(reveal='교사만')
+        self.assertEqual(json.loads(first.read_text(encoding='utf-8'))['meta']['reveal'], '시도 후')
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('- 공개 정책: 시도 후 → 교사만 — 까닭이 없습니다', output)
+        lowered = json.loads(first.read_text(encoding='utf-8'))
+        lowered['meta']['reveal'] = '교사만'
+        first.write_text(json.dumps(lowered, ensure_ascii=False), encoding='utf-8')
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('- 공개 정책: 시도 후 → 교사만 — 까닭이 없습니다', output)
+        self.assertIn('조립 기록의 처음 설정으로 비교했습니다', output)
+
+    def test_answer_form_read_from_the_prompt_is_part_of_the_baseline(self):
+        blank = ' {{|$\\frac{1}{2}$}}'
+        self.build_education_fixture('기약분수로 나타내시오.' + blank)
+        self.assertEqual(json.loads((self.out / '처음-설정.json').read_text(encoding='utf-8'))['forms'],
+                         {'q1': {'fraction_form': '기약분수'}})
+        self.build_education_fixture('분수로 나타내시오.' + blank)
+        result, output = self.status()
+        self.assertEqual(result, 1, output)
+        self.assertIn('- q1 fraction_form: 기약분수 → 분수 — 까닭이 없습니다', output)
+        self.build_education_fixture('기약분수로 나타내시오.' + blank)
+        result, output = self.status()
+        self.assertEqual(result, 0, output)
+        self.assertNotIn('교육 설정 변경', output)
 
     def test_old_worksheet_without_first_settings_reports_skip(self):
         result, output = self.status()

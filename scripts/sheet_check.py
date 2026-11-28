@@ -445,7 +445,10 @@ def _equations(text):
     parts = re.split(r'(\$[^$\r\n]+\$)', str(text))
     for index, part in enumerate(parts):
         if index % 2:
-            yield _flat(part[1:-1])
+            whole = _flat(part[1:-1])
+            yield whole
+            # 한 수식 안에 쉼표·쌍반점으로 늘어놓은 식($x=1,\ y=2$)도 하나씩 본다.
+            yield from (piece for piece in re.split(r'[,;]', whole) if '=' in piece and piece != whole)
         else:
             normalized = unicodedata.normalize('NFKC', part).lower()
             # 소수점은 수식 안에 붙이고, 문장을 끝내는 마침표는 경계로 둔다.
@@ -1472,7 +1475,7 @@ _POLICY_MEANINGS = {
 }
 
 
-def _education_changes(path, source, student, *, edited):
+def _education_changes(first_settings, source, student, *, edited):
     from sheet_build import EDUCATION_COUNT_LABELS, EDUCATION_FORM_KEYS, _Document, education_settings
 
     def validated(settings):
@@ -1489,7 +1492,7 @@ def _education_changes(path, source, student, *, edited):
             raise ValueError('교육 설정 기록 형식이 올바르지 않습니다.')
         return settings
 
-    first = validated(_json(path))
+    first = validated(first_settings)
     current = validated(education_settings(_json(source), _Document(student.read_text(encoding='utf-8-sig')), edited=edited))
     before, after = first['meta'], current['meta']
     changes = []
@@ -1883,15 +1886,26 @@ def cmd_status(folder: Path) -> int:
 
     from sheet_build import FIRST_SETTINGS_FILE
     first_settings = out / FIRST_SETTINGS_FILE
+    # 조립 기록의 사본이 기준이다. 읽기용 파일을 지우거나 고쳐도 비교 기준은 바뀌지 않는다.
+    recorded_first = build.get('first_settings') if isinstance(build, dict) else None
     education_note, education_error = '', ''
     education_changes, education_lines = [], []
-    if not first_settings.exists():
+    if recorded_first is None and not first_settings.exists():
         education_note = f'{FIRST_SETTINGS_FILE}이 없어 교육 설정 비교를 건너뜁니다'
     elif files_ok and report is not None:
         try:
-            education_changes = _education_changes(first_settings, source, student, edited=edited)
+            baseline = recorded_first if recorded_first is not None else _json(first_settings)
+            education_changes = _education_changes(baseline, source, student, edited=edited)
         except (OSError, ValueError, KeyError, AttributeError, TypeError, StopIteration) as exc:
             education_error = f'{FIRST_SETTINGS_FILE}과 현재 교육 설정을 비교할 수 없습니다 ({exc})'
+        else:
+            try:
+                same_file = _json(first_settings) == recorded_first
+            except (OSError, ValueError):
+                same_file = False
+            if recorded_first is not None and not same_file:
+                education_note = (f'{FIRST_SETTINGS_FILE}이 조립 기록과 달라 조립 기록의 처음 설정으로 비교했습니다'
+                                  ' · 다시 조립하면 파일이 되살아납니다')
 
     review_path = out / "검토.md"
     review_ok, review_note = False, "검토.md가 없습니다"

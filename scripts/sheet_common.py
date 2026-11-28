@@ -166,7 +166,12 @@ def find_usable_python():
 
 
 def python_sheet_command(executable, command):
-    return f'"{executable}" -X utf8 "{ROOT / "scripts/sheet.py"}" {command}'
+    executable, script = str(executable), str(ROOT / 'scripts/sheet.py')
+    if sys.platform == 'win32':
+        # PowerShell expands $ and backticks even inside double-quoted paths.
+        executable, script = (part.replace('`', '``').replace('$', '`$') for part in (executable, script))
+        return f'& "{executable}" -X utf8 "{script}" {command}'
+    return f'"{executable}" -X utf8 "{script}" {command}'
 
 
 def engine_script(root=ROOT):
@@ -183,6 +188,67 @@ FOREIGN_CODE_FIX = '조립된 HTML을 손으로 고치지 말고 구성.json을 
 _URL_ATTRS = frozenset('href xlink:href src action formaction data poster background cite'.split())
 _URL_LEADING = ''.join(map(chr, range(33)))
 _REVEAL_DATA = re.compile(r'[A-Za-z0-9+/]+={0,2}')
+_STYLE_IDS = frozenset(('sheet-css', 'sheet-fonts', 'sheet-theme', 'sheet-user'))
+_CSS_ESCAPE = r'\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f0-9a-fA-F])'
+_CSS_IDENT = rf'(?:[-_a-zA-Z0-9]|[^\x00-\x7f]|{_CSS_ESCAPE})+'
+_CSS_TOKEN = re.compile(rf'''/\*[\s\S]*?(?:\*/|\Z)|(?P<string>"(?:\\[\s\S]|[^"\\])*"?|'(?:\\[\s\S]|[^'\\])*'?)
+                            |@(?P<at>{_CSS_IDENT})|(?P<ident>{_CSS_IDENT})|(?P<paren>[()])''', re.X)
+_CSS_URL = re.compile(r'''\s*\(\s*(?:"((?:\\[\s\S]|[^"\\])*)"|'((?:\\[\s\S]|[^'\\])*)'|((?:\\[\s\S]|[^\\)])*))\s*(?:\)|\Z)''')
+_CSS_UNESCAPE = re.compile(r'\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\r\n\f])?|(\r\n|[\r\n\f])|([\s\S]))')
+
+
+def _css_unescape(value):
+    def replace(match):
+        if match[1]:
+            codepoint = int(match[1], 16)
+            return chr(codepoint) if 0 < codepoint <= 0x10ffff else '\ufffd'
+        return '' if match[2] else match[3]
+    return _CSS_UNESCAPE.sub(replace, value)
+
+
+def _external_css_resource(value):
+    value = _css_unescape(value).strip(_URL_LEADING)
+    return bool(value and not value.lower().startswith(('data:', '#')))
+
+
+def _style_resource_issues(css):
+    """Inspect CSS tokens without mistaking comments or ordinary strings for resources."""
+    problems, skip_until, functions, last_ident = [], 0, [], None
+    image_sets = ('image-set', '-webkit-image-set')
+    for token in _CSS_TOKEN.finditer(css):
+        if token.start() < skip_until:
+            continue
+        if token['at'] and _css_unescape(token['at']).lower() == 'import':
+            problems.append('<style>에 @import가 있습니다.')
+        if token['ident']:
+            name = _css_unescape(token['ident']).lower()
+            if functions and functions[-1] in image_sets and name == 'var' and re.match(r'\s*\(', css[token.end():]):
+                problems.append('<style>의 image-set()에 외부 주소일 수 있는 변수가 있습니다.')
+            if name == 'url':
+                url = _CSS_URL.match(css, token.end())
+                if url:
+                    skip_until = url.end()
+                    value = next(part for part in url.groups() if part is not None)
+                    if _external_css_resource(value):
+                        problems.append('<style>의 url()이 외부 자원을 가리킵니다.')
+                    last_ident = None
+                    continue
+            last_ident = (name, token.end())
+        elif token['paren']:
+            if token['paren'] == '(':
+                name = last_ident[0] if last_ident and not css[last_ident[1]:token.start()].strip() else ''
+                functions.append(name)
+            elif functions:
+                functions.pop()
+            last_ident = None
+        else:
+            if token['string'] and functions and functions[-1] in image_sets:
+                text = token['string']
+                value = text[1:-1] if len(text) > 1 and text[-1] == text[0] else text[1:]
+                if _external_css_resource(value):
+                    problems.append('<style>의 image-set()이 외부 자원을 가리킵니다.')
+            last_ident = None
+    return problems
 
 
 class ForeignCodeAudit(HTMLParser):
@@ -192,13 +258,27 @@ class ForeignCodeAudit(HTMLParser):
         self.problems = []
         self.engine_hash = None
         self.seen = set()
+        self.seen_styles = set()
         self.script = None
         self.body = []
+        self.style_body = None
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
-        if tag in ('iframe', 'object', 'embed'):
+        if tag in ('iframe', 'object', 'embed', 'base'):
             self.problems.append(f'엔진이 만들지 않은 <{tag}>가 있습니다.')
+        if tag == 'meta' and any(name == 'http-equiv' and (value or '').strip().lower() == 'refresh'
+                                 for name, value in attrs):
+            self.problems.append('주소를 이동시키는 <meta http-equiv="refresh">가 있습니다.')
+        if tag == 'style':
+            ids = [value for name, value in attrs if name == 'id']
+            ident = ids[0] if len(ids) == 1 else None
+            if ident not in _STYLE_IDS or ident in self.seen_styles:
+                label = f' ({ident})' if ident and re.fullmatch(r'[\w.-]{1,80}', ident) else ''
+                self.problems.append(f'허용되지 않거나 중복된 <style>{label}가 있습니다.')
+            if ident in _STYLE_IDS:
+                self.seen_styles.add(ident)
+            self.style_body = []
         for name, value in attrs:
             if tag == 'link' and name == 'href' and value and value.strip() and not value.lstrip().startswith('#'):
                 self.problems.append('HTML 밖의 자원을 가리키는 <link>가 있습니다.')
@@ -228,8 +308,13 @@ class ForeignCodeAudit(HTMLParser):
     def handle_data(self, data):
         if self.script:
             self.body.append(data)
+        elif self.style_body is not None:
+            self.style_body.append(data)
 
     def handle_endtag(self, tag):
+        if tag == 'style' and self.style_body is not None:
+            self.problems.extend(_style_resource_issues(''.join(self.style_body)))
+            self.style_body = None
         if tag != 'script' or not self.script:
             return
         body = ''.join(self.body)
@@ -243,6 +328,8 @@ class ForeignCodeAudit(HTMLParser):
         problems = list(self.problems)
         if self.script:
             problems.append(f'{self.script} 스크립트가 닫히지 않았습니다.')
+        if self.style_body is not None:
+            problems.append('<style>이 닫히지 않았습니다.')
         if self.engine_hash is not None:
             # 예전 조립 기록에는 스크립트 해시가 없다. 그때는 내용 비교를 건너뛰고 덧붙인 요소만 본다.
             # 지금 설치본과 비교하면 스킬을 업데이트한 뒤 예전 활동지의 브라우저 편집본을 derive할 수 없다.

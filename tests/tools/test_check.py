@@ -255,6 +255,23 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertFalse(previous.exists())
         self.assertEqual((folder / '검사/_이전/report.json').read_text(encoding='utf-8'), '이전 결과')
 
+    def test_check_warns_when_grow_gives_short_text_most_of_a_page(self):
+        plan = {'version': 1, 'meta': {'title': '답 칸 높이', 'interactive': False},
+                'items': [{'id': 'q1', 'blocks': [{'type': 'answer', 'rows': [
+                    {'label': '선분', 'answer': '$OC$', 'lines': 2, 'grow': True},
+                    {'label': '그림', 'answer': '작도 그림', 'kind': 'draw', 'height_mm': 20, 'grow': True},
+                    {'label': '고정 칸', 'answer': '짧은 답', 'lines': 10}]}]}]}
+        folder = self.run_root / '지나친-늘이기'
+        folder.mkdir()
+        (folder / '구성.json').write_text(json.dumps(plan, ensure_ascii=False), encoding='utf-8')
+        with patch.dict(os.environ, {'SHEET_FONT_DIR': str(folder)}), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sheet_build.cmd_build(folder), 0, output.getvalue())
+        self.assertIn('grow-excess', self.inspect(folder, 0))
+        report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+        warnings = [p for p in report['problems'] if p['code'] == 'grow-excess']
+        self.assertEqual([(p['level'], p['page'], p['item']) for p in warnings], [('warning', 1, 'q1')])
+        self.assertIn('1번 답 칸', warnings[0]['msg'])
+
     def test_answer_in_student_source(self):
         answer = '두 대각선은 서로 수직으로 만나기 때문입니다.'
         broken = self.student_text.replace('</body>', '<p>' + answer + '</p></body>')

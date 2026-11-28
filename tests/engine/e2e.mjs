@@ -1374,6 +1374,127 @@ try {
       await tab.js('sheet.clearAnswers()');
     });
   });
+  async function buildEditorCase(name, blocks, solutions = []) {
+    const folder = path.join(work, name), title = `편집 시험 ${name}`;
+    const cli = (command, target) => run(process.env.PYTHON || 'python',
+      ['-B', '-X', 'utf8', path.join(here, '../../scripts/sheet.py'), command, target],
+      {env:{...process.env, SHEET_TEST_SALT:salt, SHEET_FONT_DIR:work}});
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, '구성.json'), quote({ version:1, meta:{title, reveal:'바로', sync:false},
+      items:blocks, teacher:{memo:['메모는 처음에 둡니다.'], solutions} }));
+    await cli('build', folder);
+    const teacher = path.join(folder, `${title} (교사용).html`), student = path.join(folder, `${title}.html`);
+    return { teacher, student, derive:() => cli('derive', teacher), open:p => pathToFileURL(p).href };
+  }
+  async function editField(tab, selector, value) {
+    await tab.mouseClick(selector, 2);
+    assert.notEqual(await draft(tab), undefined, `편집 입력: ${selector}`);
+    await paste(tab, value); await tab.key('Enter');
+    assert.equal(await draft(tab), undefined, '편집 내용 확정');
+  }
+  await test('표 머리·행 라벨·표 자체 단위를 고쳐도 저장과 derive 판별이 같음', async () => {
+    const files = await buildEditorCase('표-단위', [{id:'q1', blocks:[
+      {type:'table', header:['반','최솟값','최댓값'], rows:[['1반','{{|$45$}}','{{|$90$}}'], ['2반','{{|$50$}}','{{|$95$}}']]},
+      {type:'table', unit:'점', header:['반','최솟값'], rows:[['1반','{{|$45$}}']]},
+      {type:'answer', rows:[{label:'길이', answer:'$4$', group:'length'}, {answer:'$5$', group:'length'}]},
+    ]}]);
+    const check = (tab, id, values) => tab.js(`${quote(values)}.map(value=>sheet.answer(${quote(id)},value))`);
+    await usingTab(files.open(files.student), async tab => {
+      assert.deepEqual(await check(tab,'q1.5',['45','45점','45명','45cm','45분']),[true,true,false,false,false]);
+      await tab.js('sheet.clearAnswers()');
+    });
+    const edited = await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      const table = `${item('q1')} table.ws-data:first-child`;
+      await editField(tab, `${table} thead th:nth-child(2)`, '최솟값 (점)');
+      assert.deepEqual(await check(tab,'q1.1',['45','45점','45명']),[true,true,false]);
+      assert.deepEqual(await check(tab,'q1.3',['50점','50명']),[true,false]);
+      await editField(tab, `${table} tbody tr:first-child td:first-child`, '1반 (명)');
+      assert.deepEqual(await check(tab,'q1.2',['90명','90점']),[true,false]);
+      await tab.click(action('undo'));
+      assert.deepEqual(await check(tab,'q1.2',['90명','90점']),[true,true]);
+      await editField(tab, `${table} tbody tr:first-child td:first-child`, '1반 (명)');
+      await tab.click(action('table-unit', item('q1')));
+      await paste(tab, '점수'); await tab.key('Enter');
+      assert.equal(await tab.js('document.querySelector(".ws-edit-input").getAttribute("aria-invalid")'), 'true');
+      await tab.key('Escape');
+      await tab.click(action('table-unit', item('q1')));
+      await paste(tab, '분'); await tab.key('Enter');
+      await editField(tab, '.ws-lab-text', '길이 (cm)');
+      await tab.js('sheet.clearAnswers()');
+      return tab.js('[sheet.serialize(), sheet.exportStudent()]');
+    });
+    await fs.writeFile(files.teacher, edited[0]);
+    await fs.writeFile(files.student, edited[1]);
+    for (const derived of [false, true]) {
+      if (derived) await files.derive();
+      await usingTab(files.open(files.student), async tab => {
+        for (const [id, inputs, expected] of [
+          ['q1.1',['45','45점','45명','45cm','45분'],[true,true,false,false,false]],
+          ['q1.2',['90명','90분'],[true,false]], ['q1.3',['50점','50분'],[true,false]],
+          ['q1.4',['95분','95명'],[true,false]], ['q1.5',['45점','45분'],[true,false]],
+          ['q1.6',['4cm','4분'],[true,false]], ['q1.7',['5cm','5분'],[true,false]],
+        ]) assert.deepEqual(await check(tab,id,inputs),expected,`${derived}: ${id}`);
+        await tab.js('sheet.clearAnswers()');
+      });
+    }
+  });
+  const editorQuestions = ['q1','q2','q3','q4'].map((id, i) => ({id, blocks:[{type:'question', text:`발문 ${i+1}` }]}));
+  const editorSolutions = editorQuestions.map(({id}, i) => ({item:id, answer:`예시 ${i+1}`, steps:[`풀이 ${i+1}`], rubric:[`기준 ${i+1}`]}));
+  const solution = id => `.ws-item[data-solution-for="${id}"]`;
+  const solutionOrder = tab => tab.js(`[...document.querySelectorAll('#sheet-pages .ws-item[data-solution-for]')]
+    .map(n=>[n.dataset.solutionFor,n.querySelector('.ws-t-q').textContent])`);
+  await test('문항을 옮기면 교사용 풀이의 순서와 번호가 저장 후에도 같음', async () => {
+    const files = await buildEditorCase('재배열', editorQuestions, editorSolutions);
+    const expected = [['q1','1번'],['q2','2번'],['q4','3번'],['q3','4번']];
+    const saved = await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      await tab.click(action('up', item('q4')));
+      assert.equal(await tab.js(`document.querySelector(${quote(`${item('q4')} .ws-qn`)}).textContent`), '3.');
+      assert.deepEqual(await solutionOrder(tab), expected);
+      return tab.js('sheet.serialize()');
+    });
+    await fs.writeFile(files.teacher, saved);
+    await usingTab(files.open(files.teacher), async tab => assert.deepEqual(await solutionOrder(tab), expected));
+    await files.derive();
+    await usingTab(files.open(files.teacher), async tab => assert.deepEqual(await solutionOrder(tab), expected));
+    await usingTab(files.open(files.student), async tab => {
+      await tab.click(action('reveal-solution', item('q4')));
+      assert.match(await tab.js(`document.querySelector(${quote(`${item('q4')} .ws-solution`)}).textContent`), /예시 4.*풀이 4/s);
+    });
+  });
+  await test('복제 문항의 풀이를 고쳐 저장하면 브라우저와 derive에서 모두 열림', async () => {
+    const files = await buildEditorCase('복제', editorQuestions.slice(0,2), editorSolutions.slice(0,2));
+    const edited = await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      await tab.click(action('duplicate', item('q1')));
+      assert.deepEqual(await solutionOrder(tab), [['q1','1번'],['q1-copy-1','2번'],['q2','3번']]);
+      await tab.click(action('undo'));
+      assert.deepEqual(await solutionOrder(tab), [['q1','1번'],['q2','2번']]);
+      await tab.click(action('duplicate', item('q1')));
+      await editField(tab, `${solution('q1-copy-2')} .ws-t-steps li`, '복제 문항만의 풀이');
+      return tab.js('[sheet.serialize(), sheet.exportStudent()]');
+    });
+    await fs.writeFile(files.teacher, edited[0]);
+    await fs.writeFile(files.student, edited[1]);
+    let browser;
+    for (const derived of [false, true]) {
+      if (derived) await files.derive();
+      const texts = await usingTab(files.open(files.student), async tab => {
+        const found = [];
+        for (const id of ['q1','q1-copy-2','q2']) {
+          await tab.click(action('reveal-solution', item(id)));
+          found.push(await tab.js(`document.querySelector(${quote(`${item(id)} .ws-solution`)}).textContent`));
+        }
+        assert.match(found[0], /풀이 1/);
+        assert.match(found[1], /복제 문항만의 풀이.*기준 1/s);
+        assert.match(found[2], /풀이 2/);
+        return found;
+      });
+      if (derived) assert.deepEqual(texts, browser);
+      else browser = texts;
+    }
+  });
   await test('MathML 미지원 안내는 교사·학생의 두 화면에만 표시', async () => {
     const visible = tab => tab.js('!!document.querySelector(".ws-math-notice")?.checkVisibility()');
     const warn = html => html.replace('</head>', '<style>math, mfrac, msup, math * { display:inline !important; }</style></head>');

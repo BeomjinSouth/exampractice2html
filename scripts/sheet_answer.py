@@ -54,12 +54,19 @@ def number_parts(value):
     return [number, suffix]
 
 
-def inferred_unit(tail, column='', row=''):
-    # 표의 명시 단위가 문장 뒤의 모호한 단위보다 우선한다.
+def normalized_unit(value):
+    unit = norm(value) if isinstance(value, str) else ''
+    return '°' if unit == '도' else unit if unit in UNITS else ''
+
+
+def inferred_unit(tail, column='', row='', table=''):
+    # 열 머리 → 행 라벨 → 표 전체 → 빈칸 뒤 순으로 본다.
     for heading in (column, row):
         match = re.search(r'\(([^()]*)\)\s*$', unicodedata.normalize('NFKC', heading))
-        if match and (unit := norm(match[1])) in UNITS:
-            return '°' if unit == '도' else unit
+        if match and (unit := normalized_unit(match[1])):
+            return unit
+    if unit := normalized_unit(table):
+        return unit
     particles = r'(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?'
     text = unicodedata.normalize('NFKC', tail).lower().lstrip(' \t')
     for unit in sorted(UNITS, key=len, reverse=True):

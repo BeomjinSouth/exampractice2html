@@ -183,6 +183,29 @@ class StatusTest(unittest.TestCase):
                 else:
                     self.assertNotIn('textbook-expression', output.getvalue())
 
+    def test_edited_text_checks_use_document_title_and_edited_header_unit(self):
+        start = '<html data-role="teacher" data-saved-at="2026-01-01"><head><title>'
+        body = '</title></head><body><div id="sheet-src">{head}<section class="ws-item" data-id="q1">' \
+               '<p data-src="두 호의 교점을 점 $A$라고 하시오.">발문</p></section></div></body></html>'
+        for title, unit, edited_unit in [('크기가 같은 각의 작도', None, None),
+                                         ('기본 도형', '원과 부채꼴', '작도와 합동')]:
+            with self.subTest(title=title, unit=edited_unit):
+                head = (f'<section class="ws-item" data-id="head"><table class="ws-head"><tbody><tr>'
+                        f'<td data-src="단원 : {edited_unit}">단원 : {edited_unit}</td>'
+                        '</tr></tbody></table></section>') if edited_unit else ''
+                build = json.loads(self.build.read_text(encoding='utf-8'))
+                build.update(grade='중1', plan_warnings={})
+                if unit is not None:
+                    build['unit'] = unit
+                else:
+                    build.pop('unit', None)
+                self.build.write_text(json.dumps(build), encoding='utf-8')
+                self.teacher.write_text(start + title + body.format(head=head), encoding='utf-8')
+                self.stamp(self.teacher, 1)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    sheet_check.cmd_status(self.folder)
+                self.assertIn('textbook-expression 1건', output.getvalue())
+
     def test_warning_review_rejects_placeholders_and_accepts_punctuation(self):
         from sheet_plan import Issue
         self.fake_plan.load_plan = lambda folder: ({}, b'', [Issue('warning', '$', '', '', 'test-warning')])

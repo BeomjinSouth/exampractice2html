@@ -398,9 +398,14 @@
 
   function numberItems() {
     let question = 0, blank = 0;
-    for (const item of studentItems) {
+    const order = new Map(), numbers = new Map();
+    for (const [index, item] of studentItems.entries()) {
+      const id = item.dataset.id;
+      order.set(id, index);
       for (const el of all(item, '.ws-qn')) {
-        if (answersOn() || !el.closest('.ws-teacher-only')) el.textContent = `${++question}.`;
+        if (el.closest(privateContent)) continue;
+        el.textContent = `${++question}.`;
+        if (!numbers.has(id)) numbers.set(id, question);
       }
       const local = new Map();
       // 정답 안의 글자나 교사 전용 그림은 학생의 빈칸 번호를 소비하지 않는다.
@@ -416,6 +421,19 @@
         const value = originalMarks.get(el);
         el.textContent = local.get(value) ?? value;
       }
+    }
+    orderSolutions(order, numbers);
+  }
+  function orderSolutions(order, numbers) {
+    // 메모와 연결되지 않은 교사 쪽은 제자리에 두고, 연결된 풀이만 문항 순서에 맞춘다.
+    const linked = section => order.has(section.dataset.solutionFor);
+    const solutions = teacherItems.filter(linked).sort((a, b) => order.get(a.dataset.solutionFor) - order.get(b.dataset.solutionFor));
+    let index = 0;
+    for (const [i, section] of teacherItems.entries()) {
+      if (!linked(section)) continue;
+      const current = teacherItems[i] = solutions[index++];
+      const id = current.dataset.solutionFor, label = current.querySelector('.ws-t-q');
+      if (label) label.textContent = numbers.has(id) ? `${numbers.get(id)}번` : `${id} 풀이`;
     }
   }
   function prepareBoxes(items) {
@@ -470,11 +488,11 @@
   function layout() {
     if (!main) return;
     for (const node of all(main, '.ws-tools')) node.remove();
+    numberItems();
     src.append(...studentItems);
     teacherSrc?.append(...teacherItems);
     main.replaceChildren();
     pages = [];
-    numberItems();
     prepareBoxes([...studentItems, ...teacherItems]);
     const visible = studentItems.filter(item => answersOn() || !item.matches('.ws-teacher-only'));
     if (solve?.layoutFlow(main, visible)) { solve.afterLayout(); return; }
@@ -751,13 +769,26 @@
           const tools = make('div', 'ws-tools ws-item-tools');
           tools.setAttribute('role', 'group');
           tools.setAttribute('aria-label', '문항 편집');
+          const linked = list === teacherItems && studentItems.some(node => node.dataset.id === item.dataset.solutionFor);
           tools.append(
-            button('↑', 'up', () => focusTool('up', () => move(i - 1)), { title: '위로 이동', disabled: !canMove(i - 1) }),
-            button('↓', 'down', () => focusTool('down', () => move(i + 1)), { title: '아래로 이동', disabled: !canMove(i + 1) }),
+            button('↑', 'up', () => focusTool('up', () => move(i - 1)), { title: '위로 이동', disabled: linked || !canMove(i - 1) }),
+            button('↓', 'down', () => focusTool('down', () => move(i + 1)), { title: '아래로 이동', disabled: linked || !canMove(i + 1) }),
             button(firstColumn ? '새 단에서' : '새 쪽에서', 'break', () => focusTool('break', () => changeAttribute(item, 'data-break', item.dataset.break === '1' ? null : '1')), { pressed: item.dataset.break === '1', disabled: span(item) }),
-            button('복제', 'duplicate', () => focusTool('duplicate', () => duplicateItem(list, item, i))),
+            button('복제', 'duplicate', () => focusTool('duplicate', () => duplicateItem(list, item, i)), { disabled: linked }),
             button('삭제', 'delete', () => focusTool('delete', () => change(() => { list.splice(i, 1); item.remove(); }, () => list.splice(i, 0, item)))),
           );
+          if (list === studentItems && solve) {
+            const tables = all(item, 'table.ws-data').filter(table => table.querySelector('th[data-src], td[data-src]') &&
+              table.querySelector('.ws-blank[data-slot]') && !table.closest(privateContent));
+            if (tables.length) {
+              // 단위 단추를 붙인 막대가 길어져도 표의 첫 줄을 가리지 않는다.
+              Object.assign(tools.style, { marginBlockStart: '0', top: 'auto', bottom: '100%', transform: 'none' });
+            }
+            for (const [index, table] of tables.entries()) {
+              const label = tables.length > 1 ? `표 ${index + 1} 단위` : '표 단위';
+              tools.append(button(label, 'table-unit', () => startDraft(table, label)));
+            }
+          }
           item.append(tools);
         }
         for (const box of all(item, '.ws-ans').filter(node => node.getClientRects().length)) {
@@ -791,12 +822,8 @@
       }
     }
   }
-  function duplicateItem(list, item, index) {
+  function cloneItem(item, id) {
     const copy = cleanItem(item, true);
-    const existing = new Set([...studentItems, ...teacherItems].map(node => node.dataset.id));
-    const base = item.dataset.id || 'item';
-    let id;
-    do { id = `${base}-copy-${++copySerial}`; } while (existing.has(id));
     copy.dataset.id = id;
     const ids = new Map();
     for (const el of [copy, ...all(copy, '[id]')]) {
@@ -813,8 +840,30 @@
         else if (attr.localName === 'href' && ids.has(value.slice(1)) && value.startsWith('#')) attr.value = `#${ids.get(value.slice(1))}`;
       }
     }
+    return copy;
+  }
+  function duplicateItem(list, item, index) {
+    const existing = new Set([...studentItems, ...teacherItems].map(node => node.dataset.id));
+    const base = item.dataset.id || 'item';
+    let id;
+    do { id = `${base}-copy-${++copySerial}`; } while (existing.has(id));
+    const copy = cloneItem(item, id);
+    const solutionIndex = list === studentItems ? teacherItems.findIndex(node => node.dataset.solutionFor === base) : -1;
+    let solution;
+    if (solutionIndex !== -1) {
+      let privateId = `t-${id}`;
+      while (existing.has(privateId)) privateId = `t-${privateId}`;
+      solution = cloneItem(teacherItems[solutionIndex], privateId);
+      solution.dataset.solutionFor = id;
+    }
     solve?.copiedItem(item, copy);
-    change(() => list.splice(index + 1, 0, copy), () => { list.splice(index + 1, 1); copy.remove(); });
+    change(() => {
+      list.splice(index + 1, 0, copy);
+      if (solution) teacherItems.splice(solutionIndex + 1, 0, solution);
+    }, () => {
+      list.splice(list.indexOf(copy), 1); copy.remove();
+      if (solution) { teacherItems.splice(teacherItems.indexOf(solution), 1); solution.remove(); }
+    });
   }
 
   function cancelDraft() {
@@ -830,7 +879,7 @@
     const top = clamp(anchor.top, Math.max(8, rect(toolbar).bottom), Math.max(8, window.innerHeight - 40));
     Object.assign(draft.input.style, { width: `${width}px`, left: `${left}px`, top: `${top}px` });
   }
-  function startDraft(target) {
+  function startDraft(target, unitLabel) {
     if (draft?.target === target) return;
     cancelDraft();
     announce();
@@ -844,11 +893,12 @@
       fit();
     });
     input.dataset.sheetRuntime = '';
-    input.setAttribute('aria-label', '원본 표기');
+    input.setAttribute('aria-label', unitLabel || '원본 표기');
     input.setAttribute('aria-describedby', 'sheet-status');
-    input.value = target.dataset.src;
+    input.value = (unitLabel ? target.dataset.tableUnit : target.dataset.src) ?? '';
+    if (unitLabel) input.placeholder = '예: 점 (없으면 비워 두세요)';
     input.spellcheck = false;
-    draft = { target, input, composing: false };
+    draft = { target, input, unitLabel, composing: false };
     document.body.append(input);
     positionDraft();
     fit();
@@ -865,10 +915,16 @@
   }
   function commitDraft() {
     if (!draft) return true;
-    const { target, input } = draft;
-    const source = input.value, oldSrc = target.dataset.src, oldHTML = target.innerHTML;
-    if (source === oldSrc) { cancelDraft(); return true; }
+    const { target, input, unitLabel } = draft;
+    const source = input.value;
     try {
+      if (unitLabel) {
+        const edits = solve.editTableUnit(target, source);
+        if (edits) change(edits.apply, edits.revert); else cancelDraft();
+        return true;
+      }
+      const oldSrc = target.dataset.src, oldHTML = target.innerHTML;
+      if (source === oldSrc) { cancelDraft(); return true; }
       const blanks = [];
       const markup = renderMarkup(source, blank => blanks.push(blank));
       const edits = solve?.editMarkup(target, source, markup, blanks);

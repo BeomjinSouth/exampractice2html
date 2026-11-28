@@ -44,9 +44,9 @@
   },
   "table": {
     "description": "자료표 또는 빈칸 채우기 표",
-    "fields": {"header": "열 제목 배열", "rows": "행×열의 칸 배열", "widths_mm": "열별 양수 너비(mm) 배열"},
+    "fields": {"header": "열 제목 배열", "rows": "행×열의 칸 배열", "widths_mm": "열별 양수 너비(mm) 배열", "unit": "수 빈칸을 판별할 때 쓰는 표 전체 단위(예: 점). 열 머리·행 라벨에 단위가 있으면 그 단위가 우선"},
     "required": ["header", "rows"], "limits": {"header[]": 30, "rows[][]": 90},
-    "example": {"type": "table", "header": ["항목", "값"], "rows": [["가", "{{|$3$}}"]]}
+    "example": {"type": "table", "header": ["반", "최솟값"], "rows": [["1반", "{{|$45$}}"]], "unit": "점"}
   },
   "figure": {
     "description": "가운데 정렬 그림 한 장",

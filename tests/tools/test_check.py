@@ -100,6 +100,62 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertEqual((folder / '검사/_이전/교사-99.png').read_bytes(), b'old page kept')
         self.assertFalse(old.exists())
 
+    def test_filled_phone_detects_real_clipped_flow_and_clears_answers(self):
+        folder = self.run_root / '채움-흐름'
+        folder.mkdir(parents=True, exist_ok=True)
+        data = {'meta': {'title': '채움 검사', 'kind': '수업', 'interactive': True, 'reveal': '바로', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [{'type': 'flow',
+                           'nodes': ['입력', '{{|$12345678901234567890$}}', '결과']}]}]}
+        renderer = sheet_build.Renderer(data, folder, [])
+        teacher = sheet_build.document_html(renderer, {}, '')
+        table = sheet_build.answer_table_from_html(teacher)
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>',
+            '<style id="sheet-user">#sheet-flow .ws-flow-node {width:40px;overflow:hidden;white-space:nowrap}</style>')
+        path = folder / '학생.html'
+        path.write_text(student, encoding='utf-8')
+        out = folder / '검사'
+        out.mkdir()
+        with sheet_check.sheet_browser() as browser:
+            for domain in ('Page.enable', 'Runtime.enable'):
+                browser.cdp.call(domain)
+            sheet_check._navigate(browser, path, False)
+            problems = []
+            info, _, _ = sheet_check._interactive_check(browser.cdp, out, table, problems)
+            self.assertEqual(browser.cdp.evaluate('sheet.values()'), {})
+        self.assertGreater(info['filled_screen']['checked_items'], 0)
+        self.assertGreater(info['filled_screen']['revealed_items'], 0)
+        self.assertTrue(info['filled_screen']['clipped'])
+        self.assertIn('filled-screen-clipped', [problem['code'] for problem in problems])
+
+    def test_snapshot_tick_labels_are_at_least_six_points_in_pdf(self):
+        try:
+            import pymupdf  # noqa: F401
+        except ImportError:
+            self.skipTest('PyMuPDF 없음')
+        renderer = sheet_build.Renderer({'meta': {'title': '그래프', 'interactive': False}}, self.run_root, [])
+        block = {'fn': 'a*x**2', 'params': [{'name': 'a', 'value': 1}], 'x': [-4, 4], 'y': [-9, 9],
+                 'unit_mm': 5, 'print': [{'a': x} for x in (.5, -.5, 2, -2)]}
+        section = '<section class="ws-item" data-id="snapshots">' + renderer.explore(block) + '</section>'
+        small = renderer.grid({'mode': 'coord', 'x': [-3, 3], 'y': [-3, 3], 'unit_mm': 5})
+        small = small.replace('<svg ', '<svg style="width:12mm;height:auto" ', 1)
+        section += '<section class="ws-item" data-id="small-graph">' + small + '</section>'
+        source = self.student_text.replace('<div id="sheet-src">', '<div id="sheet-src">' + section, 1)
+        folder = self.make_case('그래프-PDF', student=source)
+        with sheet_check.sheet_browser() as browser:
+            for domain in ('Page.enable', 'Runtime.enable'):
+                browser.cdp.call(domain)
+            report, _, _, pdf, _ = sheet_check._navigate(browser, folder / '도형과 좌표.html', False)
+        problems = []
+        measurements = sheet_check._audit_graph_labels(pdf, report['graph_regions'], '학생용', problems)
+        snapshots = [m for m in measurements if m['item'] == 'snapshots']
+        other = [m for m in measurements if m['item'] == 'small-graph']
+        self.assertEqual(len(snapshots), 4)
+        self.assertTrue(all(m['labels'] > 0 and m['min_pt'] >= 6 for m in snapshots), snapshots)
+        self.assertEqual(len(other), 1)
+        self.assertLess(other[0]['min_pt'], 6)
+        self.assertEqual([p['code'] for p in problems], ['graph-label-small'])
+
     def test_browser_failure_invalidates_old_report(self):
         folder = self.make_case('브라우저실패')
         previous = folder / '검사/report.json'
@@ -197,6 +253,8 @@ class FakeInteractiveProtocol:
         self.expressions.append(expression)
         if 'available:' in expression:
             return {'available': True, 'reveal': self.reveal, 'salt': 'a' * 32}
+        if 'filledScreenInspection' in expression:
+            return {'view': 'solve', 'overflow_x': self.overflow, 'clipped': [], 'checked_items': 1, 'revealed_items': 1}
         if 'ws-item[data-id]' in expression:
             return self.items
         if 'Promise.race' in expression:
@@ -217,6 +275,46 @@ class FakeInteractiveProtocol:
 
 
 class CheckBoundaryTest(unittest.TestCase):
+    def test_filled_phone_reports_overflow_and_clipping(self):
+        out = TRIALS / ('filled-screen-' + uuid4().hex[:10])
+        out.mkdir(parents=True, exist_ok=True)
+        table = {'salt': 'a' * 32, 'slots': [{'slot': 'q1.1', 'kind': 'text', 'right': '정답', 'wrong': '오답'}]}
+        protocol = FakeInteractiveProtocol()
+        original = protocol.evaluate
+        def evaluate(expression, await_promise=False):
+            if 'filledScreenInspection' in expression:
+                protocol.expressions.append(expression)
+                return {'view': 'solve', 'overflow_x': 3, 'clipped': ['q1.1'], 'checked_items': 1, 'revealed_items': 1}
+            return original(expression, await_promise)
+        protocol.evaluate = evaluate
+        problems = []
+        info, files, _ = sheet_check._interactive_check(protocol, out, table, problems)
+        self.assertEqual(info['filled_screen']['overflow_x'], 3)
+        self.assertEqual(info['filled_screen']['clipped'], ['q1.1'])
+        self.assertIn('filled-screen-overflow', [p['code'] for p in problems])
+        self.assertIn('filled-screen-clipped', [p['code'] for p in problems])
+        self.assertTrue(any('reveal-answer' in e and 'data-sheet-action="check"' in e for e in protocol.expressions))
+        self.assertTrue(any('sheet.clearAnswers()' in e for e in protocol.expressions))
+
+    def test_pdf_graph_labels_use_actual_point_size(self):
+        try:
+            import pymupdf
+        except ImportError:
+            self.skipTest('PyMuPDF 없음')
+        document = pymupdf.open()
+        page = document.new_page()
+        page.insert_text((20, 30), '8', fontsize=5.5)
+        page.insert_text((20, 60), '9', fontsize=7)
+        page.insert_text((200, 60), '10', fontsize=4)
+        pdf = document.tobytes()
+        document.close()
+        problems = []
+        regions = [{'page': 1, 'item': 'q1', 'bbox': [0, 0, 100, 100]}]
+        measured = sheet_check._audit_graph_labels(pdf, regions, '학생용', problems)
+        self.assertAlmostEqual(measured[0]['min_pt'], 5.5, places=1)
+        self.assertEqual(measured[0]['labels'], 2)
+        self.assertEqual([p['code'] for p in problems], ['graph-label-small'])
+
     def test_screen_overflow_and_filled_print_are_recorded(self):
         out = TRIALS / ('screen-' + uuid4().hex[:10])
         out.mkdir(parents=True, exist_ok=True)
@@ -225,7 +323,7 @@ class CheckBoundaryTest(unittest.TestCase):
         info, files, pdf = sheet_check._interactive_check(protocol, out, table, problems)
         self.assertEqual(info['grading'], 'passed')
         self.assertEqual((info['auto_slots'], info['answer_slots']), (1, 1))
-        self.assertEqual([p.name for p in files], ['화면-폰.png', '화면-태블릿.png'])
+        self.assertEqual([p.name for p in files], ['화면-폰.png', '화면-태블릿.png', '화면-폰-채움.png'])
         self.assertTrue(all(p.is_file() for p in files))
         self.assertEqual(pdf, b'test image or pdf')
         self.assertEqual([p['code'] for p in problems].count('screen-overflow'), 2)
@@ -248,7 +346,7 @@ class CheckBoundaryTest(unittest.TestCase):
         self.assertEqual(info['grading'], 'skipped-reveal-none')
         self.assertFalse(any('.map(row =>' in e for e in protocol.expressions))
         self.assertTrue(any('for (const row of' in e for e in protocol.expressions))
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 3)
         self.assertIsNotNone(pdf)
         self.assertFalse(problems)
 
@@ -469,7 +567,8 @@ class DeliveryGateTest(unittest.TestCase):
         meta = html.escape(json.dumps({'engine_sha256': digest or self.digest}), quote=True)
         root = ' data-interactive="1"' if interactive else ''
         sync_meta = '<meta name="sheet-sync" content="PRIVATE-CONFIG">' if sync else ''
-        path.write_text(f'<html{root}><head><meta name="sheet-build" content="{meta}">{sync_meta}</head><body></body></html>', encoding='utf-8')
+        answer = '<span data-check-hash="abc"></span><script id="sheet-reveal">encoded</script>' if interactive else ''
+        path.write_text(f'<html{root}><head><meta name="sheet-build" content="{meta}">{sync_meta}</head><body>{answer}</body></html>', encoding='utf-8')
 
     def write_build(self):
         (self.out / 'build.json').write_text(json.dumps(self.build), encoding='utf-8')
@@ -493,6 +592,25 @@ class DeliveryGateTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn('설치된 스킬과 다른 엔진으로 조립됐습니다', output)
         self.assertNotIn('전달 문안 초안', output)
+
+    def test_delivery_disclosure_follows_policy_and_actual_markup(self):
+        for policy, reveal, hashes, expected in (
+                ('시도 후', True, True, '정답과 풀이가 난독화'),
+                ('바로', True, True, '정답과 풀이가 난독화'),
+                ('교사만', False, True, '정답 확인용 해시'),
+                ('없음', False, False, '학생용에 정답이 들어 있지 않습니다'),
+                ('없음', True, True, '정답과 풀이가 난독화')):
+            with self.subTest(policy=policy, reveal=reveal, hashes=hashes):
+                tag = '<script id="sheet-reveal">encoded</script>' if reveal else ''
+                check = '<span data-check-hash="abc"></span>' if hashes else ''
+                self.student.write_text(f'<html data-interactive="1" data-reveal="{policy}"><head></head><body>{check}{tag}</body></html>', encoding='utf-8')
+                meta = sheet_check._delivery_meta(self.student)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    sheet_check._delivery_draft(self.student, self.teacher, self.report, meta)
+                self.assertIn(expected, output.getvalue())
+                self.assertIn('마지막 줄', output.getvalue())
+                if not reveal:
+                    self.assertNotIn('난독화되어', output.getvalue())
 
     def test_html_engine_mismatch_and_missing_page_block(self):
         self.write_html(self.teacher, digest='f' * 64)

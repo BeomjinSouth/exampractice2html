@@ -246,6 +246,17 @@ class BuildTest(unittest.TestCase):
                          ['--ws-blank-min:30mm'] * 4)
         self.assertIn('--ws-blank-min:9mm', renderer.block({'type': 'text', 'text': '{{㉣|둘}}'}, 'q1'))
 
+    def test_table_unit_overrides_ambiguous_sentence(self):
+        from sheet_build import Renderer
+        data = {'meta': {'title': self.title, 'interactive': True}, 'items': [{'id': 'q1', 'blocks': [
+            {'type': 'table', 'header': ['항목', '길이(cm)'], 'rows': [['가', '{{|3}}일 수 있다']]}]}]}
+        renderer = Renderer(data, self.folder, [])
+        tags = Tags(renderer.render_items()).tags
+        slot = next(attrs for _, attrs in tags if attrs.get('data-slot') == 'q1.1')
+        hashes = slot['data-check-hash'].split(',')
+        self.assertIn(check_hash(renderer.salt, 'number', '3@cm'), hashes)
+        self.assertNotIn(check_hash(renderer.salt, 'number', '3@일'), hashes)
+
     def test_coordinate_names_clear_tick_labels(self):
         from itertools import combinations
         from xml.etree import ElementTree as ET
@@ -282,13 +293,70 @@ class BuildTest(unittest.TestCase):
             self.assertAlmostEqual(10 + (point[0] - 14) / 112 * 35, target[0])
             self.assertAlmostEqual((53 - point[1]) / 49 * 6, target[1])
 
+    def test_frequency_zero_uses_positive_axis(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': self.title, 'interactive': False}}, self.folder, [])
+        for kind in ('histogram', 'polygon'):
+            for maximum in (0, -2):
+                with self.subTest(kind=kind, maximum=maximum):
+                    svg = ET.fromstring(renderer.chart({'kind': kind, 'bins': [0, 5, 10],
+                                                         'values': [0, 0], 'y_max': maximum})).find('svg')
+                    low, high, bottom, top = map(float, svg.get('data-ymap').split())
+                    self.assertEqual(low, 0)
+                    self.assertGreater(high, 0)
+                    if kind == 'polygon':
+                        self.assertTrue(all(float(p.split(',')[1]) == bottom
+                                            for p in svg.find('polyline').get('points').split()))
+
+    def test_snapshots_use_one_row_for_tall_graphs(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': self.title, 'interactive': False}}, self.folder, [])
+        block = {'fn': 'a*x**2', 'params': [{'name': 'a', 'value': 1}], 'x': [-4, 4], 'y': [-9, 9],
+                 'unit_mm': 5, 'print': [{'a': x} for x in (.5, -.5, 2, -2)]}
+        root = ET.fromstring(renderer.explore(block))
+        snapshots = root.find(".//div[@class='ws-explore-snapshots']")
+        self.assertIn('--ws-snapshot-cols:4', snapshots.get('style', ''))
+        figures = list(snapshots)
+        self.assertEqual(len(figures), 4)
+        for figure in figures:
+            svg = figure.find('svg')
+            width = float(svg.get('width')[:-2])
+            height = float(svg.get('height')[:-2])
+            viewbox = list(map(float, svg.get('viewBox').split()))
+            self.assertGreater(width, 28)
+            self.assertGreater(height, 60)
+            for text in svg.findall('text'):
+                size = float(text.get('font-size')) * height / viewbox[3] * 72 / 25.4
+                self.assertGreaterEqual(size, 6)
+
+    def test_svg_labels_are_upright_for_points_in_both_sources(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer, figure_svg
+        source = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+                  '<defs><path id="p" d="M0 0L1 1"/></defs><use xlink:href="#p"/>'
+                  '<text>A′</text><text>a₂</text></svg>')
+        direct = figure_svg(source)
+        file = self.folder / '그림' / 'labels.svg'
+        file.write_text(source, encoding='utf-8')
+        renderer = Renderer({'meta': {'title': self.title, 'interactive': False}}, self.folder, [])
+        image = next(a for tag, a in Tags(renderer.image({'src': '그림/labels.svg', 'width_mm': 30}, 30, math_labels=True)).tags if tag == 'img')
+        local = base64.b64decode(image['src'].split(',', 1)[1]).decode('utf-8')
+        for svg in (direct, local):
+            root = ET.fromstring(svg)
+            ns = {'s': 'http://www.w3.org/2000/svg'}
+            self.assertEqual([x.text for x in root.findall('s:text', ns)], ['A′', '𝑎₂'])
+            self.assertEqual(root.find('s:use', ns).get('{http://www.w3.org/1999/xlink}href'), '#p')
+            self.assertTrue(all('font-family:Cambria Math' in x.get('style') for x in root.findall('s:text', ns)))
+
     def test_svg_math_labels_override_author_styles(self):
         from xml.etree import ElementTree as ET
         from sheet_build import figure_svg, font_chars
         svg = ET.fromstring(figure_svg('<svg><text font-family="Arial" style="font-family:Arial!important">l′</text>'
                                        '<text>A<tspan font-family="Arial">₂</tspan></text><text>64°</text></svg>'))
         labels = list(svg)
-        self.assertEqual([''.join(label.itertext()) for label in labels], ['𝑙′', '𝐴₂', '64°'])
+        self.assertEqual([''.join(label.itertext()) for label in labels], ['𝑙′', 'A₂', '64°'])
         self.assertTrue(all('font-family:Cambria Math' in label.get('style') for label in labels))
         self.assertIn('𝑙', font_chars({}))
 

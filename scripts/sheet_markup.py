@@ -178,6 +178,11 @@ class MathParser:
             attr = ' mathvariant="normal"' if c.isupper() else ''
             return f'<mi{attr}>{c}</mi>', c
         if c in '0123456789.':
+            match = re.match(r'[0-9]+(?:\{,\}[0-9]+)+(?:\.[0-9]*)?', self.source[start:])
+            if match:
+                self.pos = start + match.end()
+                number = match[0].replace('{,}', ',')
+                return f'<mn>{number}</mn>', number
             match = DECIMAL.match(self.source, start)
             if match:
                 self.pos = match.end()

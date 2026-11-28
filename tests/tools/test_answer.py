@@ -35,6 +35,10 @@ class AnswerTest(unittest.TestCase):
             with self.subTest(kind='reveal'):
                 self.assertEqual(answer.reveal(salt, payload), expected)
 
+    def test_thousands_separator_matches_plain_integer(self):
+        self.assertEqual(answer.num('6,000'), answer.num('6000'))
+        self.assertEqual(answer.number_forms(['6,000']), ['6000'])
+
     def test_other_kinds_and_snap(self):
         self.assertEqual(answer.canonical('choice', [3, 1]), '1,3')
         self.assertEqual(answer.canonical('ox', '○'), 'o')

@@ -128,10 +128,13 @@
       }
       if (/[A-Za-z]/.test(c)) return [`<mi${/[A-Z]/.test(c) ? ' mathvariant="normal"' : ''}>${c}</mi>`, c];
       if (/[0-9.]/.test(c)) {
-        const value = this.source.slice(start).join('').match(/^(?:\d+(?:\.\d*)?|\.\d+)/)?.[0];
+        const rest = this.source.slice(start).join('');
+        const value = rest.match(/^[0-9]+(?:\{,\}[0-9]+)+(?:\.[0-9]*)?/)?.[0]
+          || rest.match(/^(?:\d+(?:\.\d*)?|\.\d+)/)?.[0];
         if (!value) return ['<mo>.</mo>', '.'];
         this.pos = start + value.length;
-        return [`<mn>${value}</mn>`, value];
+        const number = value.replace(/\{,\}/g, ',');
+        return [`<mn>${number}</mn>`, number];
       }
       if ('+-=<>,!'.includes(c)) {
         const value = c === '-' ? '−' : c;

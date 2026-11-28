@@ -30,7 +30,7 @@ def text_candidates(value):
     return [text] if text else []
 
 
-def number_parts(value):
+def numeric_details(value):
     text = re.sub(r'^[a-z]=', '', norm(value), count=1)
     suffix = ''
     for unit in sorted(UNITS, key=len, reverse=True):
@@ -42,16 +42,34 @@ def number_parts(value):
         text = text[1:-1]
     if text.startswith('+'):
         text = text[1:]
+    text = text.replace('pi', 'π').replace('파이', 'π')
+    pi = ''
+    if text.endswith('π'):
+        pi, text = 'π', text[:-1]
+        if text in ('', '-'):
+            text += '1'
+        else:
+            text = re.sub(r'[×⋅·*]$', '', text)
+    elif match := re.fullmatch(r'(-?)([0-9]*)π/([0-9]+)', text):
+        pi, text = 'π', f'{match[1]}{match[2] or "1"}/{match[3]}'
     if re.fullmatch(r'-?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?', text):
         text = text.replace(',', '')
     if not re.fullmatch(r'-?[0-9]+(?:\.[0-9]+|/[0-9]+)?', text):
         return None
     try:
         value = Fraction(text)
+        if '/' in text:
+            form = 'reduced' if int(text.split('/')[1]) == value.denominator else 'unreduced'
+        else:
+            form = 'decimal' if '.' in text else 'integer'
+        return [str(value) + pi, suffix, form]
     except (ValueError, ZeroDivisionError):
         return None
-    number = str(value.numerator) if value.denominator == 1 else str(value)
-    return [number, suffix]
+
+
+def number_parts(value):
+    parts = numeric_details(value)
+    return parts[:2] if parts else None
 
 
 def normalized_unit(value):
@@ -88,6 +106,50 @@ def number_forms(values, unit=''):
     return list(dict.fromkeys([n for n, _ in parts] + [f'{n}@{u or inferred}' for n, u in parts if u or inferred]))
 
 
+def radical_parts(value):
+    text = norm(value).replace('루트', '√')
+    match = re.fullmatch(r'(-?)([0-9]{0,128})√(?:([0-9]{1,128})|\(([0-9]{1,128})\))', text)
+    if not match:
+        return None
+    sign, coefficient, radicand, grouped = match.groups()
+    radicand = radicand or grouped
+    square = int(coefficient or '1') ** 2 * int(radicand)
+    # Keep the sign when comparing squares so √12 and −√12 never match.
+    return [f'{sign}{coefficient}√{radicand}', f'square:{-square if sign else square}']
+
+
+def writing_forms(kind, values, unit=''):
+    if kind == 'number':
+        return number_forms(values, unit)
+    if kind == 'radical':
+        return [form for value in values for form in radical_parts(value)]
+    return [norm(value) for value in values]
+
+
+def writing_result(kind, value, matches, form='', strict=False, check_unit=False):
+    if value is None or value == '':
+        return None
+    if kind == 'text':
+        return None if not str(value).strip() else True if any(map(matches, text_candidates(value))) else 'review'
+    if kind == 'radical':
+        parts = radical_parts(value)
+        return False if not parts else True if matches(parts[0]) else 'review' if matches(parts[1]) else False
+    if kind == 'number':
+        parts = numeric_details(value)
+        if not parts:
+            return False
+        number, unit, written = parts
+        if not matches(f'{number}@{unit}' if check_unit and unit else number):
+            return False
+        if form == 'fraction':
+            if strict:
+                return written == 'reduced'
+            if written == 'unreduced':
+                return 'review'
+        return True
+    return None
+
+
 def input_mode(values):
     texts = [norm(value) for value in values]
     if not all(re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', text) for text in texts):
@@ -116,16 +178,18 @@ def plain(source):
                 'angle': '∠', 'circ': '°', 'pm': '±', 'cdot': '⋅', 'approx': '≈',
                 'triangle': '△', 'square': '□', 'perp': '⊥', 'parallel': '⫽',
                 'equiv': '≡', 'sim': '∽', 'therefore': '∴', 'because': '∵', 'cdots': '⋯',
-                'left': '', 'right': '', 'quad': ' '}
+                'left': '', 'right': '', 'quad': ' ', 'sin': 'sin ', 'cos': 'cos ', 'tan': 'tan '}
     # TeX command names consume the whitespace immediately following the name.
     text = re.sub(r'\\([A-Za-z]+)\s*', lambda m: commands.get(m.group(1), '\\' + m.group(1)), text)
     text = re.sub(r'\^(?:\{°\}|°)', '°', text)
     fraction = re.compile(r'\\(?:d?frac)\{([^{}]*)\}\{([^{}]*)\}')
     while fraction.search(text):
         text = fraction.sub(r'\1/\2', text)
-    group = re.compile(r'\\(sqrt|text|mathit|mathrm|overline|overarc)\{([^{}]*)\}')
+    group = re.compile(r'\\(sqrt|text|mathit|mathrm|overline|overarc|overgroup)\{([^{}]*)\}')
     while group.search(text):
-        text = group.sub(lambda m: ('√' if m.group(1) == 'sqrt' else '') + m.group(2), text)
+        text = group.sub(lambda m: ('√' + (m[2] if re.fullmatch(r'[0-9]+', m[2]) else f'({m[2]})')
+                                    if m[1] == 'sqrt' else m[2]), text)
+    text = re.sub(r'\\sqrt\[([^\[\]]*)\]\{([^{}]*)\}', r'√[\1](\2)', text)
     text = re.sub(r'\\[A-Za-z]+', '', text).replace('{', '').replace('}', '')
     return re.sub(r'\ue000([0-9]+)\ue001', lambda m: escapes[int(m.group(1))], text)
 

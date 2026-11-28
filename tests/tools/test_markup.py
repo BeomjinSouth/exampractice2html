@@ -11,7 +11,7 @@ from sheet_markup import MarkupError, render_markup
 class MarkupTest(unittest.TestCase):
     def test_engine_pairs(self):
         cases = json.loads((ROOT / 'tests/engine/markup-cases.json').read_text(encoding='utf-8'))
-        self.assertEqual(len(cases), 17)
+        self.assertEqual(len(cases), 20)
         for case in cases:
             with self.subTest(src=case['src']):
                 self.assertEqual(render_markup(case['src']), case['html'])

@@ -15,5 +15,8 @@
   {"src":"$6{,}000$원","html":"<span class=\"ws-math-word\"><span><math><mn>6,000</mn></math>원</span></span>"},
   {"src":"$1{,}234{,}567.89$","html":"<math><mn>1,234,567.89</mn></math>"},
   {"src":"$(1,000)$","html":"<math><mrow><mo stretchy=\"false\">(</mo><mrow><mn>1</mn><mo>,</mo><mn>000</mn></mrow><mo stretchy=\"false\">)</mo></mrow></math>"},
-  {"src":"$a{,}b$","html":"<math><mi>a</mi><mo>,</mo><mi>b</mi></math>"}
+  {"src":"$a{,}b$","html":"<math><mi>a</mi><mo>,</mo><mi>b</mi></math>"},
+  {"src":"$\\sin A+\\cos B+\\tan C$","html":"<math><mo form=\"prefix\" lspace=\"0em\" rspace=\"0.1667em\">sin</mo><mi mathvariant=\"normal\">A</mi><mo>+</mo><mo form=\"prefix\" lspace=\"0em\" rspace=\"0.1667em\">cos</mo><mi mathvariant=\"normal\">B</mi><mo>+</mo><mo form=\"prefix\" lspace=\"0em\" rspace=\"0.1667em\">tan</mo><mi mathvariant=\"normal\">C</mi></math>"},
+  {"src":"$\\overgroup{AB}=\\overarc{CD}$","html":"<math><mover><mrow><mi mathvariant=\"normal\">A</mi><mi mathvariant=\"normal\">B</mi></mrow><mo stretchy=\"true\">⏜</mo></mover><mo>=</mo><mover><mrow><mi mathvariant=\"normal\">C</mi><mi mathvariant=\"normal\">D</mi></mrow><mo stretchy=\"true\">⏜</mo></mover></math>"},
+  {"src":"$\\dfrac{1}{2}$","html":"<math><mfrac><mn>1</mn><mn>2</mn></mfrac></math>"}
 ]

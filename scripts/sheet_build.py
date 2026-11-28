@@ -23,7 +23,7 @@ from sheet_plan import (SVG_URL, answer_svg_source, checked_svg, function_tree, 
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
 from sheet_answer import (canonical, check_hash, inferred_unit, input_mode, make_salt, normalized_unit,
-                          num, number_forms, plain, reveal, text_candidates)
+                          numeric_details, plain, radical_parts, reveal, text_candidates, writing_forms)
 
 KEY_COLOR = '#c00000'  # --ws-key-color; data images cannot inherit the document's CSS.
 TEACHER_ONLY = 'ws-teacher-only'
@@ -43,42 +43,54 @@ def _attrs_text(attrs):
 
 def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), unit='', blank=False):
     answer, *alternatives = (plain(value).strip() for value in (source, *accept))
-    number = num(answer)
-    if mode == 'number' and number is None:
+    answers = [answer, *alternatives]
+    numeric = numeric_details(answer)
+    if mode == 'number' and numeric is None:
         raise ValueError(f'{slot}: 정답을 수로 읽을 수 없습니다.')
     kind = 'open'
     if answer and mode != 'off':
-        if mode != 'text' and number is not None:
+        if mode != 'text' and numeric is not None:
             kind = 'number'
+        elif mode == 'auto' and all(map(radical_parts, answers)):
+            kind = 'radical'
         elif mode == 'text' or (len(answer) <= 12 if blank else accept):
             kind = 'text'
-    attrs = {'data-check-kind': kind}
+    shape = [symbol for symbol in ('π', '√') if any(symbol in value for value in answers)]
+    if any((parts := numeric_details(value)) and parts[0].endswith('π') for value in answers) and 'π' not in shape:
+        shape.insert(0, 'π')
+    right = answer
+    if kind == 'number' and numeric[2] in ('reduced', 'unreduced'):
+        shape.append('fraction')
+        if numeric[2] == 'unreduced':
+            # The check uses a sample input that passes even when the question requires reducing.
+            number = numeric[0].removesuffix('π')
+            right = number + ('' if '/' in number else '/1') + ('π' if numeric[0].endswith('π') else '')
+    # Set even the empty shape: deriving an edited sheet replaces old writing metadata.
+    attrs = {'data-check-kind': kind, 'data-writing-shape': ' '.join(shape)}
     descriptor = {'mode': mode, 'accept': list(accept)}
     if kind != 'open':
-        answers = [answer, *alternatives]
-        normalized = [canonical(kind, value) for value in answers]
-        if any(value is None for value in normalized):
+        forms = writing_forms(kind, answers, unit)
+        if not forms:
             raise ValueError(f'{slot}: 허용 답을 정답과 같은 형식으로 읽을 수 없습니다.')
         if kind == 'number':
             from fractions import Fraction
-            wrong = Fraction(number) + 1
-            while str(wrong) in normalized:
+            suffix = 'π' if numeric[0].endswith('π') else ''
+            wrong = Fraction(numeric[0].removesuffix('π')) + 1
+            while str(wrong) + suffix in forms:
                 wrong += 1
-            wrong = str(wrong)
+            wrong = str(wrong) + suffix
             keyboard = input_mode(answers)
             if keyboard:
                 attrs['data-input-mode'] = keyboard
-            forms = number_forms(answers, unit)
             if grading and any('@' in form for form in forms):
                 attrs['data-check-unit'] = '1'
         else:
             wrong = answer + '오답'
-            while any(candidate in normalized for candidate in text_candidates(wrong)):
+            while any(candidate in forms for candidate in text_candidates(wrong)):
                 wrong += '오답'
-            forms = normalized
         if grading:
             attrs['data-check-hash'] = ','.join(dict.fromkeys(check_hash(salt, kind, form) for form in forms))
-        descriptor.update(right=answer, wrong=wrong)
+        descriptor.update(right=right, wrong=wrong)
     if kind != 'open' or mode != 'auto' or accept:
         attrs['data-check'] = json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))
     return attrs
@@ -304,6 +316,18 @@ def overlay_svg(source, viewport):
 
 def data_image(mime, data):
     return f'data:{mime};base64,{base64.b64encode(data).decode("ascii")}'
+
+
+def _fraction_prompt(blocks):
+    for block in blocks:
+        kind = block['type']
+        if kind == 'split' and (_fraction_prompt(block['left']) or _fraction_prompt(block['right'])):
+            return True
+        texts = (block['text'],) if kind in ('question', 'ask') else (
+            (*block['lines'], block.get('title', ''), block.get('note', '')) if kind == 'situation' else ())
+        if any('기약분수' in plain(inspect_markup(text).public_source) for text in texts):
+            return True
+    return False
 
 
 class Renderer:
@@ -1244,8 +1268,10 @@ class Renderer:
                     parts += '<div class="ws-hints ws-solve-only">' + ''.join(editable('p', hint, 'ws-hint') for hint in item['hints']) + '</div>'
             finally:
                 blank_hook.reset(token)
-            items.append(section(id_, parts, ' data-break="1"' if item.get('break') else '',
-                                 screen_only=all(solve_only(b) for b in item['blocks'])))
+            attrs = ' data-break="1"' if item.get('break') else ''
+            if self.interactive and _fraction_prompt(item['blocks']):
+                attrs += ' data-reduced-fractions="1"'
+            items.append(section(id_, parts, attrs, screen_only=all(solve_only(b) for b in item['blocks'])))
         return '\n'.join(items)
 
     def render_teacher(self):

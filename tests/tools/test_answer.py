@@ -35,6 +35,16 @@ class AnswerTest(unittest.TestCase):
             with self.subTest(kind='reveal'):
                 self.assertEqual(answer.reveal(salt, payload), expected)
 
+    def test_writing_results(self):
+        for spec in self.cases['writing_results']:
+            kind = spec['kind']
+            forms = answer.writing_forms(kind, [answer.plain(spec['answer'])], spec.get('unit', ''))
+            for value, expected in spec['cases']:
+                with self.subTest(answer=spec['answer'], value=value, strict=spec.get('strict')):
+                    result = answer.writing_result(kind, value, forms.__contains__, spec.get('form', ''),
+                                                   spec.get('strict', False), bool(spec.get('unit')))
+                    self.assertEqual(result, expected)
+
     def test_thousands_separator_matches_plain_integer(self):
         self.assertEqual(answer.num('6,000'), answer.num('6000'))
         self.assertEqual(answer.number_forms(['6,000']), ['6000'])

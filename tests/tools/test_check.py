@@ -246,6 +246,86 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertEqual(warning['level'], 'warning')
         self.assertIn('q1.1', warning['msg'])
 
+    def test_tablet_reports_clipped_five_digit_school_number(self):
+        folder = self.run_root / '태블릿-학번-잘림'
+        folder.mkdir()
+        data = {'meta': {'title': '학번 검사', 'kind': '수업', 'reveal': '없음', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [{'type': 'question', 'text': '설명해 봅시다.'}]}]}
+        teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>', '<style id="sheet-user">'
+            '@media (min-width: 720px) {#sheet-flow [data-slot="head.학번"] .ws-in '
+            '{width:24px!important}}</style>')
+        checked = self.make_case('학번-보고서', teacher, student)
+        sheet_build.update_answer_table(checked, sheet_build.answer_table_from_html(teacher))
+        self.assertIn('typing-screen-clipped', self.inspect(checked, 0))
+        report = json.loads((checked / '검사/report.json').read_text(encoding='utf-8'))
+        info = report['interactive_check']
+        self.assertEqual(info['typing_screen_clipped'], [])  # 기존 키는 폰 결과
+        self.assertEqual(info['typing_screen_clipped_tablet'], ['head.학번'])
+        self.assertEqual(info['filled_print_clipped'], [])
+        warnings = [p['msg'] for p in report['problems'] if p['code'] == 'typing-screen-clipped']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('태블릿', warnings[0])
+
+    def test_print_reports_only_words_split_within_a_text_node(self):
+        narrow = 'display:block;width:2.5em;word-break:normal;overflow-wrap:normal'
+        fragment = (f'<div class="ws-lab" style="{narrow}">사이의</div>'
+                    '<p class="ws-lab" style="width:2.5em">두 각의</p>'  # 기본 CSS는 어절 전체를 넘긴다.
+                    f'<p style="{narrow}"><span>원주</span><wbr>각</p>'  # 다른 글자 마디
+                    f'<math><mtext style="{narrow}">수식안</mtext></math>'
+                    f'<svg width="60" height="20"><foreignObject width="60" height="20">'
+                    f'<div style="{narrow}">도형안</div></foreignObject></svg>'
+                    f'<div class="ws-ink" style="{narrow};position:static;height:auto">학생글</div>')
+        item = re.search(r'<section class="ws-item" data-id="(?!head")([^"]+)"[^>]*>.*?(?=</section>)',
+                         self.teacher_text, re.S)
+        self.assertIsNotNone(item)
+        item_id = item[1]
+        teacher = self.teacher_text[:item.end()] + fragment + self.teacher_text[item.end():]
+        student = sheet_build.strip_teacher(teacher)
+        folder = self.make_case('인쇄-어절-갈림', teacher, student)
+        self.inspect(folder, 0)
+        report = json.loads((folder / '검사/report.json').read_text(encoding='utf-8'))
+        splits = [p for p in report['problems'] if p['code'] == 'print-word-split']
+        self.assertEqual([(p['level'], p['item']) for p in splits], [('warning', item_id)] * 2)
+        self.assertTrue(all('사이│의' in p['msg'] for p in splits), splits)
+        self.assertTrue(any('교사용' in p['msg'] for p in splits), splits)
+        self.assertTrue(any('학생용' in p['msg'] for p in splits), splits)
+
+    def test_filled_phone_distinguishes_visible_fraction_and_clipping(self):
+        folder = self.run_root / '채움-분수-잘림'
+        folder.mkdir()
+        data = {'meta': {'title': '분수 검사', 'kind': '연습', 'reveal': '시도 후', 'sync': False},
+                'items': [{'id': name, 'blocks': [{'type': 'question', 'text': rf'분수 {{{{|$\frac{{{i}}}{{2}}$}}}}'}]}
+                          for i, name in enumerate(('visible', 'hidden', 'ancestor', 'cell'), 1)] + [
+                              {'id': 'overlap', 'blocks': [{'type': 'table', 'header': ['가로', '옆 칸'],
+                                                            'rows': [['옆 칸을 덮는 글자', '비교']]}]}],
+                'teacher': {'solutions': [{'item': name, 'answer': r'$\frac{1}{2}$', 'steps': ['분수로 쓴다.']}
+                                          for name in ('visible', 'hidden', 'ancestor', 'cell')]}}
+        teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>', '<style id="sheet-user">'
+            '#sheet-flow .ws-solution {height:22px;box-sizing:border-box}'
+            '#sheet-flow [data-id="hidden"] .ws-solution {overflow:hidden}'
+            '#sheet-flow [data-id="ancestor"] {height:90px;overflow:hidden}'
+            '#sheet-flow [data-id="cell"] .ws-solution {width:40px;white-space:nowrap}'
+            '#sheet-flow [data-id="overlap"] td:first-child '
+            '{white-space:nowrap;text-align:left;font-size:28px}</style>')
+        checked = self.make_case('채움-분수-보고서', teacher, student)
+        sheet_build.update_answer_table(checked, sheet_build.answer_table_from_html(teacher))
+        self.assertIn('filled-screen-clipped', self.inspect(checked, 0))
+        report = json.loads((checked / '검사/report.json').read_text(encoding='utf-8'))
+        screen = report['interactive_check']['filled_screen']
+        self.assertEqual(screen['solution_items'], 4)
+        self.assertIn('hidden', screen['clipped'])
+        self.assertIn('ancestor', screen['clipped'])
+        self.assertIn('overlap', screen['clipped'])
+        self.assertNotIn('visible', screen['clipped'])
+        self.assertNotIn('cell', screen['clipped'])
+        fix = next(p['fix'] for p in report['problems'] if p['code'] == 'filled-screen-clipped')
+        for text in ('화면-폰-채움.png', '공개 정책이나 문항', '그대로 둠 — 까닭'):
+            self.assertIn(text, fix)
+
     def test_hidden_tablet_zoom_button_warns_for_its_pen_slot(self):
         folder = self.run_root / '태블릿-확대-누락'
         folder.mkdir()
@@ -557,8 +637,10 @@ class FakeInteractiveProtocol:
         self.expressions.append(expression)
         if 'available:' in expression:
             return {'available': True, 'reveal': self.reveal, 'salt': 'a' * 32}
+        if 'typingScreenInspection' in expression:
+            return []
         if 'filledScreenInspection' in expression:
-            return {'view': 'solve', 'overflow_x': self.overflow, 'clipped': [], 'typing_clipped': [],
+            return {'view': 'solve', 'overflow_x': self.overflow, 'clipped': [],
                     'checked_items': 1, 'revealed_items': 1}
         if 'ws-item[data-id]' in expression:
             return self.items
@@ -614,8 +696,10 @@ class CheckBoundaryTest(unittest.TestCase):
         def evaluate(expression, await_promise=False):
             if 'filledScreenInspection' in expression:
                 protocol.expressions.append(expression)
-                return {'view': 'solve', 'overflow_x': 3, 'clipped': ['q1.1'], 'typing_clipped': ['q1.1'],
+                return {'view': 'solve', 'overflow_x': 3, 'clipped': ['q1.1'],
                         'checked_items': 1, 'revealed_items': 1}
+            if 'typingScreenInspection' in expression and protocol.calls[-1][1]['width'] == 390:
+                return ['q1.1']
             return original(expression, await_promise)
         protocol.evaluate = evaluate
         problems = []

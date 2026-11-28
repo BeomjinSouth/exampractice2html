@@ -172,6 +172,9 @@ svg .ws-key { stroke: var(--ws-key-color); }
 /* Move the whole word to the next line; only words wider than their container can wrap inside. */
 .ws-math-word { display: inline-block; max-width: 100%; white-space: nowrap; }
 .ws-math-word > span { white-space: normal; word-break: keep-all; overflow-wrap: anywhere; }
+/* 빈칸과 바로 붙은 조사·단위(㉠을, 11일)는 한 줄에 둔다. 인라인으로 두어 빈칸의 % 너비가 문단을 기준으로 남게 한다. */
+.ws-blank-word { white-space: nowrap; }
+.ws-blank-word :is(.ws-verdict, .ws-reveal) { white-space: normal; }
 .ws-t-h, .ws-t-q { font: 700 12pt/1.2 var(--sheet-head-font); }
 .ws-t-list, .ws-t-steps { padding-inline-start: 6mm; }
 .ws-t-ans > b, .ws-t-rubric > b, .ws-t-alt > b, .ws-t-mis > b { color: var(--ws-label); }

@@ -57,9 +57,12 @@ def number_parts(value):
 def inferred_unit(tail, column='', row=''):
     # In a label, the final parentheses are unambiguous. Inline 도 may be a particle.
     particles = r'(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?'
-    text = unicodedata.normalize('NFKC', tail).lower()
+    # '5 cm'처럼 띄어 쓴 단위도 읽고, '1일 때'·'1일 경우'의 '일'은 날짜가 아니라 '이다'로 본다.
+    text = unicodedata.normalize('NFKC', tail).lower().lstrip(' \t')
     for unit in sorted(UNITS, key=len, reverse=True):
-        if unit != '도' and re.match(re.escape(unit) + particles + r'(?![\w])', text):
+        if unit == '도' or (unit == '일' and re.match(r'일\s*(?:때|경우)', text)):
+            continue
+        if re.match(re.escape(unit) + particles + r'(?![\w])', text):
             return unit
     for heading in (column, row):
         match = re.search(r'\(([^()]*)\)\s*$', unicodedata.normalize('NFKC', heading))

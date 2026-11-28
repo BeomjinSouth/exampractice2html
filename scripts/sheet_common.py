@@ -1,6 +1,8 @@
 """Shared names and paths for the worksheet CLI."""
+from fractions import Fraction
 import hashlib
 import json
+from statistics import median
 from pathlib import Path, PureWindowsPath
 import re
 from tempfile import NamedTemporaryFile
@@ -39,6 +41,45 @@ KINDS = ('수업', '연습', '평가')
 PLACEHOLDER = '〔작성〕'
 RASTER_MIMES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
                 '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp'}
+LABEL_MM = {'평가': 25.1, '연습': 46.1, '수업': 30}
+PICTURE_CELL_PADDING_MM = 3.6
+SPLIT_RATIOS = ('1:1', '2:1', '1:2', '3:2', '2:3')
+BOX_MAX_TICKS = 25
+
+
+def content_width_mm(columns):
+    return 90.8 if columns == 2 else 188  # (190 − 6) / 2 − 1.2
+
+
+def split_widths_mm(content_mm, ratio):
+    left, right = map(int, ratio.split(':'))
+    return tuple((content_mm - 5) * part / (left + right) for part in (left, right))
+
+
+def situation_cell_mm(content_mm, image_mm):
+    return round(min(.36 * content_mm, max(.31 * content_mm, image_mm + PICTURE_CELL_PADDING_MM)), 1)
+
+
+def figure_width_mm(picture, available_mm):
+    return min(picture['width_mm'], available_mm)
+
+
+def box_five(group):
+    """중앙값을 제외한 두 절반에서 사분위수를 구한다(짝수는 반씩)."""
+    if 'five' in group:
+        return group['five']
+    values = sorted(group['data'])
+    half = len(values) // 2
+    return [values[0], median(values[:half]), median(values), median(values[-half:]), values[-1]]
+
+
+def box_tick_values(bounds, step):
+    # Decimal input ends on its intended tick (e.g. 0.3 with step 0.1).
+    low, high, spacing = map(lambda v: Fraction(str(v)), (*bounds, step))
+    count = (high - low) // spacing + 1
+    if not 2 <= count <= BOX_MAX_TICKS:
+        raise ValueError(f'가로 눈금은 2~{BOX_MAX_TICKS}개여야 합니다.')
+    return [low + i * spacing for i in range(count)]
 
 
 def safe_title(title: str) -> str:

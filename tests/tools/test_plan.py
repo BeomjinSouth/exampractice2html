@@ -604,6 +604,112 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(all(i.hint for i in result))
 
 
+class FigurePlanTest(unittest.TestCase):
+    def check(self, *blocks, columns=1, interactive=False):
+        data = document(*blocks)
+        data['meta'].update(columns=columns, interactive=interactive)
+        return validate(data, ROOT)
+
+    def test_box_quartiles_for_odd_even_and_repeated_values(self):
+        from sheet_common import box_five
+        for data, expected in [([17, 10, 21, 12, 15, 8, 19, 24, 14], [8, 11, 15, 20, 24]),
+                               ([15, 6, 11, 18, 8, 14, 12, 9], [6, 8.5, 11.5, 14.5, 18]),
+                               ([2, 2, 1, 2, 3], [1, 1.5, 2, 2.5, 3]),
+                               ([4, 4, 4, 4], [4] * 5)]:
+            self.assertEqual(box_five({'data': data}), expected)
+        self.assertEqual(box_five({'five': [1, 1, 1, 2, 3]}), [1, 1, 1, 2, 3])
+
+    def test_box_validates_groups_bounds_ticks_and_tools(self):
+        chart = deepcopy(load_registry()['chart']['example'])
+        for change, suffix in [({'groups': []}, '.groups'), ({'groups': chart['groups'] * 3}, '.groups'),
+                               ({'groups': [{'label': '가', 'five': [1, 8, 4, 9, 10]}]}, '.groups[0].five'),
+                               ({'groups': [{'label': '가', 'data': [3, 5, 6]}]}, '.groups[0].data'),
+                               ({'groups': [{'label': '가', 'data': [True, 3, 6, 8]}]}, '.groups[0].data[0]'),
+                               ({'groups': [{'label': '가', 'data': [1, 2, 3, 4], 'five': [1] * 5}]}, '.groups[0]'),
+                               ({'x': [4, 7]}, '.groups[0].data'), ({'x_step': 1e-300}, '.x_step'),
+                               ({'x_step': 11}, '.x_step'), ({'pen': 'true'}, '.pen'),
+                               ({'plot': {'answer': [1]}}, '.plot'), ({'guides': 1}, '.guides'),
+                               ({'height_mm': 60}, '.height_mm')]:
+            with self.subTest(change=change):
+                errors = {i.path for i in self.check({**chart, **change}) if i.level == 'error'}
+                self.assertIn('items[0].blocks[0]' + suffix, errors)
+        question = {'type': 'question', 'text': '상자그림을 그리시오.'}
+        for pen in (True, False):
+            issues = self.check(question, {**chart, 'pen': pen}, interactive=True)
+            self.assertEqual(any(i.code == 'interactive-drawing-missing' for i in issues), not pen)
+
+    def test_figure_answer_requires_svg_with_matching_viewbox(self):
+        figure = deepcopy(load_registry()['figure']['example'])
+        for answer in ('<svg viewBox="0,0,40.0,20"/>', {'svg': '<svg viewBox="0 0 40 20"/>'}):
+            self.assertFalse(self.check({**figure, 'answer': answer}))
+        for answer in ('<svg/>', '<svg viewBox="0 1 40 20"/>', '<svg viewBox="0 0 50 20"/>',
+                       '<svg viewBox="0 0 40 20"><script/></svg>', {'svg': '<svg/>', 'width_mm': 40}):
+            self.assertTrue(any(i.path == 'items[0].blocks[0].answer' and i.level == 'error'
+                                for i in self.check({**figure, 'answer': answer})))
+        figure['src'] = '그림/밑그림.svg'
+        figure.pop('svg')
+        self.assertTrue(any(i.path.endswith('.answer') and i.level == 'error' for i in self.check(figure)))
+
+    def test_figure_alt_warning_only_for_unlabelled_student_math_svg(self):
+        figure = {'type': 'figure', 'svg': '<svg><path/></svg>', 'width_mm': 50}
+        for updates, expected in [({}, True), ({'alt': '도형'}, False), ({'teacher_only': True}, False),
+                                  ({'svg': '<svg aria-label="선분"><path/></svg>'}, False),
+                                  ({'svg': '<svg><title>선분</title></svg>'}, False)]:
+            with self.subTest(updates=updates):
+                self.assertEqual(any(i.code == 'figure-alt-missing' for i in self.check({**figure, **updates})), expected)
+        pict = {k: v for k, v in figure.items() if k != 'type'}
+        heading = {'type': 'heading', 'tag': '활동', 'text': '살펴보기', 'image': pict}
+        self.assertFalse(any(i.code == 'figure-alt-missing' for i in self.check(heading)))
+
+    def test_figure_label_warning_uses_effective_width_and_inherited_size(self):
+        svg = ("<svg viewBox='0 0 170 30' aria-label='수직선' font-size='4'>"
+               "<g font-size='8' style='font-size:3.4px!important;font-size:20px'><text>10</text></g></svg>")
+        picture = {'svg': svg, 'width_mm': 170, 'caption': '수직선'}
+        figure = {'type': 'figure', **picture}
+        pair = {'type': 'figures', 'items': [{**picture, 'width_mm': 86, 'teacher_only': True}, picture]}
+        situation = {'type': 'situation', 'lines': ['자료'], 'figure': picture}
+        cases = [(figure, 1, []), (figure, 2, ['5.15']), (pair, 1, ['4.88', '5.13']), (situation, 1, ['3.63']),
+                 ({'type': 'split', 'ratio': '2:1', 'left': [figure], 'right': [figure]}, 1, ['3.46'])]
+        for block, columns, sizes in cases:
+            with self.subTest(block=block['type'], columns=columns):
+                messages = [i.message for i in self.check(block, columns=columns) if i.code == 'figure-label-small']
+                self.assertEqual(len(messages), len(sizes), messages)
+                for message, size in zip(messages, sizes):
+                    self.assertIn(size + 'pt', message)
+
+    def test_answer_scale_warning_uses_answer_cell_width_and_two_percent_limit(self):
+        def drawing(width, viewbox=105):
+            return {'width_mm': width, 'alt': '도형', 'svg': f'<svg viewBox="0 0 {viewbox} 40"/>'}
+        figure = {'type': 'figure', **drawing(166, 166)}
+        for width, expected in [(102, True), (102.9, False), (105, False), (107.1, False), (108, True)]:
+            draw = {'type': 'answer', 'rows': [{'kind': 'draw', 'label': '그리기', 'height_mm': 22, 'answer': drawing(width)}]}
+            self.assertEqual(any(i.code == 'answer-scale-mismatch' for i in self.check(figure, draw)), expected)
+        draw['rows'][0]['answer'] = drawing(190, 188 - 25.1 - 3.6)
+        self.assertFalse(any(i.code == 'answer-scale-mismatch' for i in self.check(figure, draw)))
+        teacher = {'type': 'figure', **drawing(102), 'teacher_only': True}
+        self.assertTrue(any(i.code == 'answer-scale-mismatch' for i in self.check(figure, teacher)))
+        data = document(figure)
+        data['items'].append({'id': 'q2', 'blocks': [teacher]})
+        self.assertFalse(any(i.code == 'answer-scale-mismatch' for i in validate(data, ROOT)))
+
+    def test_figures_fields_and_chart_examples_match_plan(self):
+        entry = load_registry()['figures']
+        for field in ('src', 'svg', 'width_mm', 'alt', 'caption', 'teacher_only', 'split'):
+            self.assertIn(field, entry['fields']['items'])
+        for key in ('pen', 'answer', 'type'):
+            pair = deepcopy(entry['example'])
+            pair['items'][0][key] = True
+            self.assertTrue(any(i.path.endswith(f'.items[0].{key}') and i.level == 'error' for i in self.check(pair)))
+        doc = (ROOT / 'references/구성-쓰기.md').read_text(encoding='utf-8')
+        self.assertIn('`figures.items[]`에는', doc)
+        examples = [json.loads(example) for example in re.findall(r'```json\n(.*?)\n```', doc, re.S)]
+        split = next(example for example in examples if example.get('type') == 'split')
+        charts = [example for example in examples if example.get('kind') == 'box']
+        self.assertEqual(len(charts), 4)
+        self.assertFalse(self.check(split, *charts, interactive=True))
+        self.assertTrue(all(split[side][0].get('pen') is True for side in ('left', 'right')))
+
+
 class PlanWarningCodeTest(unittest.TestCase):
     def test_every_plan_warning_has_a_code(self):
         # 전달 관문(status)은 원고 경고를 코드별로 판단하게 하므로, 코드 없는 경고가 다시 생기지 않게 막는다.

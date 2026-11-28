@@ -15,14 +15,16 @@ from pathlib import Path
 import re
 from xml.etree import ElementTree as ET
 
-from sheet_common import (BUILD_FILE, CHECK_DIR, RASTER_MIMES, ROOT, TEACHER_SUFFIX, TOOL, VERSION,
-                          atomic_write, html_paths, image_path, json_bytes, sha256)
+from sheet_common import (BUILD_FILE, CHECK_DIR, LABEL_MM, PICTURE_CELL_PADDING_MM, RASTER_MIMES, ROOT,
+                          TEACHER_SUFFIX, TOOL, VERSION, atomic_write, box_five, box_tick_values, content_width_mm,
+                          figure_width_mm, html_paths, image_path, json_bytes, sha256, situation_cell_mm, split_widths_mm)
 from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
-from sheet_plan import checked_svg, function_tree, function_value, line_grid_points, load_plan, print_issues
+from sheet_plan import (answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
+                        load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
 from sheet_answer import canonical, check_hash, inferred_unit, input_mode, make_salt, num, number_forms, plain, reveal, text_candidates
 
-LABEL_MM = {'평가': 25.1, '연습': 46.1, '수업': 30}
+KEY_COLOR = '#c00000'  # --ws-key-color; data images cannot inherit the document's CSS.
 TEACHER_ONLY = 'ws-teacher-only'
 KINDS_LABEL = {'평가': '수행평가', '연습': '연습지'}
 
@@ -199,6 +201,49 @@ def figure_svg(source):
     return ET.tostring(root, encoding='unicode')
 
 
+def overlay_svg(source, viewport):
+    """Match the base image viewport and recolor paint, not geometry or masks."""
+    root = ET.fromstring(figure_svg(source))
+    sizing = ('width', 'height', 'preserveAspectRatio')
+    for attr in sizing:
+        root.attrib.pop(attr, None)
+        value = svg_property(viewport, attr) if attr != 'preserveAspectRatio' else viewport.get(attr)
+        if value:
+            root.set(attr, value)
+    paints = {'color', 'fill', 'stroke', 'stop-color'}
+    unchanged = {'none', 'transparent', 'inherit', 'unset', 'revert', 'revert-layer'}
+
+    def paint(value):
+        return value if value.strip().lower() in unchanged else KEY_COLOR
+
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if svg_tag(node) in ('clipPath', 'mask'):
+            continue
+        for attr in node.attrib.keys() & paints:
+            node.set(attr, paint(node.get(attr)))
+        if 'style' in node.attrib:
+            declarations = []
+            for declaration in node.get('style').split(';'):
+                key, _, value = declaration.partition(':')
+                prop = key.strip().lower()
+                if node is root and prop in ('width', 'height'):
+                    continue
+                if prop in paints and value.strip():
+                    value, important = re.subn(r'\s*!\s*important\s*$', '', value, flags=re.I)
+                    declaration = f'{key}:{paint(value)}' + ('!important' if important else '')
+                if declaration.strip():
+                    declarations.append(declaration)
+            node.set('style', ';'.join(declarations))
+        stack.extend(node)
+    if not svg_property(root, 'fill'):
+        root.set('fill', KEY_COLOR)  # SVG's default black fill is red on the answer layer.
+    ET.register_namespace('', 'http://www.w3.org/2000/svg')
+    ET.register_namespace('xlink', 'http://www.w3.org/1999/xlink')
+    return ET.tostring(root, encoding='unicode')
+
+
 def data_image(mime, data):
     return f'data:{mime};base64,{base64.b64encode(data).decode("ascii")}'
 
@@ -210,7 +255,7 @@ class Renderer:
         self.meta = data['meta']
         self.kind = self.meta.get('kind', '수업')
         self.columns = self.meta.get('columns', 1)
-        self.content_mm = 188 if self.columns == 1 else 90.8  # (190 − 6) / 2 − 1.2
+        self.content_mm = content_width_mm(self.columns)
         self.label_mm = LABEL_MM[self.kind]
         self.title = self.meta['title']
         self.number = 0
@@ -349,22 +394,22 @@ class Renderer:
         return section('head', table('ws-head ws-head--' + self.kind, widths, body), ' data-span="all"')
 
     def image(self, picture, max_width, *, math_labels=False):
-        width = min(picture['width_mm'], max_width)
-        if 'svg' in picture:
-            mime = 'image/svg+xml'
-            svg = figure_svg if math_labels else checked_svg
-            data = svg(picture['svg']).encode('utf-8')
-        else:
+        width = figure_width_mm(picture, max_width)
+        source = picture.get('svg')
+        if source is None:
             file = image_path(self.folder, picture['src'])
             ext = file.suffix.lower()
             if ext == '.svg':
-                mime = 'image/svg+xml'
-                svg = figure_svg if math_labels else checked_svg
-                data = svg(file.read_text(encoding='utf-8-sig')).encode('utf-8')
-            else:
-                mime = RASTER_MIMES[ext]
-                data, mime = self.raster(file, width, mime)
-        alt = inspect_markup(picture.get('alt', '')).plain
+                source = file.read_text(encoding='utf-8-sig')
+        if source is not None:
+            mime = 'image/svg+xml'
+            svg = (figure_svg if math_labels else checked_svg)(source)
+            data = svg.encode('utf-8')
+            fallback = svg_alt(ET.fromstring(svg)) if 'alt' not in picture else ''
+        else:
+            data, mime = self.raster(file, width, RASTER_MIMES[ext])
+            fallback = ''
+        alt = inspect_markup(picture['alt']).plain if 'alt' in picture else fallback
         return f'<img src="{data_image(mime, data)}" style="width:{mm(width)}mm" alt="{escape(alt)}">'
 
     def raster(self, file, width, mime):
@@ -396,12 +441,22 @@ class Renderer:
         slot = self.slot('draw') if pen else ''
         make_caption = private_editable if figure.get('teacher_only') else editable
         caption = make_caption('figcaption', figure['caption']) if 'caption' in figure else ''
-        return f'<figure class="{cls}"{pen}{slot}>{self.image(figure, self.content_mm, math_labels=True)}{caption}</figure>'
+        base = self.image(figure, self.content_mm, math_labels=True)
+        overlay = ''
+        if 'answer' in figure:
+            viewport = ET.fromstring(checked_svg(figure['svg']))
+            svg = overlay_svg(answer_svg_source(figure['answer']), viewport)
+            src = data_image('image/svg+xml', svg.encode('utf-8'))
+            width = figure_width_mm(figure, self.content_mm)
+            overlay = (f'<img class="ws-key ws-fig-answer" src="{src}" style="width:{mm(width)}mm" '
+                       'alt="" aria-hidden="true">')
+        return f'<figure class="{cls}"{pen}{slot}>{base}{overlay}{caption}</figure>'
 
     def two_pictures(self, block):
         width = self.content_mm / 2
         figures = block['items']
-        images = ''.join(f'<td>{self.wrap_private(figure, self.image(figure, width - 3.6, math_labels=True))}</td>' for figure in figures)
+        images = ''.join(f'<td>{self.wrap_private(figure, self.image(figure, width - PICTURE_CELL_PADDING_MM, math_labels=True))}</td>'
+                         for figure in figures)
         caps = ''.join(f'<td class="ws-cap">{self.wrap_private(figure, private_editable("span", figure["caption"]))}</td>'
                        if figure.get('teacher_only') else editable('td', figure['caption'], 'ws-cap') for figure in figures)
         cls = 'ws-figs' + (' ' + TEACHER_ONLY if all(figure.get('teacher_only') for figure in figures) else '')
@@ -420,10 +475,10 @@ class Renderer:
         fig = block.get('figure')
         if not fig:
             return table('ws-box ws-sit', (self.content_mm,), tr(text_cell))
-        pic_mm = round(self.content_mm * min(.36, max(.31, (fig['width_mm'] + 3.6) / self.content_mm)), 1)
+        pic_mm = situation_cell_mm(self.content_mm, fig['width_mm'])
         make_caption = private_editable if fig.get('teacher_only') else editable
         caption = make_caption('p', fig['caption'], 'ws-cap') if 'caption' in fig else ''
-        picture = self.wrap_private(fig, self.image(fig, pic_mm - 3.6, math_labels=True) + caption)
+        picture = self.wrap_private(fig, self.image(fig, pic_mm - PICTURE_CELL_PADDING_MM, math_labels=True) + caption)
         return table('ws-box ws-sit ws-sit--fig', (self.content_mm - pic_mm, pic_mm),
                      tr(text_cell + f'<td class="ws-sit-fig">{picture}</td>'))
 
@@ -446,7 +501,7 @@ class Renderer:
                 label = self.label(row, len(group)) if i == 0 else ''
                 answer, kind = row['answer'], row.get('kind', 'text')
                 if isinstance(answer, dict):
-                    image = self.image(answer, self.content_mm - self.label_mm - 3.6)
+                    image = self.image(answer, self.content_mm - self.label_mm - PICTURE_CELL_PADDING_MM)
                     caption = private_editable('p', answer['caption']) if 'caption' in answer else ''
                     key = f'<div class="ws-key">{image}{caption}</div>'
                 else:
@@ -693,8 +748,76 @@ class Renderer:
         return (f'<figure class="ws-fig ws-nl"{attrs}><svg width="{mm(width)}mm" height="16mm" viewBox="0 0 {mm(width)} 16" '
                 f'data-map="{mm(a)} {mm(b)} {mm(left)} {y} {mm(unit)}" role="img" aria-label="수직선">{body}</svg></figure>')
 
+    def box_chart(self, block):
+        groups = block['groups']
+        width = min(block.get('width_mm', 130), self.content_mm)
+        lo, hi = block['x']
+        span = hi - lo
+        ticks = [(float(value), mm(float(value)).replace('-', '−')) for value in box_tick_values(block['x'], block['x_step'])]
+        names = [inspect_markup(group['label']).plain for group in groups]
+        print_size = 3.4  # viewBox units are mm in print (about 9.64pt).
+        target_phone_size = max(print_size, 6.6 * width / 170)
+        # The unit gets its own line so the end of the axis can still carry a number.
+        label_width = max(sum(.6 if c.isascii() else 1 for c in name) for name in names)
+        end_chars = max(len(ticks[0][1]), len(ticks[-1][1]))
+        left = min(width * .32, max(4 + label_width * target_phone_size, 2 + end_chars * .3 * target_phone_size))
+        right = width - min(width * .19, 2 + end_chars * .3 * target_phone_size)
+        tick_gap = (ticks[1][0] - ticks[0][0]) / span * (right - left)
+        max_label = max(len(text) for _, text in ticks)
+        phone_size = max(print_size, min(target_phone_size, (tick_gap - .35) / (.59 * max_label)))
+        row_height, top = 14, 1
+        bottom = top + row_height * len(groups)
+        unit = inspect_markup(block.get('x_label', '')).plain
+        height = bottom + (15.5 if unit else 9.5)
+
+        def x(value):
+            return left + (value - lo) / span * (right - left)
+
+        def label(at, y, text, anchor):
+            return (f'<text x="{mm(at)}" y="{mm(y)}" text-anchor="{anchor}" '
+                    f'font-size="{print_size}">{escape(text)}</text>')
+
+        lines = [f'M{mm(left)} {bottom}H{mm(right)}']
+        guides, labels = [], []
+        for value, text in ticks:
+            xx = mm(x(value))
+            lines.append(f'M{xx} {mm(bottom-.9)}v1.8')
+            guides.append(f'M{xx} {top}V{bottom}')
+            labels.append(label(x(value), bottom + 6.3, text, 'middle'))
+        if unit:
+            labels.append(label(width - 1, bottom + 13, unit, 'end'))
+        marks, summary = [], []
+        for i, (group, name) in enumerate(zip(groups, names)):
+            y = top + row_height * (i + .5)
+            labels.append(label(left - 2.5, y + 1, name, 'end'))
+            five = box_five(group)
+            low, q1, mid, q3, high = map(lambda v: mm(x(v)), five)
+            upper, lower = mm(y - 3.8), mm(y + 3.8)
+            path = (f'M{low} {mm(y)}H{q1}M{q3} {mm(y)}H{high}'
+                    f'M{low} {mm(y-2)}v4M{high} {mm(y-2)}v4'
+                    f'M{q1} {upper}H{q3}V{lower}H{q1}Z' if q1 != q3 else
+                    f'M{low} {mm(y)}H{high}M{low} {mm(y-2)}v4M{high} {mm(y-2)}v4')
+            marks.append(f'<path d="{path}M{mid} {upper}V{lower}"/>')
+            if not block.get('teacher'):
+                summary.append(f'{name}: ' + ', '.join(mm(value).replace('-', '−') for value in five))
+        attrs = self.slot('draw') + ' data-pen="1"' if self.interactive and block.get('pen') else ''
+        key = ' class="ws-key"' if block.get('teacher') else ''
+        frame = f'<path d="{"".join(lines)}" fill="none" stroke="currentColor" stroke-width=".3"/>'
+        grid = f'<path class="ws-chart-guides" d="{"".join(guides)}" fill="none"/>' if block.get('guides') else ''
+        body = f'{grid}{frame}{"".join(labels)}<g{key} fill="none" stroke="currentColor" stroke-width=".45">{"".join(marks)}</g>'
+        alt = '상자그림을 그리는 가로축: ' + ', '.join(names)
+        if summary:
+            alt = '상자그림: 최솟값, 제1사분위수, 중앙값, 제3사분위수, 최댓값. ' + '; '.join(summary)
+        if unit:
+            alt += f' {unit}'
+        return (f'<figure class="ws-fig ws-chart"{attrs}><svg width="{mm(width)}mm" height="{mm(height)}mm" '
+                f'viewBox="0 0 {mm(width)} {mm(height)}" data-chart="box" style="--ws-box-phone-font:{mm(phone_size)}px" '
+                f'role="img" aria-label="{escape(alt)}">{body}</svg></figure>')
+
     def chart(self, block):
         kind = block['kind']
+        if kind == 'box':
+            return self.box_chart(block)
         width, height = min(block.get('width_mm', 130), self.content_mm), block.get('height_mm', 65)
         left, right, top, bottom = 14, width - 4, 4, height - 12
         labels, values = block.get('labels', []), block.get('values', [])
@@ -994,10 +1117,11 @@ class Renderer:
             ratio = block.get('ratio', '1:1')
             left, right = map(int, ratio.split(':'))
             original = self.content_mm
+            left_width, right_width = split_widths_mm(original, ratio)
             try:
-                self.content_mm = (original - 5) * left / (left + right)
+                self.content_mm = left_width
                 lhs = '\n'.join(self.block(child, item_id) for child in block['left'])
-                self.content_mm = (original - 5) * right / (left + right)
+                self.content_mm = right_width
                 rhs = '\n'.join(self.block(child, item_id) for child in block['right'])
             finally:
                 self.content_mm = original

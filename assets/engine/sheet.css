@@ -167,6 +167,8 @@ svg .ws-key { stroke: var(--ws-key-color); }
 .ws-item img { height: auto; }
 .ws-item :is(.ws-fig, .ws-figs, .ws-sit-fig, .ws-ans) :is(img, svg) { vertical-align: middle; }
 .ws-fig > :is(img, svg) { display: block; margin-inline: auto; }
+.ws-fig { position: relative; }
+.ws-fig > .ws-fig-answer { position: absolute; inset: 0 0 auto; pointer-events: none; }
 .ws-item math { margin-inline: 0.2mm; }
 .ws-item math .seg { text-decoration: overline; }
 /* Move the whole word to the next line; only words wider than their container can wrap inside. */
@@ -487,6 +489,7 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 @media screen and (max-width: 719.98px) {
   #sheet-flow :is(.ws-split, .ws-flow-cols) { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   #sheet-flow .ws-choices { grid-template-columns: repeat(auto-fit, minmax(min(100%, 95px), 1fr)); }
+  #sheet-flow .ws-chart > svg[data-chart="box"] text { font-size: var(--ws-box-phone-font); }
   #sheet-flow .ws-item { padding: 12px; }
 }
 /* 기존 기기에서도 잘림 방지 규칙이 적용되도록 고전 미디어 쿼리를 쓴다. */

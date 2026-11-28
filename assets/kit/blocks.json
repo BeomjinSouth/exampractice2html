@@ -50,13 +50,13 @@
   },
   "figure": {
     "description": "가운데 정렬 그림 한 장",
-    "fields": {"src": "폴더 안 그림 파일 상대 경로", "svg": "문자열로 넣는 SVG", "width_mm": "그림 너비(mm)", "alt": "그림 대체 설명", "caption": "그림 아래 설명", "teacher_only": "true면 교사용만", "pen": "true면 그리기"},
-    "required": ["src 또는 svg 중 하나", "width_mm", "alt (src 사용 시)"], "limits": {"caption": 90, "alt": 120},
-    "example": {"type": "figure", "svg": "<svg viewBox='0 0 40 20'><rect x='2' y='2' width='36' height='16' fill='none' stroke='black'/></svg>", "width_mm": 40, "caption": "직사각형"}
+    "fields": {"src": "폴더 안 그림 파일 상대 경로", "svg": "문자열로 넣는 SVG", "width_mm": "그림 너비(mm)", "alt": "그림 대체 설명(SVG는 생략하면 aria-label 또는 title 사용)", "caption": "그림 아래 설명", "teacher_only": "true면 그림 전체를 교사용으로 표시", "pen": "true면 그리기", "answer": "밑그림과 같은 viewBox의 교사용 정답층. SVG 문자열 또는 {svg}; src 그림에는 사용 불가"},
+    "required": ["src 또는 svg 중 하나", "width_mm", "alt (SVG가 아닌 src 사용 시)"], "limits": {"caption": 90, "alt": 120},
+    "example": {"type": "figure", "svg": "<svg viewBox='0 0 40 20'><rect x='2' y='2' width='36' height='16' fill='none' stroke='black'/></svg>", "width_mm": 40, "alt": "직사각형", "pen": true, "answer": {"svg": "<svg viewBox='0 0 40 20'><line x1='2' y1='2' x2='38' y2='18' stroke='black'/></svg>"}}
   },
   "figures": {
     "description": "그림과 캡션을 나란히 놓은 표",
-    "fields": {"items": "figure에서 type을 뺀 그림 객체 2개", "items[].caption": "각 그림 아래 설명"},
+    "fields": {"items": "그림 객체 2개. 각각 src 또는 svg, width_mm, alt, caption, teacher_only만 사용. 각각 그리려면 split에 figure를 하나씩 배치", "items[].caption": "각 그림 아래 설명"},
     "required": ["items", "items[].caption"], "limits": {"items[].caption": 90, "items[].alt": 120},
     "example": {"type": "figures", "items": [{"svg": "<svg viewBox='0 0 20 20'><circle cx='10' cy='10' r='8'/></svg>", "width_mm": 20, "caption": "그림 가"}, {"svg": "<svg viewBox='0 0 20 20'><rect x='2' y='2' width='16' height='16'/></svg>", "width_mm": 20, "caption": "그림 나"}]}
   },
@@ -119,9 +119,9 @@
     "example": {"type": "numberline", "range": [-3, 3], "step": 1, "plot": {"answer": [-2, 1], "snap": 1}}
   },
   "chart": {
-    "description": "계산한 통계 그래프", "fields": {"kind": "bar·line·histogram·polygon·scatter", "labels": "항목", "values": "값", "bins": "계급 경계", "points": "산점도 점", "x": "가로 범위", "y": "세로 범위", "x_step": "가로 눈금", "x_label": "가로 축 이름", "y_label": "세로 축 이름", "y_max": "세로 최댓값", "y_step": "세로 눈금", "width_mm": "너비", "height_mm": "높이", "teacher": "자료를 교사용에만 표시", "plot": "막대 정답과 snap"},
-    "required": ["kind"], "limits": {"labels[]": 30, "x_label": 40, "y_label": 40},
-    "example": {"type": "chart", "kind": "bar", "labels": ["가", "나"], "values": [2, 3]}
+    "description": "계산한 통계 그래프", "fields": {"kind": "bar·line·histogram·polygon·scatter·box", "labels": "항목", "values": "값", "bins": "계급 경계", "points": "산점도 점", "groups": "상자그림 모둠 1~4개. 각각 {label, data} (수 4개 이상) 또는 {label, five} (최솟값, 제1사분위수, 중앙값, 제3사분위수, 최댓값)", "x": "가로 범위", "y": "세로 범위", "x_step": "가로 눈금 간격", "x_label": "가로 축 이름 또는 단위", "y_label": "세로 축 이름", "y_max": "세로 최댓값", "y_step": "세로 눈금", "width_mm": "너비", "height_mm": "높이(box는 모둠 수로 정함)", "teacher": "자료를 교사용에만 표시", "plot": "막대 정답과 snap(box에 사용 불가)", "pen": "box에서 true면 가로축 위에 그리기", "guides": "box에서 true면 옅은 세로 안내선 표시"},
+    "required": ["kind", "groups, x, x_step (box)"], "limits": {"labels[]": 30, "groups[].label": 8, "x_label": 40, "y_label": 40},
+    "example": {"type": "chart", "kind": "box", "groups": [{"label": "가", "data": [3, 5, 6, 8, 9]}, {"label": "나", "five": [2, 4, 5, 7, 10]}], "x": [0, 10], "x_step": 1, "x_label": "(분)", "teacher": true, "pen": true, "guides": true}
   },
   "explore": {
     "description": "매개변수 슬라이더로 함수 탐구", "fields": {"prompt": "안내", "fn": "x와 매개변수 식", "params": "name·label·min·max·step·value 객체 1~3개, 건너뛸 값은 except 배열(예: 정비례의 a는 [0])", "x": "x 정수 범위", "y": "y 정수 범위", "unit_mm": "한 칸 크기", "table": "표의 x값 배열", "print": "인쇄에 그릴 매개변수 값 묶음 배열(최대 4개, 예: [{\"a\": 2}, {\"a\": -2}])"},

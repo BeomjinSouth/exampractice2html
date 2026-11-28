@@ -1170,6 +1170,75 @@ assert 'q.2' in problems[1]['msg']
     await expectCue(false);
     await tab.js('sheet.clearAnswers()');
   }, metrics(390,844,true)));
+  await test('폰 입력 표는 폭을 채우고 넘치는 표만 스크롤', async () => {
+    const folder = path.join(work, 'responsive-input-tables'), title = '표 입력 폭 시험';
+    const source = {version:1, meta:{title, kind:'수업', sync:false}, items:[
+      {id:'compact', blocks:[{type:'table', header:['사건','경우의 수','확률'],
+        rows:[['합 $6$', '{{|$5$}}', '{{|$\\frac{5}{36}$}}']]}]},
+      {id:'wide', blocks:[{type:'table', header:['눈', ...[1,2,3,4,5,6].map(String)],
+        rows:Array.from({length:6}, (_,i) => [String(i+1), ...Array.from({length:6}, (_,j) => `{{|$${i+j+2}$}}`)])}]},
+    ]};
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+    await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+      {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+    await usingTab(pathToFileURL(path.join(folder, `${title}.html`)).href, async tab => {
+      const geometry = id => tab.js(`(() => {
+        const table=document.querySelector(${quote(`#sheet-flow ${item(id)} table.ws-data`)}), parent=table.parentElement;
+        const style=getComputedStyle(parent), rect=table.getBoundingClientRect();
+        return {width:rect.width, available:parent.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight),
+          inputs:[...table.querySelectorAll('.ws-in')].map(el=>el.getBoundingClientRect().width),
+          client:table.clientWidth, scroll:table.scrollWidth, overflow:table.classList.contains('ws-table-overflow'),
+          display:getComputedStyle(table).display, cue:getComputedStyle(table,'::after').content};
+      })()`);
+      const compact = await geometry('compact');
+      assert.equal(compact.inputs.length, 2);
+      assert(compact.inputs.every(width => width >= 70), quote(compact));
+      assert(Math.abs(compact.width-compact.available) <= 2, quote(compact));
+      assert.equal(compact.overflow, false, quote(compact));
+      assert.equal(compact.display, 'table');
+      assert(!compact.cue.includes('좌우'));
+      // 뷰포트는 그대로 두고 부모 카드만 줄였다 늘려도 다시 측정한다.
+      await tab.js(`document.querySelector('#sheet-flow ${item('compact')}').style.width='150px'`);
+      await eventually(async () => (await geometry('compact')).overflow, '부모 카드 축소 후 넘침 표시');
+      await tab.js(`{ const table=document.querySelector('#sheet-flow ${item('compact')} table');
+        window.tableTransitions=0; window.tableObserver=new MutationObserver(() => tableTransitions++);
+        tableObserver.observe(table,{attributes:true,attributeFilter:['class']}); }`);
+      await tab.js(`new Promise(resolve=>{let frames=0;const next=()=>++frames===12?resolve():requestAnimationFrame(next);requestAnimationFrame(next);})`, true);
+      assert.equal(await tab.js('tableTransitions'), 0, '넘침 상태가 프레임마다 뒤집히지 않음');
+      assert((await geometry('compact')).overflow);
+      const unstable = await tab.js(`(async()=>{
+        const card=document.querySelector('#sheet-flow ${item('compact')}');
+        const frames=n=>new Promise(resolve=>{const next=()=>--n?requestAnimationFrame(next):resolve();requestAnimationFrame(next);});
+        const unstable=[], states=new Set(), table=card.querySelector('table');
+        for(let width=170;width<=225;width++) {
+          card.style.width=width+'px'; await frames(4); const before=tableTransitions; await frames(5);
+          states.add(table.classList.contains('ws-table-overflow'));
+          if(tableTransitions!==before) unstable.push(width);
+        }
+        return {unstable,states:[...states].sort()};
+      })()`, true);
+      assert.deepEqual(unstable, {unstable:[],states:[false,true]}, '경계 폭에서 표 상태가 반복 전환되지 않음');
+      await tab.js(`tableObserver.disconnect(); document.querySelector('#sheet-flow ${item('compact')}').style.width=''`);
+      await eventually(async () => !(await geometry('compact')).overflow, '부모 카드 확대 후 넘침 해제');
+      const wide = await geometry('wide');
+      assert.equal(wide.inputs.length, 36);
+      await eventually(async () => (await geometry('wide')).overflow, '넓은 입력 표 넘침 표시');
+      const overflow = await geometry('wide');
+      assert(overflow.scroll > overflow.client+1 && overflow.cue.includes('좌우'), quote(overflow));
+      assert.equal((await tab.report()).overflow_x, 0);
+      assert(await tab.js(`(() => {const t=document.querySelector('#sheet-flow ${item('wide')} table');t.scrollLeft=t.scrollWidth;return t.scrollLeft>0;})()`));
+      await tab.send('Emulation.setDeviceMetricsOverride', metrics(1024,768));
+      await eventually(async () => !(await geometry('wide')).overflow, '화면 확대 후 넘침 해제');
+      const expanded = await geometry('wide');
+      assert.equal(expanded.display, 'table', quote(expanded));
+      assert(!expanded.cue.includes('좌우'));
+      await tab.js("sheet.view('a4')", true);
+      assert.equal((await tab.report()).print_leaks, 0);
+      assert.equal(await tab.js(`getComputedStyle(document.querySelector('#sheet-pages ${item('wide')} table')).display`), 'table');
+      await tab.js('sheet.clearAnswers()');
+    }, metrics(390,844,true));
+  });
   const contractFolder = path.join(work, 'contract-worksheet');
   const contractTitle = '판별과 인쇄 시험';
   const contractStudent = pathToFileURL(path.join(contractFolder, `${contractTitle}.html`)).href;
@@ -1758,6 +1827,30 @@ assert 'q.2' in problems[1]['msg']
     await paste(tab, value); await tab.key('Enter');
     assert.equal(await draft(tab), undefined, '편집 내용 확정');
   }
+  await test('교사 표 칸 편집과 조립의 전체 빈칸 판정이 같음', async () => {
+    const cases = [
+      ['{{|$\\frac{5}{36}$}}', true], ['{{|$\\frac{1}{x^{2}}$}}', true],
+      ['{{㉠|$\\sqrt{3}$}}', true], ['{{㉠}}', true], ['{{|3|20}}', true],
+      ['  {{|$\\overline{AB}$}}  ', true], ['{{|3}} cm', false],
+      ['{{|3}}{{|4}}', false], ['약 {{|3}}', false],
+    ];
+    const files = await buildEditorCase('표-빈칸-판정', [{id:'q1', blocks:[
+      {type:'table', header:['값'], rows:cases.map(() => ['{{|3}}'])},
+    ]}]);
+    await usingTab(files.open(files.teacher), async tab => {
+      const selectors = cases.map((_, i) => `#sheet-pages ${item('q1')} table.ws-data tbody tr:nth-child(${i+1}) td`);
+      const flags = () => tab.js(`${quote(selectors)}.map(s=>document.querySelector(s).classList.contains('ws-fill'))`);
+      assert.deepEqual(await flags(), cases.map(() => true));
+      await tab.click(action('edit'));
+      for (const [i, [source, expected]] of cases.entries()) {
+        await editField(tab, selectors[i], '임시');
+        assert.equal(await tab.js(`document.querySelector(${quote(selectors[i])}).classList.contains('ws-fill')`), false);
+        await editField(tab, selectors[i], source);
+        assert.equal(await tab.js(`document.querySelector(${quote(selectors[i])}).classList.contains('ws-fill')`), expected, source);
+      }
+      assert.deepEqual(await flags(), cases.map(([, expected])=>expected));
+    });
+  });
   await test('표 머리·행 라벨·표 자체 단위를 고쳐도 저장과 derive 판별이 같음', async () => {
     const files = await buildEditorCase('표-단위', [{id:'q1', blocks:[
       {type:'table', header:['반','최솟값','최댓값'], rows:[['1반','{{|$45$}}','{{|$90$}}'], ['2반','{{|$50$}}','{{|$95$}}']]},

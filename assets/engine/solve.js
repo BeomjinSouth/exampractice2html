@@ -637,6 +637,7 @@
       sizer.setAttribute('aria-hidden', 'true');
       toggle(fillTable, 'ws-input-table', true);
       resizeObserver.observe(fillTable);
+      resizeObserver.observe(fillTable.parentElement);
     }
     if (!multiline) input.type = 'text';
     const headings = tableHeadings(el);
@@ -1659,8 +1660,17 @@
   function updateTableOverflow(scope) {
     const narrow = mode === 'solve' && narrowScreen.matches;
     for (const table of all(scope, 'table.ws-input-table')) {
-      const overflow = narrow && table.clientWidth > 0 && table.scrollWidth > table.clientWidth + 1;
-      if (table.classList.contains('ws-table-overflow') !== overflow) toggle(table, 'ws-table-overflow', overflow);
+      const scrolling = table.classList.contains('ws-table-overflow');
+      const parent = table.parentElement;
+      const style = getComputedStyle(parent);
+      const available = parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      const border = getComputedStyle(table);
+      // 소수점 표 폭과 정수 scrollWidth가 경계에서 서로 반대 판정을 내리지 않게 한다.
+      const blockClient = Math.round(available - parseFloat(border.borderLeftWidth) - parseFloat(border.borderRightWidth));
+      const overflow = narrow && table.clientWidth > 0 && (scrolling
+        ? table.scrollWidth > table.clientWidth + 1
+        : table.getBoundingClientRect().width > available + 1 && table.scrollWidth > blockClient + 1);
+      if (scrolling !== overflow) toggle(table, 'ws-table-overflow', overflow);
     }
   }
   function schedulePaint() {

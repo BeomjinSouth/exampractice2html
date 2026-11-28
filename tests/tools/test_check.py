@@ -194,6 +194,53 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertIn('q1', info['filled_screen']['clipped'])
         self.assertIn('filled-screen-clipped', [problem['code'] for problem in problems])
 
+    def test_phone_reports_value_clipped_before_answer_reveal(self):
+        folder = self.run_root / '입력-중-잘림'
+        folder.mkdir(parents=True, exist_ok=True)
+        data = {'meta': {'title': '입력 검사', 'kind': '수업', 'interactive': True, 'reveal': '바로', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [
+                    {'type': 'question', 'text': '긴 수 {{|$123456789$}}, 짧은 수 {{|$3$}}, 숨긴 수 {{|$987654321$}}'}]}]}
+        teacher = sheet_build.document_html(sheet_build.Renderer(data, folder, []), {}, '')
+        table = sheet_build.answer_table_from_html(teacher)
+        student = sheet_build.strip_teacher(teacher).replace(
+            '<style id="sheet-user"></style>',
+            '<style id="sheet-user">#sheet-flow [data-slot="q1.1"] .ws-in {width:24px!important}'
+            '#sheet-flow [data-slot="q1.3"] .ws-in {width:24px!important;visibility:hidden}'
+            '#sheet-flow .ws-item:has(.ws-reveal:not([hidden])) [data-slot="q1.1"] .ws-in '
+            '{width:200px!important}</style>')
+        path = folder / '학생.html'
+        path.write_text(student, encoding='utf-8')
+        out = folder / '검사'
+        out.mkdir()
+        with sheet_check.sheet_browser() as browser:
+            for domain in ('Page.enable', 'Runtime.enable'):
+                browser.cdp.call(domain)
+            sheet_check._navigate(browser, path, False)
+            browser.cdp.call('Emulation.setDeviceMetricsOverride', {'width': 390, 'height': 844,
+                                                                    'deviceScaleFactor': 1, 'mobile': False})
+            browser.cdp.evaluate("sheet.view('solve')", True)
+            browser.cdp.evaluate(sheet_check._FILL_JS % (json.dumps(table['slots']), *sheet_check._FILL_LINES), True)
+            entered = browser.cdp.evaluate("""(() => {
+              const input = document.querySelector('#sheet-flow [data-slot="q1.1"] .ws-in');
+              return {value: input.value, clipped: input.scrollWidth > input.clientWidth + 1,
+                verdict: !!input.closest('.ws-item').querySelector('.ws-verdict:not([hidden])')};
+            })()""")
+            self.assertEqual(entered, {'value': '123456789', 'clipped': True, 'verdict': False})
+            browser.cdp.evaluate('sheet.clearAnswers()')
+            problems = []
+            info, _, _ = sheet_check._interactive_check(browser.cdp, out, table, problems)
+        self.assertEqual(info['typing_screen_clipped'], ['q1.1'])
+        self.assertIn('typing-screen-clipped', [problem['code'] for problem in problems])
+        self.assertNotIn('q1.1', info['filled_screen']['clipped'])
+        report_folder = self.make_case('입력-중-보고서', teacher, student)
+        sheet_build.update_answer_table(report_folder, table)
+        self.assertIn('typing-screen-clipped', self.inspect(report_folder, 0))
+        report = json.loads((report_folder / '검사/report.json').read_text(encoding='utf-8'))
+        self.assertEqual(report['interactive_check']['typing_screen_clipped'], ['q1.1'])
+        warning = next(problem for problem in report['problems'] if problem['code'] == 'typing-screen-clipped')
+        self.assertEqual(warning['level'], 'warning')
+        self.assertIn('q1.1', warning['msg'])
+
     def test_pen_print_detects_opaque_layers_and_missing_ink(self):
         try:
             import pymupdf  # noqa: F401
@@ -399,7 +446,8 @@ class FakeInteractiveProtocol:
         if 'available:' in expression:
             return {'available': True, 'reveal': self.reveal, 'salt': 'a' * 32}
         if 'filledScreenInspection' in expression:
-            return {'view': 'solve', 'overflow_x': self.overflow, 'clipped': [], 'checked_items': 1, 'revealed_items': 1}
+            return {'view': 'solve', 'overflow_x': self.overflow, 'clipped': [], 'typing_clipped': [],
+                    'checked_items': 1, 'revealed_items': 1}
         if 'ws-item[data-id]' in expression:
             return self.items
         if 'Promise.race' in expression:
@@ -439,13 +487,16 @@ class CheckBoundaryTest(unittest.TestCase):
         def evaluate(expression, await_promise=False):
             if 'filledScreenInspection' in expression:
                 protocol.expressions.append(expression)
-                return {'view': 'solve', 'overflow_x': 3, 'clipped': ['q1.1'], 'checked_items': 1, 'revealed_items': 1}
+                return {'view': 'solve', 'overflow_x': 3, 'clipped': ['q1.1'], 'typing_clipped': ['q1.1'],
+                        'checked_items': 1, 'revealed_items': 1}
             return original(expression, await_promise)
         protocol.evaluate = evaluate
         problems = []
         info, files, _ = sheet_check._interactive_check(protocol, out, table, problems)
         self.assertEqual(info['filled_screen']['overflow_x'], 3)
         self.assertEqual(info['filled_screen']['clipped'], ['q1.1'])
+        self.assertEqual(info['typing_screen_clipped'], ['q1.1'])
+        self.assertIn('typing-screen-clipped', [p['code'] for p in problems])
         self.assertIn('filled-screen-overflow', [p['code'] for p in problems])
         self.assertIn('filled-screen-clipped', [p['code'] for p in problems])
         self.assertTrue(any('reveal-answer' in e and 'data-sheet-action="check"' in e for e in protocol.expressions))

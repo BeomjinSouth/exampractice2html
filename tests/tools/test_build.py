@@ -374,6 +374,27 @@ class BuildTest(unittest.TestCase):
                 for path in (self.teacher, self.student):
                     self.assertIn(note, path.read_text(encoding='utf-8'))
 
+    def test_table_marks_only_whole_blank_cells_even_with_nested_math_braces(self):
+        from sheet_build import Renderer
+        cases = [
+            (r'{{|$\frac{5}{36}$}}', True),
+            (r'{{|$\frac{1}{x^{2}}$}}', True),
+            (r'{{㉠|$\sqrt{3}$}}', True),
+            ('{{㉠}}', True),
+            ('{{|3|20}}', True),
+            (r'  {{|$\overline{AB}$}}  ', True),
+            ('{{|3}} cm', False),
+            ('{{|3}}{{|4}}', False),
+            ('약 {{|3}}', False),
+        ]
+        renderer = Renderer({'meta': {'title': '표 시험', 'interactive': False}}, self.folder, [])
+        block = {'type': 'table', 'header': ['값'], 'rows': [[source] for source, _ in cases]}
+        cells = [attrs for tag, attrs in Tags(renderer.block(block, 'q1')).tags if tag == 'td']
+        self.assertEqual(len(cells), len(cases))
+        for (source, expected), attrs in zip(cases, cells):
+            with self.subTest(source=source):
+                self.assertEqual('ws-fill' in attrs.get('class', '').split(), expected)
+
     def test_table_uses_widest_blank_in_header_and_body_only(self):
         from sheet_build import Renderer
         block = {'type': 'table', 'header': ['{{㉠|둘}}', '값'],

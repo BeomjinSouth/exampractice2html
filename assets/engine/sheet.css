@@ -512,7 +512,8 @@ span:is(.ws-verdict,.ws-reveal) { margin-inline-start: .35em; }
 /* 기존 기기에서도 잘림 방지 규칙이 적용되도록 고전 미디어 쿼리를 쓴다. */
 @media screen and (max-width: 719.98px) {
   /* 좁은 화면에서는 표 칸의 입력 폭을 보장하고, 넘친 표만 옆으로 움직인다. */
-  #sheet-flow .ws-data.ws-input-table { display: block; table-layout: auto; overflow-x: auto; }
+  #sheet-flow .ws-data.ws-input-table { display: table; width: 100%; table-layout: auto; }
+  #sheet-flow .ws-data.ws-input-table.ws-table-overflow { display: block; box-sizing: border-box; overflow-x: auto; }
   #sheet-flow .ws-data.ws-input-table col { width: auto !important; }
   #sheet-flow .ws-data.ws-input-table :is(th, td) { padding-inline: .6mm; }
   #sheet-flow .ws-data.ws-input-table :is(th, td):not(.ws-fill) { min-width: 2.5em; overflow-wrap: normal; }

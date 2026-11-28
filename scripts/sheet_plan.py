@@ -516,6 +516,7 @@ QUADRATIC_MATH = re.compile(r'<msup><mi>x</mi><mn>2</mn></msup>')
 EXPRESSION_CORRECTION = re.compile(
     r'\s*(?:(?:하면|면|해서는|해선|하여서는)\s*안\s*[되된돼됩]|'
     r'(?:하|열리|리)?지\s*(?:않|말|마)|'
+    r'(?:할|될|릴)\s*수(?:는)?\s*없|'
     r'(?:하는\s*(?:것은|것이)|한다는\s*말은)\s*(?:(?:옳|맞|올바르)지\s*않|아니)|'
     r'[’”\'\"]?\s*(?:(?:라는|이라는)\s*(?:말|표현)(?:은|을)|라고)?\s*(?:쓰지|사용하지)\s*(?:않|말|마))')
 INLINE_PARTS = re.compile(r'\\[\\${]|\$((?:\\[\\$]|[^$])*)\$')
@@ -534,6 +535,12 @@ LENGTH_UNIT_AFTER_MATH = re.compile(rf'(?:\*\*)?\s*{LENGTH_UNIT}(?![A-Za-z0-9_^�
 LENGTH_NUMBER = re.compile(
     rf'-?{MATH_NUMBER}(?P<unit>(?:\s|\\[,;:! ])*'
     rf'(?:{LENGTH_UNIT}|\\(?:text|mathrm)\s*\{{\s*{LENGTH_UNIT}\s*\}}))?')
+# Expression checks see rendered text, including numbers with grouping commas.
+RENDERED_NUMBER = r'(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)'
+LENGTH_VALUE = re.compile(
+    rf'\s*(?:[+−-]?√?(?:\({RENDERED_NUMBER}\)/\({RENDERED_NUMBER}\)|{RENDERED_NUMBER})|[A-Za-zΑ-Ωα-ω])'
+    rf'(?=(?:\s+|(?<=\d)){LENGTH_UNIT}(?![A-Za-z0-9_^²³])|[+−×÷/=<>≤≥≠^²³-]|'
+    r'\s*(?:이(?:고|다|며|면|므로|거나|상|하|\s)|인|일|임|보다|으?로|[,.](?!\d)|[;:)]|$))')
 NON_LENGTH_OBJECT_BEFORE = re.compile(r'(?:행렬|집합)\s*(?:\*\*)?\s*$')
 NON_LENGTH_OBJECT_AFTER = re.compile(r'\s*(?:인\s*)?(?:행렬|집합)')
 BARE_SEGMENT_NAME = r'[A-Z]{2}'
@@ -691,6 +698,9 @@ class Validator:
             prefixes = (prefixes,) if isinstance(prefixes, str) else tuple(prefixes)
             suffix = entry.get('skip_if_followed_by')
             context = entry.get('context')
+            unit_context = entry.get('unit_context')
+            if unit_context and re.search(unit_context, self.unit_context):
+                context = None
             if any(not sentence[:match.start()].endswith(prefixes) and
                    not (suffix and re.match(suffix, sentence[match.end():]))
                    for sentence in sentences if not context or re.search(context, sentence)
@@ -704,17 +714,22 @@ class Validator:
         sentences = SENTENCE_BREAK.split(text)
         for entry in load_expressions():
             unit = entry.get('unit')
+            guidance = entry
             if unit and not re.search(unit, self.unit_context):
-                continue
+                guidance = entry.get('otherwise')
+                if guidance is None:
+                    continue
             context = entry.get('context')
             pattern = entry.get('pattern') or re.escape(entry['avoid'])
+            needs_length = entry.get('followed_by_length')
             match = next((match for sentence in sentences
                           if not context or any(word in sentence for word in context)
                           for match in re.finditer(pattern, sentence)
-                          if not EXPRESSION_CORRECTION.match(sentence[match.end():])), None)
+                          if (not needs_length or LENGTH_VALUE.match(sentence, match.end()))
+                          and not EXPRESSION_CORRECTION.match(sentence[match.end():])), None)
             if match:
                 self.warn(path, f'교과서 표현을 확인하세요: ‘{entry.get("avoid", match[0])}’.',
-                          f'{entry["reason"]} 문맥에 맞게 ‘{entry["preferred"]}’ 표현으로 이으세요.',
+                          f'{guidance["reason"]} 문맥에 맞게 ‘{guidance["preferred"]}’ 표현으로 이으세요.',
                           'textbook-expression')
 
     def check_math_notation(self, value, path):

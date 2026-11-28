@@ -1233,8 +1233,9 @@ def _edited_plan_status(teacher, build, warnings):
             grade = next((el.text() for el in head.walk(public=True) if el.has('ws-head-name') or el.has('ws-head-1')
                           if grade_level(el.text()) is not None), None)
     validator = Validator(teacher.parent)
-    validator.grade = grade_level(grade)
-    validator.unit = unit or ''
+    # 단원 조건이 있는 표현 점검(작도 단원의 ‘호’ 등)도 원고 검증과 같은 문맥으로 본다.
+    title = next((el.text() for el in doc.root.elements() if el.tag == 'title'), None)
+    validator.set_text_context({'grade': grade, 'unit': unit, 'title': title})
     validator.kind = root.attrs.get('data-kind', '수업')
 
     def check_field(el, path):

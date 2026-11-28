@@ -163,6 +163,26 @@ class StatusTest(unittest.TestCase):
             self.assertEqual(sheet_check.cmd_status(self.folder), 0)
         self.assertEqual(output.getvalue().count('편집본 미검사'), 2)
 
+    def test_edited_text_checks_use_unit_context(self):
+        # 단원 조건이 붙은 표현 점검(작도 단원의 ‘호’)이 편집본에도 적용되는지 본다.
+        build = json.loads(self.build.read_text(encoding='utf-8'))
+        source = self.teacher.read_text(encoding='utf-8').replace('data-role="teacher"',
+                    'data-role="teacher" data-saved-at="2026-01-01"')
+        source = source.replace('</html>', '''<body><div id="sheet-src"><section class="ws-item" data-id="q1">
+            <p data-src="두 호의 교점을 점 $A$라고 하시오.">발문</p></section></div></body></html>''')
+        self.teacher.write_text(source, encoding='utf-8')
+        for unit, expected in [('작도와 합동', True), ('원과 부채꼴', False)]:
+            with self.subTest(unit=unit):
+                build.update(grade='중1', unit=unit, plan_warnings={})
+                self.build.write_text(json.dumps(build), encoding='utf-8')
+                self.stamp(self.teacher, 1)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    sheet_check.cmd_status(self.folder)
+                if expected:
+                    self.assertIn('textbook-expression 1건', output.getvalue())
+                else:
+                    self.assertNotIn('textbook-expression', output.getvalue())
+
     def test_warning_review_rejects_placeholders_and_accepts_punctuation(self):
         from sheet_plan import Issue
         self.fake_plan.load_plan = lambda folder: ({}, b'', [Issue('warning', '$', '', '', 'test-warning')])

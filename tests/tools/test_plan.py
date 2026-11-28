@@ -617,6 +617,35 @@ class PlanTest(unittest.TestCase):
         data['meta']['header_title'] = '제목'
         self.assertEqual(paths(), {'meta.unit', 'meta.name_fields[0]'})
 
+    def test_screen_only_instruction_detects_bold_tools_and_device_conditions(self):
+        bad = ('그림의 **곧은 선**으로 점을 이으세요.', '**지우개**를 사용하세요.',
+               '**되돌리기**를 누르세요.', '**모두 지우기**를 누르세요.',
+               '**크게**를 선택하세요.', '**화면 이동**을 고르세요.', '‘화면 이동’을 선택하세요.',
+               '**펜**을 선택하세요.', '태블릿에서는 그림을 봅니다.', '화면에서도 선을 긋습니다.',
+               '휴대폰에서만 답을 씁니다.', '스마트폰에서는 값을 확인합니다.',
+               '**태블릿**에서는 그림을 봅니다.')
+        good = ('평면에서는 두 직선이 만납니다.', '그림에서는 두 점을 잇습니다.',
+                '좌표평면에서 점을 찾습니다.', '**컴퍼스**를 이용해 원을 그립니다.',
+                '**펜**으로 선을 긋습니다.', '컴퍼스와 펜으로 작도합니다.',
+                '정답은 {{|**곧은 선**}}입니다.')
+        for text in (*bad, *good):
+            with self.subTest(text=text):
+                issues = validate(document({'type': 'text', 'text': text}), ROOT)
+                self.assertEqual(any(i.code == 'screen-only-instruction' for i in issues), text in bad)
+
+    def test_new_screen_rules_ignore_unprinted_and_teacher_text(self):
+        text = '태블릿에서는 **곧은 선**을 고릅니다.'
+        data = document({'type': 'text', 'text': '점을 잇습니다.'},
+                        {'type': 'checklist', 'items': [text]},
+                        {'type': 'checklist', 'print': True, 'items': [text]},
+                        {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40,
+                         'teacher_only': True, 'caption': text})
+        data['meta']['kind'] = '수업'
+        data['items'][0]['hints'] = [text]
+        data['teacher'] = {'memo': [text], 'solutions': [{'item': 'q1', 'answer': text, 'steps': [text]}]}
+        paths = {i.path for i in validate(data, ROOT) if i.code == 'screen-only-instruction'}
+        self.assertEqual(paths, {'items[0].blocks[2].items[0]'})
+
     def test_print_color_theme_warning_only_for_practice_and_assessment(self):
         data = document({'type': 'text', 'text': '생각을 씁니다.'})
         for kind, theme, expected in (('수업', '산뜻', False), ('연습', '산뜻', True), ('평가', '산뜻', True),
@@ -1003,6 +1032,61 @@ class FigurePlanTest(unittest.TestCase):
         pict = {k: v for k, v in figure.items() if k != 'type'}
         heading = {'type': 'heading', 'tag': '활동', 'text': '살펴보기', 'image': pict}
         self.assertFalse(any(i.code == 'figure-alt-missing' for i in self.check(heading)))
+
+    def test_plain_alt_and_goal_allow_point_names_but_visible_text_and_caption_warn(self):
+        alt = '원에 점 A, B, P가 있고, 호 AB와 점 P에 놓인 각도 눈금이 표시된 그림'
+        figure = {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40, 'alt': alt}
+        self.assertEqual(self.check(figure), [])
+        data = document({'type': 'text', 'text': alt}, {**figure, 'caption': alt})
+        data['meta']['goal'] = alt
+        warnings = [i.path for i in validate(data, ROOT) if i.code == 'latin-outside-math']
+        self.assertEqual(warnings, ['items[0].blocks[0].text', 'items[0].blocks[1].caption'])
+
+    def test_first_draft_point_names_keep_only_genuine_duplicate_warnings(self):
+        blocks = [{'type': 'figure', 'svg': '<svg/>', 'width_mm': 40,
+                   'alt': f'원에 점 A, B, {name}이 있고, 호 AB와 점 {name}에 놓인 각도 눈금이 표시된 그림'}
+                  for name in ('P', 'Q', 'O', 'R', 'O', 'S')]
+        issues = self.check(*blocks)
+        self.assertFalse(any(i.code == 'latin-outside-math' for i in issues))
+        self.assertEqual({i.path for i in issues if i.code == 'figure-alt-duplicate'},
+                         {'items[0].blocks[2].alt', 'items[0].blocks[4].alt'})
+
+    def test_duplicate_student_figure_alt_reports_every_location(self):
+        picture = {'svg': '<svg/>', 'width_mm': 40, 'alt': '두  점이 표시된 그림'}
+        same = {**picture, 'alt': '  두\t점이 표시된 그림  '}
+        data = document({'type': 'figure', **picture},
+                        {'type': 'split', 'left': [{'type': 'figure', **same}],
+                         'right': [{'type': 'text', 'text': '설명'}]},
+                        {'type': 'figures', 'items': [{**picture, 'caption': '가'},
+                                                      {**same, 'caption': '나'}]},
+                        {'type': 'situation', 'lines': ['그림을 봅니다.'], 'figure': same},
+                        {'type': 'heading', 'tag': '활동', 'text': '그림',
+                         'image': {**same, 'width_mm': 20}},
+                        {'type': 'callout', 'kind': '개념', 'lines': ['설명'],
+                         'image': {**same, 'width_mm': 20}})
+        data['items'].append({'id': 'q2', 'blocks': [{'type': 'figure', **same}]})
+        paths = {'items[0].blocks[0].alt', 'items[0].blocks[1].left[0].alt',
+                 'items[0].blocks[2].items[0].alt', 'items[0].blocks[2].items[1].alt',
+                 'items[0].blocks[3].figure.alt', 'items[0].blocks[4].image.alt',
+                 'items[0].blocks[5].image.alt', 'items[1].blocks[0].alt'}
+        warnings = [i for i in validate(data, ROOT) if i.code == 'figure-alt-duplicate']
+        self.assertEqual({i.path for i in warnings}, paths)
+        self.assertEqual(len(warnings), len(paths))
+        for warning in warnings:
+            self.assertTrue(any(other in warning.hint for other in paths - {warning.path}))
+            for difference in ('꼭짓점', '값', '호', '점 이름(A, B, P)', 'alt에 그대로'):
+                self.assertIn(difference, warning.hint)
+
+    def test_duplicate_alt_checks_two_columns_and_excludes_teacher_figures(self):
+        figure = {'type': 'figure', 'svg': '<svg/>', 'width_mm': 40, 'alt': '점 두 개'}
+        teacher = {**figure, 'teacher_only': True}
+        draw = {'type': 'answer', 'rows': [{'kind': 'draw', 'label': '그리기', 'height_mm': 40,
+                                            'answer': {k: v for k, v in figure.items() if k != 'type'}}]}
+        self.assertFalse(any(i.code == 'figure-alt-duplicate' for i in self.check(figure, teacher, draw, columns=2)))
+        warnings = [i for i in self.check(figure, teacher, {**figure}, draw, columns=2)
+                    if i.code == 'figure-alt-duplicate']
+        self.assertEqual({i.path for i in warnings}, {'items[0].blocks[0].alt', 'items[0].blocks[2].alt'})
+        self.assertFalse(any('blocks[1]' in i.hint or 'blocks[3]' in i.hint for i in warnings))
 
     def test_figure_label_warning_uses_effective_width_and_inherited_size(self):
         svg = ("<svg viewBox='0 0 170 30' aria-label='수직선' font-size='4'>"

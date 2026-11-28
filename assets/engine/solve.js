@@ -54,6 +54,29 @@
     return n == null ? null : [n, unit === '도' ? '°' : unit];
   }
   const num = s => number_parts(s)?.[0] ?? null;
+  function inferred_unit(tail, column = '', row = '') {
+    const text = tail.normalize('NFKC').toLowerCase();
+    const particles = '(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?';
+    for (const unit of units.toSorted((a, b) => b.length - a.length)) {
+      if (unit !== '도' && new RegExp(`^${unit}${particles}(?![\\p{L}\\p{N}_])`, 'u').test(text)) return unit;
+    }
+    for (const heading of [column, row]) {
+      const unit = norm(/\(([^()]*)\)\s*$/.exec(heading.normalize('NFKC'))?.[1] ?? '');
+      if (units.includes(unit)) return unit === '도' ? '°' : unit;
+    }
+    return '';
+  }
+  function number_forms(values, unit = '') {
+    const parts = values.map(number_parts);
+    if (parts.some(p => !p)) return [];
+    const inferred = parts.some(([, u]) => u) ? '' : unit;
+    return [...new Set([...parts.map(([n]) => n), ...parts.filter(([, u]) => u || inferred).map(([n, u]) => `${n}@${u || inferred}`)])];
+  }
+  function input_mode(values) {
+    const texts = values.map(norm);
+    if (!texts.every(t => /^[0-9]+(?:\.[0-9]+)?$/.test(t))) return '';
+    return texts.some(t => t.includes('.')) ? 'decimal' : 'numeric';
+  }
   const symbols = { times: '×', div: '÷', le: '≤', ge: '≥', ne: '≠', pi: 'π', circ: '°', angle: '∠',
     triangle: '△', square: '□', perp: '⊥', parallel: '⫽', equiv: '≡', sim: '∽', pm: '±', approx: '≈',
     cdot: '⋅', therefore: '∴', because: '∵', cdots: '⋯' };
@@ -189,7 +212,7 @@
   const encodeReveal = (salt, data) => base64(xor(salt, utf8.encode(JSON.stringify(data))));
   const decodeReveal = (salt, text) => JSON.parse(decoder.decode(xor(salt, unbase64(text))));
   // 계약 시험용 내부 표면. window.sheet의 학생 API와 분리한다.
-  core.codec = Object.freeze({ norm, num, number_parts, text_candidates, plain, line, points, sha256: hex, hash, encodeReveal, decodeReveal });
+  core.codec = Object.freeze({ norm, num, number_parts, inferred_unit, number_forms, input_mode, text_candidates, plain, line, points, sha256: hex, hash, encodeReveal, decodeReveal });
 
   const salt = () => document.querySelector('meta[name="sheet-salt"]')?.content || '';
   const policy = root.dataset.reveal || '시도 후';
@@ -201,14 +224,15 @@
   const records = new Map(), dash = new Set();
   let stored = {}, storedPens = {}, initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
-  let delayedPaint;
+  let delayedPaint, pendingRestore, restorePrompt;
   const store = (op, ...args) => { try { return window.localStorage[op](...args); } catch { return undefined; } };
-  const usable = () => !teacher || preview;
+  const usable = () => (!teacher || preview) && !pendingRestore;
   const solveOnly = (tag, cls, text) => runtime(make(tag, `${cls} ws-solve-only`, text));
   const uiButton = (label, action, fn, options) => core.button(label, action, event => { if (usable()) fn(event); }, options);
   function saveValues() {
-    if (!storageKey) return;
+    if (!storageKey || pendingRestore) return;
     store('setItem', storageKey, JSON.stringify(values()));
+    if (!teacher) store('setItem', `${storageKey}:saved-at`, String(Date.now()));
     const pens = Object.fromEntries([...records.values()].filter(r => r.penValue !== undefined).map(r => [r.slot, r.penValue]));
     if (Object.keys(pens).length) store('setItem', `${storageKey}:pen`, JSON.stringify(pens));
     else store('removeItem', `${storageKey}:pen`);
@@ -253,6 +277,7 @@
     if (Array.isArray(value)) return value.some(v => v != null);
     return String(value).trim() !== '';
   }
+  const multiple = new Set(['bars', 'points', 'line', 'match', 'order']);
   function completeResponse(row) {
     if (!hasResponse(row)) return false;
     if (['match','line','bars'].includes(row.kind)) return normalize(row.kind, row.value, row.el) != null;
@@ -318,6 +343,15 @@
     }
     return undefined;
   }
+  function restoreRow(row, slot) {
+    const { el, kind } = row;
+    const embedded = json(el.dataset.value, undefined);
+    row.value = sanitizedValue(row, embedded ?? (Object.hasOwn(stored, slot) ? stored[slot] : undefined));
+    if (el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)) {
+      const ink = json(el.dataset.penValue, undefined) ?? storedPens[slot];
+      row.penValue = sanitizedValue({ el, kind: 'draw' }, ink);
+    }
+  }
   function indexSlots() {
     records.clear();
     for (const item of core.items()) {
@@ -329,12 +363,7 @@
         let row = recordByNode.get(el);
         if (!row) {
           row = { el, item, kind, result: null };
-          const embedded = json(el.dataset.value, undefined);
-          row.value = sanitizedValue(row, embedded ?? (Object.hasOwn(stored, old) ? stored[old] : undefined));
-          if (el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)) {
-            const ink = json(el.dataset.penValue, undefined) ?? storedPens[old];
-            row.penValue = sanitizedValue({ el, kind: 'draw' }, ink);
-          }
+          if (!pendingRestore) restoreRow(row, old);
           recordByNode.set(el, row);
         }
         if (!slotReveal.has(el)) slotReveal.set(el, Object.hasOwn(initialReveal.slots ?? {}, old) ? initialReveal.slots[old] : undefined);
@@ -355,6 +384,7 @@
     return { checked: rows.filter(r => r.result != null).length, correct: rows.filter(r => r.result === true).length, total: rows.length };
   }
   function setValue(row, value, evaluate = false) {
+    if (pendingRestore) return null;
     const next = sanitizedValue(row, value);
     if (next === undefined) return null;
     if (!same(next, row.value)) { row.value = next; row.result = null; saveValues(); }
@@ -372,6 +402,8 @@
   }
   const answer = (slot, value) => records.has(slot) ? setValue(records.get(slot), value, true) : null;
   function clearAnswers() {
+    const wasPending = !!pendingRestore;
+    closeRestorePrompt();
     stored = {}; storedPens = {};
     for (const row of records.values()) {
       row.value = undefined; row.penValue = undefined; row.result = null;
@@ -388,8 +420,37 @@
         updatePanel(item);
       }
     }
-    if (storageKey) { store('removeItem', storageKey); store('removeItem', `${storageKey}:pen`); }
+    if (storageKey) {
+      for (const suffix of ['', ':pen', ':saved-at']) store('removeItem', storageKey + suffix);
+    }
+    if (wasPending) core.layout();
     updateScore();
+  }
+  function closeRestorePrompt() {
+    if (!pendingRestore) return;
+    pendingRestore = undefined;
+    restorePrompt.remove();
+    if (mainNode) mainNode.inert = false;
+    syncToolbar();
+  }
+  function showRestorePrompt() {
+    const when = Number(store('getItem', `${storageKey}:saved-at`));
+    const date = new Date(when);
+    const time = when > 0 && Number.isFinite(+date)
+      ? ` (마지막 저장 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')})` : '';
+    const prompt = restorePrompt = runtime(make('div', 'ws-answer-prompt'));
+    const message = make('span', '', `이 기기에 이전에 쓴 답이 있어요${time}.`);
+    message.setAttribute('role', 'status');
+    const resume = core.button('이어서 풀기', 'resume-answers', () => {
+      ({ answers: stored, pens: storedPens } = pendingRestore);
+      closeRestorePrompt();
+      for (const row of records.values()) restoreRow(row, row.slot);
+      core.layout();
+      viewButton.focus();
+    });
+    const start = core.button('새로 시작', 'start-fresh', () => { clearAnswers(); viewButton.focus(); });
+    prompt.append(message, resume, start);
+    core.addToolbar(prompt);
   }
 
   // Input devices update the same state as sheet.answer(), but never grade on input.
@@ -411,17 +472,36 @@
     toggle(el, 'ws-picked', on);
     attr(el, aria, String(on));
   }
+  function tableHeadings(el) {
+    const cell = el.closest('td,th'), tr = cell?.parentElement, table = cell?.closest('table');
+    const read = node => {
+      if (!node) return '';
+      const copy = node.cloneNode(true);
+      for (const blank of all(copy, '.ws-blank, [data-sheet-runtime]')) blank.remove();
+      return copy.textContent.trim();
+    };
+    if (!tr || !table) return { row: '', column: '' };
+    const heads = table.tHead?.rows[0];
+    const first = tr.cells[0];
+    const rowHead = tr.querySelector(':scope > th.ws-lab, :scope > th.ws-step-n');
+    const row = read(rowHead?.querySelector('.ws-lab-text') ?? rowHead ??
+      (table.matches('.ws-data') && first !== cell && !first.querySelector('.ws-blank') ? first : null));
+    const column = read(heads?.cells[cell.cellIndex]);
+    return { row, column };
+  }
   function field(row) {
     const { el, kind } = row, multiline = el.matches('.ws-ans');
     const input = runtime(make(multiline ? 'textarea' : 'input', 'ws-in'));
     const ink = runtime(make('span', 'ws-ink ws-print-only'));
     ink.setAttribute('aria-hidden', 'true');
     if (!multiline) input.type = 'text';
-    const label = el.closest('tr')?.querySelector('th.ws-lab, th.ws-step-n')?.textContent.trim();
+    const headings = tableHeadings(el);
+    const label = [headings.row, headings.column].filter(Boolean).join(', ');
     input.setAttribute('aria-label', kind === 'name' ? row.slot.split('.').at(-1) : label ||
       (multiline ? '답 쓰기' : `빈칸 ${el.querySelector('.ws-blank-mark')?.textContent || row.slot}`));
     input.autocomplete = 'off';
     if (kind === 'number') input.spellcheck = false;
+    if (['numeric', 'decimal'].includes(el.dataset.inputMode)) input.inputMode = el.dataset.inputMode;
     if (el.matches('.ws-name-slot') && !el.querySelector(':scope > .ws-name-space')) {
       const placeholder = make('span', 'ws-name-space');
       placeholder.append(...el.childNodes);
@@ -629,26 +709,47 @@
     const el = row.el, svg = el.querySelector('svg[data-ymap]'), plot = svg?.querySelector('.ws-plot');
     const map = readMap(svg, 'ymap', 4), hits = barHits(el), snap = snapOf(el);
     if (!plot || !map || map[1] <= map[0] || map[2] <= map[3]) return;
-    const [y0,y1,bottom,top] = map;
+    const [y0,y1,bottom,top] = map, histogram = svg.dataset.chart === 'histogram';
+    const min = snapValue(Math.ceil(y0 / snap - 1e-9) * snap, snap);
+    const max = snapValue(Math.floor(y1 / snap + 1e-9) * snap, snap);
     const toSvg = value => bottom - (clamp(value, y0, y1) - y0) / (y1 - y0) * (bottom - top);
-    for (const hit of hits) hit.addEventListener('click', event => {
-      if (!usable()) return;
-      const p = svgPoint(svg, event);
-      if (!p) return;
-      const v = snapValue(clamp(y0 + (bottom - p.y) / (bottom - top) * (y1 - y0), y0, y1), snap);
-      const current = [...(row.value ?? hits.map(() => null))], i = +hit.dataset.i;
-      current[i] = v === current[i] ? null : v;
-      setValue(row, current);
-    });
+    attr(svg, 'role', 'group');
+    if (histogram) el.prepend(solveOnly('div', 'ws-explore-note', '각 계급에서 직사각형의 윗변이 올 높이를 눌러요.'));
+    for (const hit of hits) {
+      const i = +hit.dataset.i;
+      attr(hit, 'tabindex', '0'); attr(hit, 'role', 'slider');
+      attr(hit, 'aria-valuemin', min); attr(hit, 'aria-valuemax', max);
+      const change = (v, toggleOff = false) => {
+        const current = [...(row.value ?? hits.map(() => null))];
+        current[i] = toggleOff && v === current[i] ? null : v;
+        setValue(row, current);
+      };
+      hit.addEventListener('click', event => {
+        if (!usable()) return;
+        const p = svgPoint(svg, event);
+        if (p) change(clamp(snapValue(y0 + (bottom - p.y) / (bottom - top) * (y1 - y0), snap), min, max), true);
+      });
+      hit.addEventListener('keydown', event => {
+        if (!usable() || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+        event.preventDefault();
+        const next = (row.value?.[i] ?? clamp(0, min, max)) + (event.key === 'ArrowUp' ? snap : -snap);
+        change(clamp(snapValue(next, snap), min, max));
+      });
+    }
     return { paint(value = []) {
       for (const node of all(plot, '[data-sheet-runtime]')) node.remove();
       for (const hit of hits) {
         const v = value[+hit.dataset.i];
+        attr(hit, 'aria-label', `${hit.dataset.label ?? `막대 ${+hit.dataset.i + 1}`}, ${v == null ? '높이 미입력' : `높이 ${v}`}`);
+        attr(hit, 'aria-valuenow', v ?? clamp(0, min, max));
+        attr(hit, 'aria-valuetext', v == null ? '미입력' : String(v));
         if (v == null) continue;
-        const width = Number(hit.getAttribute('width')), pad = Math.min(.6, width * .05);
+        const x = Number(hit.getAttribute('x'));
+        const width = histogram && hit.hasAttribute('data-edge') ? Number(hit.dataset.edge) - x : Number(hit.getAttribute('width'));
+        const pad = histogram ? 0 : Math.min(.6, width * .05);
         const baseline = toSvg(0), valueY = toSvg(v);
         const y = Math.min(baseline, valueY);
-        const mark = runtime(svgNode('rect', { class: 'ws-user-bar', x: Number(hit.getAttribute('x')) + pad,
+        const mark = runtime(svgNode('rect', { class: 'ws-user-bar', x: x + pad,
           y, width: width - 2 * pad, height: Math.abs(baseline - valueY) }));
         mark.append(svgNode('title', {})); mark.firstChild.textContent = String(v);
         plot.append(mark);
@@ -898,7 +999,7 @@
     if (hints.length) bar.append(panel.hintButton = uiButton('힌트 1', 'hint', () => {
       panel.hintCount++; updatePanel(item);
     }));
-    if (hasAuto || (hasCheck && policy === '시도 후')) {
+    if (hasAuto || (hasCheck && policy === '시도 후') || ((hasAnswers || hasSolution) && rows.some(r => multiple.has(r.kind)))) {
       panel.result = make('span', 'ws-item-score');
       panel.result.setAttribute('role', 'status'); bar.append(panel.result);
     }
@@ -913,10 +1014,11 @@
       button.disabled = !enabled;
       button.setAttribute('aria-pressed', String(enabled && !!pressed));
     };
+    const missing = panel.rows.find(r => multiple.has(r.kind) && !completeResponse(r));
     const answerRows = panel.rows.filter(r => r.kind !== 'open' && slotReveal.get(r.el)?.answer_html &&
-      (policy === '바로' || hasResponse(r)));
+      (multiple.has(r.kind) ? completeResponse(r) : policy === '바로' || hasResponse(r)));
     const answerReady = unlocked && answerRows.length > 0;
-    const solutionReady = unlocked && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
+    const solutionReady = unlocked && !missing && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
     setButton(panel.answerButton, answerReady, panel.answers);
     setButton(panel.solutionButton, solutionReady, panel.solution);
     const eligible = panel.rows.filter(r => r.kind === 'open' && slotReveal.get(r.el)?.answer_html &&
@@ -952,15 +1054,22 @@
     if (panel.result) {
       const auto = panel.rows.filter(row => row.auto);
       const review = auto.filter(row => row.result === 'review').length;
-      const label = panel.emptyAttempt ? '먼저 답을 써 보세요.' :
-        auto.length && (auto.some(row => row.result != null) || panel.attempted)
-          ? `${auto.filter(row => row.result === true).length}/${auto.length} 맞음${review ? ` · 확인 필요 ${review}` : ''}` : '';
+      const remaining = { bars: '각 막대의 높이를 모두 정해 보세요.', points: '점을 모두 찍어 보세요.',
+        line: '서로 다른 두 점을 찍어 보세요.', match: '짝을 모두 이어 보세요.', order: '순서를 정해 보세요.' };
+      const score = auto.length && (auto.some(row => row.result != null) || panel.attempted)
+        ? `${auto.filter(row => row.result === true).length}/${auto.length} 맞음${review ? ` · 확인 필요 ${review}` : ''}` : '';
+      const guidance = active && missing && (panel.answerButton || panel.solutionButton) &&
+        (unlocked || panel.emptyAttempt || hasResponse(missing)) ? remaining[missing.kind] : '';
+      const label = [panel.emptyAttempt ? guidance || '먼저 답을 써 보세요.' : score,
+        panel.emptyAttempt ? '' : guidance].filter(Boolean).join(' · ');
       if (panel.result.textContent !== label) panel.result.textContent = label;
     }
   }
   function updateScore() {
     if (!scoreLabel) return;
-    const { correct, total } = score(), label = `맞힌 수 ${correct} / 자동 판별 ${total}`;
+    const { correct, total } = score();
+    const open = [...records.values()].filter(row => row.kind === 'open').length;
+    const label = `맞힌 수 ${correct} / 자동 판별 ${total}${open ? ` · 서술 ${open}칸은 직접 확인` : ''}`;
     if (scoreLabel.textContent !== label) scoreLabel.textContent = label;
   }
 
@@ -1132,6 +1241,7 @@
   }
   function layoutFlow(main, items) {
     mainNode = main;
+    main.inert = !!pendingRestore;
     renderExisting(items);
     if (mode !== 'solve') return false;
     main.id = 'sheet-flow';
@@ -1229,8 +1339,12 @@
   function init() {
     const build = json(document.querySelector('meta[name="sheet-build"]')?.content, {});
     storageKey = `pbj-sheet:${build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
-    stored = json(store('getItem', storageKey), {});
-    storedPens = json(store('getItem', `${storageKey}:pen`), {});
+    const answers = json(store('getItem', storageKey), {});
+    const pens = json(store('getItem', `${storageKey}:pen`), {});
+    const hasSavedInput = value => typeof value === 'object' && value !== null
+      ? Object.values(value).some(hasSavedInput) : Number.isFinite(value) || value === true || (typeof value === 'string' && !!value.trim());
+    if (!teacher && (hasSavedInput(answers) || hasSavedInput(pens))) pendingRestore = { answers, pens };
+    else { stored = answers; storedPens = pens; }
     const content = document.getElementById('sheet-reveal')?.textContent.trim();
     if (canReveal && content) {
       try { initialReveal = decodeReveal(salt(), content) || {}; } catch { /* input and hashing are still available */ }
@@ -1249,11 +1363,17 @@
       core.addToolbar(previewButton, returnButton);
     } else {
       viewButton = core.button('A4 보기', 'view', () => void view(mode === 'solve' ? 'a4' : 'solve'));
-      const download = core.button('답을 넣어 저장', 'save-answers', () =>
+      const download = uiButton('답을 넣어 저장', 'save-answers', () =>
         core.download(core.serialize(true, true), core.fileName(true).replace(/\.html$/, ' (내 답).html')));
-      core.addToolbar(viewButton, download, core.button('내 답 지우기', 'clear-answers', () => {
-        if (window.confirm('입력한 답을 모두 지울까요?')) clearAnswers();
-      }));
+      const prompt = runtime(make('div', 'ws-answer-prompt'));
+      prompt.hidden = true;
+      const clear = uiButton('내 답 지우기', 'clear-answers', () => { prompt.hidden = false; cancel.focus(); });
+      const hide = () => { prompt.hidden = true; clear.focus(); };
+      const cancel = uiButton('취소', 'cancel-clear-answers', hide);
+      prompt.append(make('span', '', '이름과 입력한 답을 모두 지울까요?'),
+        uiButton('지우기', 'confirm-clear-answers', () => { clearAnswers(); hide(); }), cancel);
+      core.addToolbar(viewButton, download, clear, prompt);
+      if (pendingRestore) showRestorePrompt();
     }
     core.addToolbar(scoreLabel);
     window.addEventListener('beforeprint', () => {
@@ -1286,7 +1406,8 @@
     const answers = [answer, ...accept.map(plain)];
     const valid = new Set(answers.map(canonical).filter(v => v != null));
     const right = canonical(answer);
-    const attrs = { 'data-check-kind': kind, 'data-check-hash': null, 'data-check-unit': null, 'data-check': null };
+    const attrs = { 'data-check-kind': kind, 'data-check-hash': null, 'data-check-unit': null, 'data-check': null,
+      'data-input-mode': kind === 'number' ? input_mode(answers) || null : null };
     if (right != null && salt()) {
       let wrong;
       if (kind === 'number') {
@@ -1300,12 +1421,11 @@
       }
       attrs['data-check'] = JSON.stringify({ mode, accept, right: answer, wrong });
       if (policy !== '없음') {
-        if (kind === 'number') for (const value of answers) {
-          const parts = number_parts(value);
-          if (parts?.[1]) {
-            attrs['data-check-unit'] = '1';
-            valid.add(parts.join('@'));
-          }
+        if (kind === 'number') {
+          const { column, row } = options.headings;
+          const forms = number_forms(answers, inferred_unit(options.tail ?? '', column, row));
+          if (forms.some(form => form.includes('@'))) attrs['data-check-unit'] = '1';
+          for (const form of forms) valid.add(form);
         }
         attrs['data-check-hash'] = [...valid].map(v => hash(salt(),kind,v)).join(',');
       }
@@ -1333,14 +1453,14 @@
     if (!key) {
       for (const [i,el] of newBlanks.entries()) {
         el.dataset.slot = ''; // assigned after the edited nodes are inserted
-        const { answer, accept, html } = blanks[i];
-        const result = changedAnswer(el, answer, html, { accept }, true);
+        const { answer, accept, html, tail } = blanks[i];
+        const result = changedAnswer(el, answer, html, { accept, tail, headings: tableHeadings(target) }, true);
         applyAttrs(el, result.attrs); slotReveal.set(el, result.reveal);
       }
     }
-    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check'].map(name => [name,writing.getAttribute(name)])) : null;
+    const oldAttrs = isAnswer ? Object.fromEntries(['data-check-kind','data-check-hash','data-check-unit','data-check','data-input-mode'].map(name => [name,writing.getAttribute(name)])) : null;
     const oldReveal = isAnswer ? slotReveal.get(writing) : undefined;
-    const updated = isAnswer ? changedAnswer(writing, source, html, json(writing.dataset.check, {}), false) : null;
+    const updated = isAnswer ? changedAnswer(writing, source, html, { ...json(writing.dataset.check, {}), headings: tableHeadings(writing) }, false) : null;
     function write(text, children, result) {
       target.dataset.src = text; target.replaceChildren(...children);
       if (isAnswer) {
@@ -1348,6 +1468,8 @@
         const row = recordByNode.get(writing);
         if (row) {
           row.result = null; row.reveal?.remove(); row.reveal = undefined;
+          const input = writing.querySelector('.ws-in');
+          if (input) applyAttrs(input, { inputmode: result.attrs['data-input-mode'] });
         }
       }
       const panel = panels.get(item);

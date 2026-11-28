@@ -269,6 +269,29 @@ class BuildTest(unittest.TestCase):
                     bl, bt, br, bd = labels[b]
                     self.assertTrue(r <= bl or br <= l or d <= bt or bd <= t, (a, b))
 
+    def test_polygon_extends_to_zero_neighbor_midpoints(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': self.title, 'interactive': False}}, self.folder, [])
+        svg = ET.fromstring(renderer.chart({'kind': 'polygon', 'bins': [15, 20, 25, 30, 35, 40],
+                                            'values': [2, 4, 6, 5, 3], 'y_max': 6})).find('svg')
+        self.assertEqual([e.text for e in svg.findall('text') if e.get('y') == '57'], ['10', '15', '20', '25', '30', '35', '40', '45'])
+        points = [tuple(map(float, pair.split(','))) for pair in svg.find('polyline').get('points').split()]
+        self.assertEqual(len(points), 7)
+        for point, target in [(points[0], (12.5, 0)), (points[-1], (42.5, 0))]:
+            self.assertAlmostEqual(10 + (point[0] - 14) / 112 * 35, target[0])
+            self.assertAlmostEqual((53 - point[1]) / 49 * 6, target[1])
+
+    def test_svg_math_labels_override_author_styles(self):
+        from xml.etree import ElementTree as ET
+        from sheet_build import figure_svg, font_chars
+        svg = ET.fromstring(figure_svg('<svg><text font-family="Arial" style="font-family:Arial!important">l′</text>'
+                                       '<text>A<tspan font-family="Arial">₂</tspan></text><text>64°</text></svg>'))
+        labels = list(svg)
+        self.assertEqual([''.join(label.itertext()) for label in labels], ['𝑙′', '𝐴₂', '64°'])
+        self.assertTrue(all('font-family:Cambria Math' in label.get('style') for label in labels))
+        self.assertIn('𝑙', font_chars({}))
+
     def test_chart_kinds_and_histogram_bin_widths(self):
         charts = [
             {'type': 'chart', 'kind': 'line', 'labels': ['가', '나'], 'values': [1, 2]},

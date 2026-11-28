@@ -170,7 +170,7 @@ async function usingTab(url, test, viewport) {
       }
     }
     async function key(key, modifiers = 0) {
-      const named = { Enter: 13, Escape: 27 };
+      const named = { Enter: 13, Escape: 27, ArrowUp: 38, ArrowDown: 40 };
       const code = named[key] ? key : `Key${key.toUpperCase()}`;
       const event = { key, code, windowsVirtualKeyCode: named[key] || key.toUpperCase().charCodeAt(0), modifiers };
       await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...event });
@@ -443,6 +443,11 @@ try {
       }
     }
     assert.deepEqual(await tab.js(`(${quote(cases.units)}).map(u=>__sheetCore.codec.num('18'+u))`), cases.units.map(() => '18'));
+    for (const name of ['inferred_unit','number_forms','input_mode']) {
+      for (const [args, expected] of cases[name]) {
+        assert.deepEqual(await tab.js(`__sheetCore.codec.${name}(...${quote(args)})`), expected, `${name}: ${quote(args)}`);
+      }
+    }
     for (const [s, kind, value, expected] of cases.hash) {
       assert.equal(await tab.js(`__sheetCore.codec.hash(${[s,kind,value].map(quote).join(',')})`), expected);
       assert.equal(expected, hash(s,kind,value));
@@ -630,6 +635,70 @@ try {
       await tab.js('sheet.clearAnswers()');
     });
   });
+  await test('히스토그램 연속 경계·키보드·전체 입력 후 공개·표 단위', async () => {
+    const folder = path.join(work, 'histogram-worksheet'), title = '도수 그래프 시험';
+    const source = {version:1, meta:{title, kind:'수업', sync:false}, items:[
+      {id:'table', blocks:[{type:'table', header:['계급','도수 (일)','소수'], rows:[['15 이상 20 미만','{{|$2$}}','{{|$2.5$}}']]},
+        {type:'question', number:false, text:'답은 {{|$11$|24}}일, 길이는 {{|$5$}}cm이다.'},
+        {type:'question', number:false, text:'{{|$-1$}}를 더한다.'}]},
+      {id:'plot', blocks:[{type:'chart', kind:'histogram', bins:[15,20,25,30,35,40], values:[2,4,6,5,3], y_max:6, y_step:1,
+        plot:{answer:[2,4,6,5,3],snap:1}}]},
+      {id:'ox', blocks:[{type:'ox',items:[{text:'참이다.',answer:'O'}]}]},
+      {id:'flow', blocks:[{type:'flow', nodes:['봉지 수 $x$', '{{㉠|$2$}}를 곱한다', '구슬 수 $y$']}]},
+      {id:'open', blocks:[{type:'answer', rows:[{label:'설명',answer:'설명을 씁니다.'}]}]}
+    ], teacher:{solutions:[{item:'plot',answer:'전체 도수를 표시했다.'}]}};
+    await fs.mkdir(folder);
+    await fs.writeFile(path.join(folder, '구성.json'), quote(source));
+    await run(process.env.PYTHON || 'python', ['-B','-X','utf8',path.join(here,'../../scripts/sheet.py'),'build',folder],
+      {env:{...process.env,SHEET_TEST_SALT:salt,SHEET_FONT_DIR:work}});
+    await usingTab(pathToFileURL(path.join(folder, `${title}.html`)).href, async tab => {
+      const graph = item('plot'), btn = name => action(name,graph);
+      const state = () => tab.js(`${quote(['reveal-answer','reveal-solution'].map(btn))}.map(s=>document.querySelector(s).disabled)`);
+      const inputs = await tab.js(`[...document.querySelectorAll('${item('table')} input')].map(el=>[el.ariaLabel, el.getAttribute('inputmode')])`);
+      assert.deepEqual(inputs[0], ['15 이상 20 미만, 도수 (일)', 'numeric']);
+      assert.equal(inputs[1][1], 'decimal'); assert.equal(inputs[4][1], null);
+      for (const [id, value, expected] of [['table.3','11',true],['table.3','11일',true],['table.3','11권',false],
+        ['table.1','2권',false],['table.1','2일',true],['table.4','5cm',true],['table.4','5mm',false]]) {
+        assert.equal(await tab.js(`sheet.answer(${quote(id)}, ${quote(value)})`),expected, `${id}: ${value}`);
+      }
+      assert.match(await tab.js('document.querySelector(".ws-score").textContent'), /서술 1칸은 직접 확인/);
+      const hit = i => `.ws-bar-hit[data-i="${i}"]`;
+      const press = async (i, ...keys) => {
+        assert.equal(await tab.js(`{ const hit = document.querySelector(${quote(hit(i))}); hit.focus(); document.activeElement === hit; }`),true);
+        for (const key of keys) await tab.key(key);
+      };
+      await press(0,'ArrowUp','ArrowUp','ArrowUp','ArrowDown');
+      assert.equal(await tab.js(`document.querySelector(${quote(hit(0))}).getAttribute('aria-label')`), '15 이상 20 미만, 높이 2');
+      await tab.click(btn('check'));
+      assert.deepEqual(await state(),[true,true]);
+      assert.match(await tab.js(`document.querySelector('${graph} .ws-item-score').textContent`),/높이를 모두/);
+      for (let i = 1; i < 5; i++) await tab.mouseClick(hit(i));
+      assert.deepEqual(await state(),[false,false]);
+      await tab.click(btn('reveal-answer')); await tab.click(btn('reveal-solution'));
+      assert.equal(await tab.js(`document.querySelector('${graph} .ws-reveal').checkVisibility()`), true);
+      const gap = await tab.js(`(() => { const bars=[...document.querySelectorAll('.ws-user-bar')].map(el=>el.getBoundingClientRect());
+        return Math.max(...bars.slice(1).map((el,i)=>Math.abs(el.left-bars[i].right))); })()`);
+      assert(gap < .001, `막대 경계 차이 ${gap}px`);
+      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-ox-pick > [role=button]')].every(el=>{const r=el.getBoundingClientRect();return r.width>=44&&r.height>=44;})`),true);
+      assert.equal((await tab.report()).overflow_x, 0);
+      const lines = width => tab.js(`(() => {
+        const node = document.querySelector('.ws-flow-node:nth-child(3)');
+        node.style.width = ${quote(width)};
+        const suffix = node.querySelector('.ws-blank').nextSibling;
+        const r = document.createRange(); r.setStart(suffix,0); r.setEnd(suffix,1);
+        const first = r.getBoundingClientRect();
+        r.setStart(node.lastChild,1); r.setEnd(node.lastChild,4);
+        return Math.round(r.getBoundingClientRect().top-first.top);
+      })()`);
+      assert(await lines('65px') > 0, '좁으면 조사를 빈칸에 붙이고 다음 낱말만 넘긴다');
+      await lines('');
+      await tab.js(`sheet.view('a4')`,true);
+      assert.equal(await lines(''),0, 'A4 흐름 상자가 본래 너비로 한 줄을 유지한다');
+      assert.equal(await tab.js(`document.querySelector('${graph} svg .ws-chart-guides').checkVisibility()`),true);
+      assert.equal(await tab.js(`document.querySelector('${graph} .ws-explore-note').checkVisibility()`),false);
+      await tab.js('sheet.clearAnswers()');
+    },metrics(390,844,true));
+  });
   await test('탐구 제외값·인쇄 스냅숏·점검표와 순서 안내', () => usingTab(contractStudent, async tab => {
     const exploreItem = item('explore'), first = `${exploreItem} .ws-explore:first-child`;
     const visible = selector => tab.js(`document.querySelector(${quote(selector)}).checkVisibility()`);
@@ -755,11 +824,16 @@ try {
     });
     await usingTab(studentInteractive, async tab => {
       assert.equal(await tab.js('sheet.view()'),'a4','넓은 화면에서 마지막 보기');
+      assert.deepEqual(await valuesOf(tab),{});
+      assert.match(await tab.js('document.querySelector(".ws-answer-prompt [role=status]").textContent'), /마지막 저장 \d{2}:\d{2}/);
+      assert.equal(await tab.js(`document.querySelector('main').innerText.includes('로컬 시험')`), false);
+      await tab.click(action('resume-answers'));
       assert.deepEqual(await valuesOf(tab),filled);
       assert.equal(await tab.js(`document.querySelector(${quote(name)}).value`),filled['head.이름']);
     });
     await usingTab(studentInteractive, async tab => {
       assert.equal(await tab.js('sheet.view()'),'solve','좁은 화면은 항상 풀기 보기');
+      await tab.click(action('resume-answers'));
       await tab.click(action('check',item('q1')));
       await tab.click(action('hint',item('q1')));
       await tab.click(action('reveal-answer',item('q1')));
@@ -784,22 +858,38 @@ try {
         await copy.js(`localStorage.setItem('pbj-sheet:interactive-fixture:student',${quote(quote({'head.이름':'다른 자동 저장 값'}))})`);
       });
       await usingTab(pathToFileURL(file).href, async copy => {
+        assert.deepEqual(await valuesOf(copy),{});
+        await copy.click(action('resume-answers'));
         assert.deepEqual(await valuesOf(copy),filled);
         assert.equal(await copy.js(`document.querySelector(${quote(name)}).value`),filled['head.이름']);
-        await copy.js('window.confirm = () => false'); await copy.click(action('clear-answers'));
+        await copy.js(`window.confirm = () => { throw Error('브라우저 확인창을 열면 안 됩니다'); }; localStorage.setItem('sample-sync:queue','보존')`);
+        await copy.click(action('clear-answers'));
         assert.deepEqual(await valuesOf(copy),filled);
-        await copy.js('window.confirm = () => true'); await copy.click(action('clear-answers'));
+        await copy.click(action('cancel-clear-answers'));
+        assert.deepEqual(await valuesOf(copy),filled);
+        await copy.click(action('clear-answers'));
+        await copy.click(action('confirm-clear-answers'));
         assert.deepEqual(await valuesOf(copy),{});
         assert.equal(await copy.js(`localStorage.getItem('pbj-sheet:interactive-fixture:student')`),null);
+        assert.equal(await copy.js(`localStorage.getItem('sample-sync:queue')`),'보존');
       });
-      await tab.js('sheet.clearAnswers()');
+      await tab.js(`localStorage.setItem('sample-sync:queue','보존'); sheet.answer('head.이름','다음 차례 시험')`);
     },metrics(390,844,true));
+    await usingTab(studentInteractive, async tab => {
+      assert.deepEqual(await valuesOf(tab),{});
+      await tab.click(action('start-fresh'));
+      assert.deepEqual(await valuesOf(tab),{});
+      assert.equal(await tab.js(`document.querySelector(${quote(name)}).value`), '');
+      assert.equal(await tab.js(`localStorage.getItem('pbj-sheet:interactive-fixture:student:saved-at')`), null);
+      assert.equal(await tab.js(`localStorage.getItem('sample-sync:queue')`),'보존');
+    });
   });
   await test('교사 편집·되돌리기·복제 후 재번호·학생용 재판별', () => usingTab(interactive, async tab => {
     await tab.key('e');
     const editField = async (selector,text) => { await tab.mouseClick(selector,2); await paste(tab,text); await tab.key('Enter'); };
-    const newText = '앞칸 {{|예시}} 뒤칸 {{㉠|$\\frac{3}{4}$;;0.75|26}}';
+    const newText = '앞칸 {{|예시}} 뒤칸 {{㉠|$\\frac{3}{4}$;;0.75|26}} $\\begin{cases}x+y=3 \\\\ x-y=1\\end{cases}$';
     await editField(qText('q1'),newText);
+    assert.equal(await tab.js(`document.querySelectorAll('${qText('q1')} math mtr').length`), 2);
     const hashes = (selector) => tab.js(`document.querySelector(${quote(selector)}).dataset.checkHash`);
     assert.equal(await hashes(slot('q1.2')),hash(salt,'number','3/4'));
     assert.equal(await tab.js(`document.querySelector('${qText('q1')} .ws-blank[data-slot="q1.2"] .ws-key').textContent`),'34');
@@ -913,7 +1003,7 @@ try {
   }));
   await test('nosync·교사 미리보기·설정 없음은 학생 기록 전송 안 함', async () => {
     for (const suffix of ['?nosync','#nosync']) await usingTab(syncStudent + suffix, async tab => {
-      await tab.js(`sheet.answer('head.이름','가상 학생')`); await tab.click(action('check',item('q1')));
+      await tab.js(`sheet.clearAnswers(); sheet.answer('head.이름','가상 학생')`); await tab.click(action('check',item('q1')));
       assert.equal(await tab.js('syncMock.calls.length'),0); assert.equal(await tab.js(`!!document.querySelector(${quote(action('sync-submit'))})`),false);
     });
     await usingTab(syncTeacher, async tab => {
@@ -1262,11 +1352,15 @@ try {
         const saved = await tab.js('window.__sheetCore.serialize(true,true)');
         assert.match(saved,/data-pen-value=/);
         await usingTab(await saveFile(`pen-copy-${theme}`,saved),async copy=>{
+          assert.deepEqual(await valuesOf(copy), {});
+          await copy.click(action('resume-answers'));
           assert.deepEqual((await valuesOf(copy))['q3.1'],[1]);
           assert(await copy.js(`document.querySelector('${slot('q3.1')} canvas').getContext('2d').getImageData(0,0,1000,200).data.some(v=>v!==0)`));
         });
       });
       await usingTab(url,async copy=>{
+        assert.deepEqual(await valuesOf(copy), {});
+        await copy.click(action('resume-answers'));
         assert.deepEqual((await valuesOf(copy))['q3.1'],[1]);
         assert(await copy.js(`document.querySelector('${slot('q3.1')} canvas').getContext('2d').getImageData(0,0,1000,200).data.some(v=>v!==0)`));
         await copy.js('sheet.clearAnswers()');

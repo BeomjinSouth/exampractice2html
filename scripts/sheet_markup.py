@@ -94,6 +94,33 @@ class MathParser:
             return f'<{tag}>{symbol}</{tag}>', symbol
         if name == 'quad':
             return '<mspace width="1em"></mspace>', ' '
+        if name == 'begin':
+            self.spaces()
+            if not self.source.startswith('{cases}', self.pos):
+                self.fail('지원하는 환경은 cases입니다', start)
+            self.pos += len('{cases}')
+            rows, texts = [], []
+            while True:
+                left = self.sequence(case_row=True)
+                if self.next == '&':
+                    self.pos += 1
+                    right = self.sequence(case_row=True)
+                    if not right:
+                        self.fail('& 뒤에 식이 필요합니다')
+                    left.extend(right)
+                if not left:
+                    self.fail('cases의 각 줄에 식을 쓰세요')
+                markup, text = join_parts(left)
+                rows.append(f'<mtr><mtd>{markup}</mtd></mtr>')
+                texts.append(text)
+                if self.source.startswith(r'\end{cases}', self.pos):
+                    self.pos += len(r'\end{cases}')
+                    break
+                if not self.source.startswith(r'\\', self.pos):
+                    self.fail('cases의 줄 구분이나 닫는 명령을 확인하세요')
+                self.pos += 2
+            return ('<mrow><mo stretchy="true">{</mo><mtable columnalign="left">'
+                    + ''.join(rows) + '</mtable></mrow>', '{' + '; '.join(texts))
         if name == 'frac':
             a, b = self.group(), self.group()
             return f'<mfrac>{a[0]}{b[0]}</mfrac>', f'({a[1]})/({b[1]})'
@@ -161,11 +188,13 @@ class MathParser:
             return f'<mo>{html.escape(value)}</mo>', value
         self.fail(f'지원하지 않는 글자 {c!r}입니다', start)
 
-    def sequence(self, close=None):
+    def sequence(self, close=None, *, case_row=False):
         result = []
         while True:
             self.spaces()
             c = self.next
+            if case_row and (c == '&' or self.source.startswith((r'\\', r'\end{cases}'), self.pos)):
+                return result
             if not c or c == close:
                 return result
             if c in '})]':
@@ -231,7 +260,7 @@ class Markup:
 
 
 def join_inline_parts(parts):
-    """Keep math and its directly attached text together, but never bind an input slot."""
+    """Keep inline math or a blank with its directly attached word."""
     rendered, word = [], []
     bold = False
 
@@ -246,10 +275,12 @@ def join_inline_parts(parts):
         rendered.append(part[0])
 
     def flush():
-        grouped = len(word) > 1 and any(part[2] == 'math' for part in word)
+        has_blank = any(part[2] == 'blank' for part in word)
+        grouped = len(word) > 1 and (has_blank or any(part[2] == 'math' for part in word))
         if grouped:
             set_bold(False)
-            rendered.append('<span class="ws-math-word"><span>')
+            cls = 'ws-blank-word' if has_blank else 'ws-math-word'
+            rendered.append(f'<span class="{cls}"><span>')
         for part in word:
             emit(part)
         if grouped:
@@ -262,6 +293,8 @@ def join_inline_parts(parts):
             flush()
             emit(part)
         else:
+            if part[2] == 'blank':
+                flush()
             word.append(part)
     flush()
     set_bold(False)
@@ -358,8 +391,9 @@ def inspect_markup(source, *, interactive=False, table_blank_mm=None):
                 mark_node = f'<span class="ws-blank-mark">{html.escape(mark)}</span>' if mark else ''
                 key = f'<span class="ws-key">{rendered}</span>' if plain.strip() else ''
                 hook = blank_hook.get() if interactive else None
-                slot = hook(answers, rendered) if hook and answers else ''
-                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', plain or mark, 'boundary', bold))
+                slot = hook(answers, rendered, source[pos:]) if hook and answers else ''
+                kind = 'blank' if re.match(r'[가-힣]', source[pos:]) else 'boundary'
+                parts.append((f'<span class="ws-blank"{mark_attr}{style}{slot}>{mark_node}{key}</span>', plain or mark, kind, bold))
             else:
                 outside_math.append(c)
                 parts.append((html.escape(c), c, 'boundary' if c.isspace() else 'text', bold))

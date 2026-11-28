@@ -224,9 +224,10 @@
   const recordByNode = new WeakMap(), panels = new WeakMap(), itemReveal = new WeakMap(), slotReveal = new WeakMap();
   const originalAttrs = new WeakMap(), exploreOriginal = new WeakMap(), mediaBound = new WeakSet();
   const records = new Map(), dash = new Set();
-  let stored = {}, storedPens = {}, initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
+  let initialReveal = {}, storageKey, mode = 'a4', preview = false, previousAnswers;
   let scoreLabel, viewButton, previewButton, returnButton, printing, mainNode;
-  let delayedPaint, pendingRestore, restorePrompt;
+  let delayedPaint, pendingRestore, restoreDialog, saveButton, clearButton;
+  let lockedMedia = [];
   const store = (op, ...args) => { try { return window.localStorage[op](...args); } catch { return undefined; } };
   const usable = () => (!teacher || preview) && !pendingRestore;
   const solveOnly = (tag, cls, text) => runtime(make(tag, `${cls} ws-solve-only`, text));
@@ -345,14 +346,21 @@
     }
     return undefined;
   }
-  function restoreRow(row, slot) {
-    const { el, kind } = row;
-    const embedded = json(el.dataset.value, undefined);
-    row.value = sanitizedValue(row, embedded ?? (Object.hasOwn(stored, slot) ? stored[slot] : undefined));
-    if (el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)) {
-      const ink = json(el.dataset.penValue, undefined) ?? storedPens[slot];
-      row.penValue = sanitizedValue({ el, kind: 'draw' }, ink);
+  function readSnapshot(fromFile) {
+    const answers = fromFile ? null : json(store('getItem', storageKey), {});
+    const pens = fromFile ? null : json(store('getItem', `${storageKey}:pen`), {});
+    const snapshot = new Map();
+    for (const row of records.values()) {
+      const { el, kind, slot } = row;
+      const value = sanitizedValue(row, fromFile ? json(el.dataset.value, undefined) : answers[slot]);
+      const penValue = el.matches('figure[data-pen="1"]') && ['points', 'line'].includes(kind)
+        ? sanitizedValue({ el, kind: 'draw' }, fromFile ? json(el.dataset.penValue, undefined) : pens[slot]) : undefined;
+      if (value !== undefined || penValue !== undefined) snapshot.set(row, { value, penValue });
     }
+    return snapshot;
+  }
+  function restoreSnapshot(snapshot) {
+    for (const [row, state] of snapshot) Object.assign(row, state);
   }
   function indexSlots() {
     records.clear();
@@ -365,7 +373,6 @@
         let row = recordByNode.get(el);
         if (!row) {
           row = { el, item, kind, result: null };
-          if (!pendingRestore) restoreRow(row, old);
           recordByNode.set(el, row);
         }
         if (!slotReveal.has(el)) slotReveal.set(el, Object.hasOwn(initialReveal.slots ?? {}, old) ? initialReveal.slots[old] : undefined);
@@ -406,7 +413,6 @@
   function clearAnswers() {
     const wasPending = !!pendingRestore;
     closeRestorePrompt();
-    stored = {}; storedPens = {};
     for (const row of records.values()) {
       row.value = undefined; row.penValue = undefined; row.result = null;
       delete row.el.dataset.value; delete row.el.dataset.penValue;
@@ -431,28 +437,56 @@
   function closeRestorePrompt() {
     if (!pendingRestore) return;
     pendingRestore = undefined;
-    restorePrompt.remove();
-    if (mainNode) mainNode.inert = false;
+    restoreDialog.close();
+    restoreDialog.remove();
+    for (const video of lockedMedia) video.controls = true;
+    lockedMedia = [];
     syncToolbar();
+    document.dispatchEvent(new Event('sheet:answers-ready'));
   }
-  function showRestorePrompt() {
-    const when = Number(store('getItem', `${storageKey}:saved-at`));
-    const date = new Date(when);
-    const time = when > 0 && Number.isFinite(+date)
-      ? ` (마지막 저장 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')})` : '';
-    const prompt = restorePrompt = runtime(make('div', 'ws-answer-prompt'));
-    const message = make('span', '', `이 기기에 이전에 쓴 답이 있어요${time}.`);
-    message.setAttribute('role', 'status');
-    const resume = core.button('이어서 풀기', 'resume-answers', () => {
-      ({ answers: stored, pens: storedPens } = pendingRestore);
-      closeRestorePrompt();
-      for (const row of records.values()) restoreRow(row, row.slot);
-      core.layout();
-      viewButton.focus();
-    });
-    const start = core.button('새로 시작', 'start-fresh', () => { clearAnswers(); viewButton.focus(); });
-    prompt.append(message, resume, start);
-    core.addToolbar(prompt);
+  function savedClock(when) {
+    const date = new Date(when), today = new Date();
+    if (!(when > 0 && Number.isFinite(+date))) return '';
+    const day = date.toDateString() === today.toDateString() ? '' :
+      `${date.getFullYear() !== today.getFullYear() ? `${date.getFullYear()}년 ` : ''}${date.getMonth() + 1}월 ${date.getDate()}일 `;
+    return `마지막 저장 ${day}${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  }
+  function showRestorePrompt(when) {
+    const dialog = restoreDialog = runtime(make('dialog', 'ws-restore-dialog'));
+    const prompt = make('div', 'ws-answer-prompt');
+    const message = make('span', '', '이 기기에 전에 쓴 답이 있어요.');
+    message.id = 'ws-restore-message'; message.setAttribute('role', 'status');
+    const time = savedClock(when);
+    dialog.setAttribute('aria-labelledby', message.id);
+    function use(snapshot) {
+      restoreSnapshot(snapshot);
+      closeRestorePrompt(); core.layout(); viewButton.focus();
+    }
+    const resume = core.button('이 기기에서 내가 쓰던 답 열기', 'resume-answers', () => use(pendingRestore.device));
+    const openFile = pendingRestore.file.size && core.button('파일에 담긴 답 열기', 'open-file-answers', () => use(pendingRestore.file));
+    const start = core.button('빈 활동지로 시작', 'start-fresh', () => render(true));
+    const cancel = core.button('취소', 'cancel-start-fresh', () => { render(false); start.focus(); });
+    const confirm = core.button('지우고 시작', 'confirm-start-fresh', () => { clearAnswers(); viewButton.focus(); });
+    let confirming = false;
+    function render(ask) {
+      confirming = ask;
+      if (ask) {
+        message.textContent = '이 기기에 저장된 이름과 답을 지울까요?';
+        prompt.replaceChildren(message, cancel, confirm);
+        cancel.focus();
+      } else {
+        message.textContent = '이 기기에 전에 쓴 답이 있어요.';
+        if (time) message.append(make('small', '', time));
+        prompt.replaceChildren(message, ...(openFile ? [openFile, resume, start] : [start, resume]));
+      }
+    }
+    dialog.addEventListener('cancel', event => { event.preventDefault(); if (confirming) cancel.click(); });
+    render(false);
+    dialog.append(prompt); document.body.append(dialog);
+    // Chrome's native media controls can take focus even under a modal dialog.
+    lockedMedia = core.items().flatMap(item => all(item, 'video[controls]'));
+    for (const video of lockedMedia) attr(video, 'controls', null);
+    dialog.showModal(); (openFile || start).focus();
   }
 
   // Input devices update the same state as sheet.answer(), but never grade on input.
@@ -935,7 +969,10 @@
     const list = make('ul', 'ws-compare-list');
     for (const text of rubric) {
       const entry = make('li'), check = make('input'), label = make('label');
-      check.type = 'checkbox'; label.append(check, document.createTextNode(String(text))); entry.append(label); list.append(entry);
+      const content = make('span');
+      try { putHtml(content, core.renderMarkup(String(text))); }
+      catch { content.textContent = text; }
+      check.type = 'checkbox'; label.append(check, content); entry.append(label); list.append(entry);
     }
     box.append(list);
   }
@@ -1023,12 +1060,14 @@
     const solutionReady = unlocked && !missing && (policy === '바로' || panel.rows.filter(r => r.kind !== 'draw').every(completeResponse));
     setButton(panel.answerButton, answerReady, panel.answers);
     setButton(panel.solutionButton, solutionReady, panel.solution);
-    const eligible = panel.rows.filter(r => r.kind === 'open' && slotReveal.get(r.el)?.answer_html &&
-      /[\p{L}\p{N}]/u.test(r.value ?? ''));
-    setButton(panel.compareButton, active && !!eligible.length, panel.comparing);
+    const compareReady = active && !!panel.compareButton && panel.rows.every(row => {
+      if (row.kind === 'open') return /[\p{L}\p{N}]/u.test(row.value ?? '');
+      return ['draw', 'self', 'name'].includes(row.kind) || completeResponse(row);
+    });
+    setButton(panel.compareButton, compareReady, panel.comparing);
+    const compare = compareReady && !!panel.comparing;
     for (const row of panel.rows) setReveal(row, row.kind === 'open'
-      ? !!(active && panel.comparing && eligible.includes(row)) : !!(answerReady && panel.answers && answerRows.includes(row)));
-    const compare = !!(active && panel.compareButton && panel.comparing && eligible.length);
+      ? compare : !!(answerReady && panel.answers && answerRows.includes(row)));
     if (compare && itemReveal.get(item)?.rubric?.length && !panel.compareBox) {
       panel.compareBox = solveOnly('div', 'ws-solution ws-compare');
       appendRubric(panel.compareBox, itemReveal.get(item).rubric); item.append(panel.compareBox);
@@ -1243,7 +1282,6 @@
   }
   function layoutFlow(main, items) {
     mainNode = main;
-    main.inert = !!pendingRestore;
     renderExisting(items);
     if (mode !== 'solve') return false;
     main.id = 'sheet-flow';
@@ -1305,6 +1343,7 @@
       viewButton.textContent = mode === 'solve' ? 'A4 보기' : '풀기 보기';
       viewButton.setAttribute('aria-pressed', String(mode === 'a4'));
     }
+    if (saveButton) saveButton.disabled = clearButton.disabled = !!pendingRestore;
     if (previewButton) previewButton.hidden = preview;
     if (returnButton) returnButton.hidden = !preview;
   }
@@ -1343,18 +1382,35 @@
     changeView(before);
   }
   function beforePrintButton() { printing ??= mode; return restorePrint; }
+  function mathLayoutWorks() {
+    const probe = make('div');
+    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;inset:0 auto auto 0;font-size:32px';
+    probe.innerHTML = '<math><mfrac><mn>1</mn><mn>2</mn></mfrac><msup><mi>x</mi><mn>2</mn></msup></math>';
+    document.body.append(probe);
+    const [numerator, denominator, base, exponent] = all(probe, 'mn, mi').map(el => el.getBoundingClientRect());
+    probe.remove();
+    return numerator.width > 0 && numerator.top < denominator.top && exponent.width > 0 && exponent.top < base.top;
+  }
   function init() {
-    const build = json(document.querySelector('meta[name="sheet-build"]')?.content, {});
-    storageKey = `pbj-sheet:${build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
-    const answers = json(store('getItem', storageKey), {});
-    const pens = json(store('getItem', `${storageKey}:pen`), {});
-    const hasSavedInput = value => typeof value === 'object' && value !== null
-      ? Object.values(value).some(hasSavedInput) : Number.isFinite(value) || value === true || (typeof value === 'string' && !!value.trim());
-    if (!teacher && (hasSavedInput(answers) || hasSavedInput(pens))) pendingRestore = { answers, pens };
-    else { stored = answers; storedPens = pens; }
+    const build = core.buildMeta();
+    storageKey = `pbj-sheet:${build.edition || build.source_sha256 || salt() || location.pathname}:${teacher ? 'teacher' : 'student'}`;
     const content = document.getElementById('sheet-reveal')?.textContent.trim();
     if (canReveal && content) {
       try { initialReveal = decodeReveal(salt(), content) || {}; } catch { /* input and hashing are still available */ }
+    }
+    if (teacher) bindTeacherSolutions();
+    indexSlots();
+    const device = readSnapshot(false), file = readSnapshot(true);
+    const when = Number(store('getItem', `${storageKey}:saved-at`));
+    const hasDevice = [...device].some(([row, { value, penValue }]) =>
+      hasResponse({ kind: row.kind, value }) || !!penValue?.strokes.length);
+    // An explicitly emptied device snapshot can still differ from a filled answer file.
+    if (!teacher && (hasDevice || (file.size && device.size && when > 0))) pendingRestore = { device, file };
+    else restoreSnapshot(file.size ? file : device);
+    if (!mathLayoutWorks()) {
+      const warning = solveOnly('p', 'ws-math-notice', '이 브라우저에서는 수식이 제대로 보이지 않아요. 최신 브라우저로 열어 보세요.');
+      warning.setAttribute('role', 'status');
+      mainNode.before(warning);
     }
     scoreLabel = solveOnly('span', 'ws-score'); scoreLabel.setAttribute('role', 'status');
     if (teacher) {
@@ -1370,17 +1426,16 @@
       core.addToolbar(previewButton, returnButton);
     } else {
       viewButton = core.button('A4 보기', 'view', () => void view(mode === 'solve' ? 'a4' : 'solve'));
-      const download = uiButton('답을 넣어 저장', 'save-answers', () =>
+      saveButton = uiButton('답을 넣어 저장', 'save-answers', () =>
         core.download(core.serialize(true, true), core.fileName(true).replace(/\.html$/, ' (내 답).html')));
       const prompt = runtime(make('div', 'ws-answer-prompt'));
       prompt.hidden = true;
-      const clear = uiButton('내 답 지우기', 'clear-answers', () => { prompt.hidden = false; cancel.focus(); });
-      const hide = () => { prompt.hidden = true; clear.focus(); };
+      clearButton = uiButton('내 답 지우기', 'clear-answers', () => { prompt.hidden = false; cancel.focus(); });
+      const hide = () => { prompt.hidden = true; clearButton.focus(); };
       const cancel = uiButton('취소', 'cancel-clear-answers', hide);
       prompt.append(make('span', '', '이름과 입력한 답을 모두 지울까요?'),
         uiButton('지우기', 'confirm-clear-answers', () => { clearAnswers(); hide(); }), cancel);
-      core.addToolbar(viewButton, download, clear, prompt);
-      if (pendingRestore) showRestorePrompt();
+      core.addToolbar(viewButton, saveButton, clearButton, prompt);
     }
     core.addToolbar(scoreLabel);
     window.addEventListener('beforeprint', () => {
@@ -1393,6 +1448,7 @@
     const initial = !teacher && !(wideScreen() && store('getItem', `${storageKey}:view`) === 'a4') ? 'solve' : 'a4';
     syncToolbar();
     if (initial !== mode) changeView(initial); else core.layout();
+    if (pendingRestore) showRestorePrompt(when);
   }
   function report() {
     const visible = el => el.getClientRects().length && getComputedStyle(el).visibility === 'visible';
@@ -1447,9 +1503,54 @@
       if (value == null) el.removeAttribute(name); else el.setAttribute(name, value);
     }
   }
+  function bindTeacherSolutions() {
+    const sections = core.teacherItems();
+    if (!canReveal || sections.some(section => section.hasAttribute('data-solution-for'))) return;
+    // Match the assembler's reserved IDs, including collisions with student item IDs.
+    const reserved = new Set(core.items().map(item => item.dataset.id));
+    const memo = sections.find(section => section.querySelector('.ws-t-list'));
+    if (memo) reserved.add(memo.dataset.id);
+    for (const id of Object.keys(initialReveal.items ?? {})) {
+      let privateId = `t-${id}`;
+      while (reserved.has(privateId)) privateId = `t-${privateId}`;
+      reserved.add(privateId);
+      const section = sections.find(section => section.dataset.id === privateId && section.querySelector('.ws-t-ans'));
+      if (section) section.dataset.solutionFor = id;
+    }
+  }
+  function editTeacherSolution(section, target, source, html) {
+    if (!canReveal || !target.closest('.ws-t-ans, .ws-t-steps, .ws-t-rubric')) return null;
+    const item = core.items().find(item => item.dataset.id === section.dataset.solutionFor);
+    if (!item) return null;
+    const original = itemReveal.get(item), oldSrc = target.dataset.src, oldHtml = target.innerHTML;
+    const write = (text, markup, reveal) => {
+      target.dataset.src = text; putHtml(target, markup);
+      itemReveal.set(item, reveal);
+      const panel = panels.get(item);
+      if (panel) {
+        panel.bar?.remove(); panel.solutionBox?.remove(); panel.compareBox?.remove(); panels.delete(item);
+      }
+    };
+    return {
+      apply() {
+        target.dataset.src = source; putHtml(target, html);
+        const publicParts = all(section, ':scope > .ws-t-ans, :scope > .ws-t-steps').map(el => {
+          const copy = el.cloneNode(true);
+          copy.removeAttribute('class');
+          for (const field of all(copy, '[data-src]')) field.removeAttribute('data-src');
+          return copy.outerHTML;
+        });
+        const rubric = all(section, ':scope > .ws-t-rubric > [data-src]').map(el => el.dataset.src).filter(text => text.trim());
+        write(source, html, { ...original, solution_html: publicParts.join(''), rubric });
+      },
+      revert() { write(oldSrc, oldHtml, original); },
+    };
+  }
   function editMarkup(target, source, html, blanks) {
     const item = target.closest('.ws-item');
-    if (!item || !core.items().includes(item)) return null;
+    if (!item) return null;
+    if (core.teacherItems().includes(item)) return editTeacherSolution(item, target, source, html);
+    if (!core.items().includes(item)) return null;
     const oldSrc = target.dataset.src, oldChildren = [...target.childNodes];
     const staged = make('template'); staged.innerHTML = html;
     const newChildren = [...staged.content.childNodes];
@@ -1519,6 +1620,7 @@
         }
       }
     }
+    for (const space of all(copy, '.ws-name-space')) space.replaceWith(...space.childNodes);
     // Explore owns only the live path and the computed y cells; preserve the author-supplied start.
     for (let i = 0; i < nodes.length; i++) {
       const data = exploreOriginal.get(nodes[i]);
@@ -1529,29 +1631,35 @@
       [...data.restoredHtml.values()].forEach((html, j) => { if (yCells[j]) yCells[j].innerHTML = html; });
     }
   }
+  function revealData() {
+    if (!canReveal) return undefined;
+    const slots = Object.fromEntries([...records.values()].flatMap(row => {
+      const value = slotReveal.get(row.el); return value ? [[row.slot, value]] : [];
+    }));
+    const items = Object.fromEntries(core.items().flatMap(item => {
+      const value = itemReveal.get(item); return value ? [[item.dataset.id, value]] : [];
+    }));
+    return { slots, items };
+  }
   function cleanDocument(copy) {
     copy.removeAttribute('data-view'); copy.removeAttribute('data-sheet-preview');
     if (preview && teacher) applyAttrs(copy, { 'data-answers': previousAnswers });
     let script = copy.querySelector('#sheet-reveal');
-    if (!canReveal) script?.remove();
-    else if (script || [...records.values()].some(row => slotReveal.get(row.el))) {
-      const slots = Object.fromEntries([...records.values()].flatMap(row => {
-        const value = slotReveal.get(row.el); return value ? [[row.slot, value]] : [];
-      }));
-      const items = Object.fromEntries(core.items().flatMap(item => {
-        const value = itemReveal.get(item); return value ? [[item.dataset.id, value]] : [];
-      }));
+    const reveal = revealData();
+    if (!reveal) script?.remove();
+    else if (script || Object.keys(reveal.slots).length || Object.keys(reveal.items).length) {
       if (!script) {
         script = make('script'); script.id = 'sheet-reveal'; script.type = 'application/octet-stream';
         copy.querySelector('#sheet-js')?.before(script);
       }
-      script.textContent = encodeReveal(salt(), { slots, items });
+      script.textContent = encodeReveal(salt(), reveal);
     }
     if (policy === '없음') for (const el of all(copy, '[data-check-hash]')) el.removeAttribute('data-check-hash');
   }
 
   core.attach({ init, layoutFlow, afterLayout, studentPreview: () => preview, beforePrintButton, report,
-    editMarkup, copiedItem, cleanItem, cleanDocument });
+    editMarkup, copiedItem, cleanItem, cleanDocument, revealData });
+  core.restorePending = () => !!pendingRestore;
   core.verdicts = () => Object.fromEntries([...records.values()].filter(r => r.auto).map(r => [r.slot, r.result]));
   Object.assign(window.sheet, { view, slots, answer, values, score, clearAnswers });
 })();

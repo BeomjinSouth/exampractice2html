@@ -27,6 +27,10 @@
   // New publishable keys are not JWTs and must not be used as Bearer tokens.
   const anonToken = config.key.startsWith('sb_publishable_') ? null : config.key;
   const storageScope = encodeURIComponent(`${base}|${config.table}|${config.sheet}`);
+  const buildId = () => {
+    const { edition, source_sha256 } = core.buildMeta();
+    return edition || String(source_sha256 || '').slice(0, 12);
+  };
   const clock = value => {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -66,8 +70,11 @@
     status.classList.add('ws-sync-status'); status.hidden = true;
     status.setAttribute('aria-live', 'polite');
     const submit = core.button('선생님께 제출', 'sync-submit', () => {
-      if (window.confirm('이름과 답을 선생님께 제출할까요?')) send('submit', null);
+      if (!core.restorePending() && window.confirm('이름과 답을 선생님께 제출할까요?')) send('submit', null);
     });
+    const lockActions = () => { submit.disabled = status.disabled = core.restorePending(); };
+    lockActions();
+    document.addEventListener('sheet:answers-ready', lockActions);
     core.addToolbar(submit, status);
     const notice = runtime(make('div', 'ws-sync-notice ws-solve-only'));
     notice.append(make('p', '', "이름과 학번·반·번호 등 본인 정보와 답을 선생님께 보냅니다. 이름을 쓰고 '확인'을 누르면 그 문항의 답·판별 결과와 활동지 전체 맞힌 수가, '선생님께 제출'을 누르면 모든 답·판별 결과와 맞힌 수가 전송됩니다. 짝 칸에 쓴 정보는 보내지 않습니다."));
@@ -102,6 +109,7 @@
       return sending;
     }
     function send(event, item) {
+      if (core.restorePending()) return;
       const values = window.sheet.values();
       const student = Object.fromEntries(Object.entries(values).filter(([slot]) =>
         slot.startsWith('head.') && identityFields.has(slot.slice(5))).map(([slot, value]) => [slot.slice(5), value]));
@@ -111,9 +119,8 @@
         return;
       }
       warning.hidden = true;
-      const build = parse(document.querySelector('meta[name="sheet-build"]')?.content, {}).source_sha256 || '';
       const row = {
-        sheet_id: config.sheet, sheet_title: config.title, build: String(build).slice(0, 12), client_id: client,
+        sheet_id: config.sheet, sheet_title: config.title, build: buildId(), client_id: client,
         student, event, item, score: window.sheet.score(),
         answers: Object.fromEntries(Object.entries(values).filter(([slot]) => !slot.startsWith('head.'))),
         verdicts: core.verdicts(),
@@ -223,7 +230,7 @@
     }
     function grouped() {
       const map = new Map();
-      const build = String(parse(document.querySelector('meta[name="sheet-build"]')?.content, {}).source_sha256 || '').slice(0, 12);
+      const build = buildId();
       // Postgres timestamps can carry more precision than Date's milliseconds.
       const fraction = row => (/\.(\d+)/.exec(row.created_at || '')?.[1] || '').padEnd(6, '0').slice(3);
       const ordered = records.map((row, index) => ({ row, index })).sort((a, b) =>

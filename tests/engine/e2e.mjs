@@ -170,7 +170,7 @@ async function usingTab(url, test, viewport) {
       }
     }
     async function key(key, modifiers = 0) {
-      const named = { Enter: 13, Escape: 27, ArrowUp: 38, ArrowDown: 40 };
+      const named = { Enter: 13, Escape: 27, Tab: 9, ArrowUp: 38, ArrowDown: 40 };
       const code = named[key] ? key : `Key${key.toUpperCase()}`;
       const event = { key, code, windowsVirtualKeyCode: named[key] || key.toUpperCase().charCodeAt(0), modifiers };
       await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...event });
@@ -1331,6 +1331,42 @@ assert 'q.2' in problems[1]['msg']
       assert(overflow.scroll > overflow.client+1 && overflow.cue.includes('좌우'), quote(overflow));
       assert.equal((await tab.report()).overflow_x, 0);
       assert(await tab.js(`(() => {const t=document.querySelector('#sheet-flow ${item('wide')} table');t.scrollLeft=t.scrollWidth;return t.scrollLeft>0;})()`));
+      const target = `#sheet-flow ${item('wide')} tbody tr:nth-child(3) td:nth-child(4) input`;
+      const cells = () => tab.js(`[...document.querySelectorAll('#sheet-flow ${item('wide')} table :is(th,td)')].map(el=>{
+        const r=el.getBoundingClientRect(); return [r.left,r.top,r.width,r.height];})`);
+      const placement = () => tab.js(`(() => {
+        const input=document.querySelector(${quote(target)}), bar=input.parentElement.querySelector('.ws-symbols');
+        const box=el=>{const r=el.getBoundingClientRect();return [r.left,r.top,r.right,r.bottom];};
+        const button=bar.querySelector('button'), r=button.getBoundingClientRect();
+        return {input:box(input),bar:box(bar),visible:bar.checkVisibility(),
+          clickable:document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)===button};
+      })()`);
+      await tab.js(`(async()=>{const t=document.querySelector('#sheet-flow ${item('wide')} table'); t.scrollLeft=0;
+        document.querySelector(${quote(target)}).scrollIntoView({block:'center',inline:'nearest'});
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
+      const before = await cells();
+      await tab.js(`(async()=>{document.querySelector(${quote(target)}).focus({preventScroll:true});
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
+      const after = await cells();
+      assert.equal(before.length, 49);
+      assert(after.every((box,i)=>box.every((value,j)=>Math.abs(value-before[i][j])<=1)), '포커스 전후 표의 모든 칸 위치·크기');
+      let placed = await placement();
+      assert(placed.visible && placed.clickable && placed.bar[0]>=0 && placed.bar[2]<=390 && placed.bar[1]>=0 && placed.bar[3]<=844,
+        `넘치는 표에서도 막대가 화면 안에서 눌림: ${quote(placed)}`);
+      assert(placed.bar[1] >= placed.input[3], `공간이 있으면 입력 아래: ${quote(placed)}`);
+      await tab.js(`(async()=>{const t=document.querySelector('#sheet-flow ${item('wide')} table');t.scrollLeft=40;
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
+      const shifted = await placement();
+      assert(shifted.input[0] < placed.input[0]-1 && shifted.bar[0] < placed.bar[0]-1, `표 스크롤에 맞춰 이동: ${quote({placed,shifted})}`);
+      await tab.send('Emulation.setDeviceMetricsOverride', metrics(320,360,true));
+      await tab.js(`(async()=>{const input=document.querySelector(${quote(target)});
+        document.querySelector('#sheet-flow').style.paddingBottom='900px';
+        window.scrollTo(0, Math.max(0, input.getBoundingClientRect().bottom + scrollY - innerHeight + 10));
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
+      placed = await placement();
+      assert(placed.visible && placed.bar[0]>=0 && placed.bar[2]<=320 && placed.bar[1]>=0 && placed.bar[3]<=360,
+        `화면 크기와 스크롤 변경 뒤에도 화면 안: ${quote(placed)}`);
+      assert(placed.bar[3] <= placed.input[1], `아래 공간이 없으면 입력 위: ${quote(placed)}`);
       await tab.send('Emulation.setDeviceMetricsOverride', metrics(1024,768));
       await eventually(async () => !(await geometry('wide')).overflow, '화면 확대 후 넘침 해제');
       const expanded = await geometry('wide');
@@ -1884,33 +1920,119 @@ assert 'q.2' in problems[1]['msg']
     {id:'unchecked', blocks:[{type:'question', text:'식은 {{|$x+x+x+x+x+x+x+x$}}입니다.'}]}
   ]);
   let mathWritingFiles;
-  await test('폰에서 π와 √를 입력 위치에 넣고 A4 보기와 인쇄에서는 숨김', async () => {
+  await test('기호 막대는 수 칸에 초점을 두었을 때만 나타남', async () => {
     const files = mathWritingFiles = await mathWriting();
+    await usingTab(files.open(files.student), async tab => {
+      const visible = () => tab.js(`[...document.querySelectorAll('#sheet-flow .ws-symbols button')]
+        .filter(el => el.checkVisibility()).map(el => el.dataset.symbol)`);
+      assert.deepEqual(await visible(), [], '포커스 전에는 기호 단추가 보이지 않음');
+      const paragraphs = () => tab.js(`[...document.querySelectorAll('#sheet-flow .ws-q')].map(el=>{
+        const r=el.getBoundingClientRect();return [r.width,r.height];})`);
+      const before = await paragraphs();
+      for (const id of ['symbols.1','symbols.2','strict.1','fraction.1','general.1','general.2']) {
+        const field = `#sheet-flow ${slot(id)} input`;
+        await tab.js(`document.querySelector(${quote(field)}).focus({preventScroll:true})`);
+        const after = await paragraphs();
+        assert(after.every((box,i)=>box.every((value,j)=>Math.abs(value-before[i][j])<=1)), `${id}: 문단 줄바꿈 유지`);
+        assert.deepEqual(await visible(), ['π','√','/'], id);
+        assert.deepEqual(await tab.js(`(() => {const el=document.querySelector(${quote(field)});
+          const buttons=[...el.parentElement.querySelectorAll('.ws-symbols button')];
+          return buttons.filter(button=>button.checkVisibility()).map(button=>button.getAttribute('aria-label'));})()`),
+          ['파이','루트','분수 기호'], `${id}: 칸 옆의 같은 막대`);
+      }
+      await tab.mouseClick(`${item('symbols')} .ws-qn`);
+      assert.deepEqual(await visible(), [], '다른 곳을 누르면 숨김');
+    }, metrics(390,844,true));
+  });
+  await test('폰에서 π와 √를 커서에 넣고 A4 보기와 인쇄에서는 숨김', async () => {
+    const files = mathWritingFiles ??= await mathWriting();
     const student = await fs.readFile(files.student, 'utf8');
     assert.doesNotMatch(student, /data-check=|4π|2√3/);
     await usingTab(files.open(files.student), async tab => {
       const insert = async (id, symbol, before, caret, after) => {
-        const field = `${slot(id)} input`;
+        const field = `#sheet-flow ${slot(id)} input`;
+        // A floating bar may cover the next line; dismiss it before choosing that field.
+        await tab.mouseClick(`${item('symbols')} .ws-qn`);
         await setInput(tab, field, before);
-        await tab.js(`document.querySelector(${quote(field)}).setSelectionRange(${caret}, ${caret})`);
-        await tab.mouseClick(`${slot(id)} + .ws-symbols [data-symbol="${symbol}"]`);
+        await tab.mouseClick(field);
+        await tab.js(`{const input=document.querySelector(${quote(field)}); input.setSelectionRange(${caret}, ${caret});
+          window.symbolInputs=0; input.addEventListener('input', () => window.symbolInputs++);}`);
+        const [x,y] = await tab.js(`(() => {const r=document.querySelector(${quote(`${slot(id)} .ws-symbols [data-symbol="${symbol}"]`)}).getBoundingClientRect();
+          return [r.left+r.width/2,r.top+r.height/2];})()`);
+        await tab.send('Input.dispatchMouseEvent', {type:'mousePressed', x,y, button:'left', clickCount:1});
+        assert.equal(await tab.js(`document.activeElement === document.querySelector(${quote(field)})`), true, '단추를 누르는 동안 입력 포커스 유지');
+        await tab.send('Input.dispatchMouseEvent', {type:'mouseReleased', x,y, button:'left', clickCount:1});
         assert.equal((await valuesOf(tab))[id], after);
+        assert.equal(await tab.js(`document.activeElement === document.querySelector(${quote(field)})`), true);
+        assert.equal(await tab.js('window.symbolInputs'), 1, '기호 삽입은 input 이벤트를 보냄');
       };
       await insert('symbols.1', 'π', '4 cm', 1, '4π cm');
       await insert('symbols.2', '√', '23', 1, '2√3');
-      await tab.click(action('check', item('symbols')));
-      assert.deepEqual(await tab.js(`Object.values(__sheetCore.verdicts()).slice(0,2)`), [true,true]);
-      const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el => el.getClientRects().length).length`);
-      const groups = await tab.js(`[...document.querySelectorAll('#sheet-flow .ws-symbols')].map(group =>
-        [...group.children].map(button => button.dataset.symbol).join(''))`);
-      assert.deepEqual(groups, Array(6).fill('π√/'));
-      assert.equal(await visible(), 18);
+      const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el => el.checkVisibility()).length`);
+      assert.equal(await visible(), 3);
       await tab.send('Emulation.setEmulatedMedia', {media:'print'});
       assert.equal(await visible(), 0);
       await tab.send('Emulation.setEmulatedMedia', {media:'screen'});
-      await tab.js(`sheet.view('a4')`);
+      await tab.js(`sheet.view('a4')`, true);
       assert.equal(await visible(), 0);
-      await tab.js(`sheet.view('solve'); sheet.clearAnswers()`);
+      await tab.js(`sheet.view('solve')`, true);
+      await tab.click(action('check', item('symbols')));
+      assert.deepEqual(await tab.js(`Object.values(__sheetCore.verdicts()).slice(0,2)`), [true,true]);
+      await tab.js('sheet.clearAnswers()');
+    }, metrics(390,844,true));
+  });
+  await test('기호 단추는 Tab과 Enter로 선택하고 입력으로 돌아감', async () => {
+    const files = mathWritingFiles ??= await mathWriting();
+    await usingTab(files.open(files.student), async tab => {
+      const field = `#sheet-flow ${slot('symbols.1')} input`;
+      await setInput(tab, field, '43');
+      await tab.mouseClick(field);
+      await tab.js(`document.querySelector(${quote(field)}).setSelectionRange(1,1)`);
+      await tab.key('Tab');
+      assert.equal(await tab.js(`document.activeElement.getAttribute('aria-label')`), '파이');
+      const enter = {key:'Enter', code:'Enter', windowsVirtualKeyCode:13};
+      await tab.send('Input.dispatchKeyEvent', {type:'keyDown', text:'\r', ...enter});
+      await tab.send('Input.dispatchKeyEvent', {type:'keyUp', ...enter});
+      assert.equal((await valuesOf(tab))['symbols.1'], '4π3');
+      assert.equal(await tab.js(`document.activeElement === document.querySelector(${quote(field)})`), true);
+      assert.equal(await tab.js(`document.querySelector(${quote(field)}).selectionStart`), 2);
+      await tab.js('sheet.clearAnswers()');
+    }, metrics(390,844,true));
+  });
+  await test('터치로 기호를 눌러도 입력 포커스와 커서 위치를 유지', async () => {
+    const files = mathWritingFiles ??= await mathWriting();
+    await usingTab(files.open(files.student), async tab => {
+      await tab.js('sheet.clearAnswers()');
+      const field = `#sheet-flow ${slot('symbols.1')} input`;
+      await tab.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+      await setInput(tab, field, '43');
+      await tab.mouseClick(field);
+      await tab.js(`document.querySelector(${quote(field)}).setSelectionRange(1,1)`);
+      const [x,y] = await tab.js(`(() => {const r=document.querySelector(${quote(`${slot('symbols.1')} .ws-symbols [data-symbol="π"]`)}).getBoundingClientRect();
+        return [r.left+r.width/2,r.top+r.height/2];})()`);
+      await tab.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[{x,y}]});
+      assert.equal(await tab.js(`document.activeElement === document.querySelector(${quote(field)})`), true);
+      await tab.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+      assert.equal((await valuesOf(tab))['symbols.1'], '4π3');
+      assert.equal(await tab.js(`document.activeElement === document.querySelector(${quote(field)})`), true);
+      await tab.js('sheet.clearAnswers()');
+    }, metrics(390,844,true));
+  });
+  await test('기호가 없는 활동지와 교사 편집 화면에는 막대를 만들거나 보이지 않음', async () => {
+    const plain = await buildEditorCase('기호-없음', [{id:'number',blocks:[{type:'question',text:'값은 {{|$3$}}입니다.'}]}]);
+    await usingTab(plain.open(plain.student), async tab => {
+      await tab.mouseClick(`${slot('number.1')} input`);
+      assert.equal(await tab.js(`document.querySelectorAll('.ws-symbols').length`), 0);
+    }, metrics(390,844,true));
+    const files = mathWritingFiles ??= await mathWriting();
+    await usingTab(files.open(files.teacher), async tab => {
+      await tab.click(action('edit'));
+      assert.equal(await tab.js(`document.querySelectorAll('.ws-symbols').length`), 0);
+      await tab.click(action('preview-student'));
+      await tab.mouseClick(`${slot('symbols.1')} input`);
+      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el=>el.checkVisibility()).length`), 3);
+      await tab.click(action('return-teacher'));
+      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el=>el.checkVisibility()).length`), 0);
     }, metrics(390,844,true));
   });
   await test('Enter는 한 줄에서만 문항을 확인하고 한글 조합 중에는 무시', async () => {

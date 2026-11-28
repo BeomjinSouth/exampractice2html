@@ -422,7 +422,7 @@ try {
     const before = await tab.report();
     assert.equal(before.view, 'a4');
     assert.equal(before.interactive, true);
-    assert.equal(before.slots_total, 16);
+    assert.equal(before.slots_total, 17);
     await tab.click(action('preview-student'));
     assert.equal(await tab.js('sheet.view()'), 'solve');
     assert.equal(await tab.js('document.querySelectorAll("#sheet-flow > .ws-item").length'), 5);
@@ -521,6 +521,95 @@ try {
       await tab.click(action('check', question));
       assert.equal(await visible(id), true, `${id}: 다시 확인한 답`);
     }
+  }));
+  await test('시도 후 풀이를 열 때 스스로 점검을 요구하지 않음', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    const q1 = item('q1'), solution = action('reveal-solution', q1);
+    for (const [id, field, value] of [['q1.1','input','1/2'], ['q1.2','input','서로 평행'],
+      ['q1.3','input','1'], ['q1.4','textarea','분자와 분모를 나눴어요.']]) {
+      await setInput(tab, `${slot(id)} ${field}`, value);
+    }
+    const ready = () => tab.js(`!document.querySelector(${quote(solution)}).disabled`);
+    assert.equal(await ready(), false, '확인 전에는 풀이가 닫힘');
+    await tab.click(action('check', q1));
+    assert.equal((await valuesOf(tab))['q1.6'], undefined, '자기 점검은 누르지 않음');
+    assert.equal(await ready(), true, '모든 답을 썼다면 점검 전에도 풀이를 열 수 있음');
+    await tab.click(solution);
+    assert.equal(await tab.js(`document.querySelector(${quote(`${q1} .ws-solution`)}).checkVisibility()`), true);
+  }));
+  await test('포커스한 칸이 세로 화면 밖으로 나가면 기호 막대가 따라오지 않음', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    const field = `${slot('q1.1')} input`, bar = `${slot('q1.1')} .ws-symbols`;
+    const visible = () => tab.js(`document.querySelector(${quote(bar)}).checkVisibility()`);
+    await tab.mouseClick(field);
+    assert.equal(await visible(), true);
+    const before = await tab.js('scrollY');
+    await tab.js(`(async () => {document.querySelector(${quote(item('q4'))}).scrollIntoView();
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));})()`, true);
+    assert(await tab.js(`document.activeElement.matches(${quote(field)}) && document.activeElement.getBoundingClientRect().bottom < 0`));
+    assert.equal(await visible(), false, '화면 밖 칸의 막대는 숨겨짐');
+    await tab.js(`(async () => {window.scrollTo(0,${before});
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));})()`, true);
+    assert.equal(await visible(), true, '같은 입력이 돌아오면 다시 표시');
+  }, metrics(390,844,true)));
+  await test('수식 서술 칸의 커서에 기호를 넣고 안내는 한 번만 표시', () => usingTab(interactive, async tab => {
+    const hint = '.ws-symbol-hint', field = `${slot('q1.4')} textarea`;
+    const hintText = () => tab.js(`[...document.querySelectorAll(${quote(hint)})].filter(e=>e.checkVisibility()).map(e=>e.textContent.trim())`);
+    assert.deepEqual(await hintText(), []);
+    await tab.click(action('preview-student'));
+    await tab.mouseClick(field);
+    const bar = `${slot('q1.4')} .ws-symbols`;
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll(${quote(`${bar} [data-symbol]`)})]
+      .filter(e=>e.checkVisibility()).map(e=>e.dataset.symbol)`), ['√','/']);
+    assert.match((await hintText()).join(''), /칸을 누르면 √와 \/를 쓸 수 있어요/);
+    assert.equal((await hintText()).length, 1);
+    await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+    assert.deepEqual(await hintText(), []);
+    await tab.send('Emulation.setEmulatedMedia', {media:''});
+    await tab.mouseClick(field);
+    await setInput(tab, field, '2+3');
+    await tab.js(`document.querySelector(${quote(field)}).setSelectionRange(2, 2)`);
+    assert.equal(await tab.js(`document.activeElement.matches(${quote(field)})`), true, '서술 칸에 초점');
+    await tab.key('Tab');
+    assert.equal(await tab.js('document.activeElement.dataset.symbol'), '√', '다음 탭은 루트 단추');
+    const enter = {key:'Enter', code:'Enter', windowsVirtualKeyCode:13};
+    await tab.send('Input.dispatchKeyEvent', {type:'keyDown', text:'\r', ...enter});
+    await tab.send('Input.dispatchKeyEvent', {type:'keyUp', ...enter});
+    assert.equal((await valuesOf(tab))['q1.4'], '2+√3');
+    assert.equal(await tab.js(`document.activeElement.matches(${quote(field)}) && document.activeElement.selectionStart === 3`), true);
+    assert.deepEqual(await hintText(), []);
+    await tab.key('Escape');
+    assert.equal(await tab.js(`document.querySelector(${quote(bar)}).checkVisibility()`), false);
+    await tab.mouseClick(field);
+    assert.equal(await tab.js(`document.querySelector(${quote(bar)}).checkVisibility()`), true);
+    assert.deepEqual(await hintText(), []);
+    await tab.click(action('return-teacher'));
+    await tab.click(action('edit'));
+    assert.deepEqual(await hintText(), []);
+  }, metrics(390,844,true)));
+  await test('확인 뒤 바꾼 칸에만 다시 확인 안내를 한 번 표시', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    const q1 = item('q1'), a = slot('q1.1'), b = slot('q1.2');
+    const note = `${a} ~ .ws-recheck`, message = '답을 바꿨어요. 다시 확인해 보세요';
+    const visible = selector => tab.js(`!!document.querySelector(${quote(selector)})?.checkVisibility()`);
+    await setInput(tab, `${a} input`, '1/2');
+    await setInput(tab, `${b} input`, '서로 평행');
+    await tab.click(action('check', q1));
+    await tab.click(action('reveal-answer', q1));
+    await setInput(tab, `${a} input`, '2');
+    assert.equal(await visible(`${a} ~ .ws-reveal`), false);
+    assert.equal(await visible(`${b} ~ .ws-reveal`), true);
+    assert.equal(await visible(`${b} ~ .ws-verdict.ws-ok`), true);
+    assert.equal(await visible(note), true, '바꾼 칸 옆에만 다시 확인 안내');
+    assert.equal(await tab.js(`document.querySelector(${quote(note)}).getAttribute('aria-live')`), 'polite');
+    await setInput(tab, `${a} input`, '3');
+    assert.deepEqual(await tab.js(`[...document.querySelectorAll('.ws-recheck')]
+      .filter(e=>e.textContent && e.checkVisibility()).map(e=>e.textContent)`), [message]);
+    await tab.send('Emulation.setEmulatedMedia', {media:'print'});
+    assert.equal(await visible(note), false);
+    await tab.send('Emulation.setEmulatedMedia', {media:''});
+    await tab.click(action('check', q1));
+    assert.equal(await tab.js(`document.querySelector(${quote(note)})?.textContent`), '');
   }));
   await test('자리별 판별 결과·점수·입력·그리기·짝·순서 상태', () => usingTab(studentInteractive, async tab => {
     assert.deepEqual(await tab.js('sheet.slots().filter(s=>s.auto).map(s=>[s.slot,s.kind])'), examples.map(([s,k])=>[s,k]));
@@ -635,6 +724,42 @@ try {
     if (during) await during();
     await send('mouseReleased', ...(moves.at(-1) || [x0,y0]), {button:'left', clickCount:1});
   }
+  await test('크게 본 그림에서 보이는 폭보다 먼 두 점을 한 번 끌어 이어 저장', () => usingTab(interactive, async tab => {
+    await tab.click(action('preview-student'));
+    const figure = slot('q4.1');
+    await tab.click(action('pen-zoom', figure));
+    await tab.click(action('pen-line', figure));
+    const geometry = () => tab.js(`(() => {
+      const vp = document.querySelector(${quote(`${figure} .ws-pen-viewport`)});
+      const {left,top} = vp.getBoundingClientRect();
+      const c = vp.querySelector('canvas').getBoundingClientRect();
+      return {left,top,width:vp.clientWidth,x:c.left,y:c.top,w:c.width,h:c.height,scroll:vp.scrollLeft};
+    })()`);
+    await tab.js(`document.querySelector(${quote(`${figure} .ws-pen-viewport`)}).scrollIntoView({block:'center'})`);
+    const before = await geometry(), start = [.15,.33], end = [.78,.45];
+    assert((end[0] - start[0]) * before.w > before.width, quote(before));
+    const mouse = (type,x,y,extra) => tab.send('Input.dispatchMouseEvent', {type,x,y,...extra});
+    await mouse('mousePressed', before.x + start[0]*before.w, before.y + start[1]*before.h, {button:'left',clickCount:1});
+    const edge = before.left + before.width - 6, y = before.y + end[1]*before.h;
+    await mouse('mouseMoved', edge, y, {buttons:1});
+    const targetScroll = before.x + end[0]*before.w - (edge - 24);
+    await tab.js(`(async () => {
+      const vp = document.querySelector(${quote(`${figure} .ws-pen-viewport`)});
+      const until = performance.now() + 1100;
+      while (vp.scrollLeft < ${targetScroll} && performance.now() < until) await new Promise(requestAnimationFrame);
+    })()`, true);
+    const after = await geometry();
+    const x = Math.min(edge, after.x + end[0]*after.w);
+    await mouse('mouseMoved', x, y, {buttons:1});
+    await mouse('mouseReleased', x, y, {button:'left',clickCount:1});
+    const strokes = await tab.js(`(() => {
+      return JSON.parse(localStorage.getItem('pbj-sheet:interactive-fixture:teacher')).answers[${quote('q4.1')}].strokes;
+    })()`);
+    assert.equal(strokes.length, 1);
+    for (const [actual,expected] of [[strokes[0][0],start],[strokes[0].at(-1),end]]) {
+      assert(actual.every((v,i)=>Math.abs(v-expected[i]) < .01), quote({actual,expected,scroll:after.scroll}));
+    }
+  }, metrics(390,844,true)));
   await test('폰에서 크게 펼쳐 그린 45° 선과 컴퍼스 원이 인쇄에서도 같은 모양', async () => {
     const html = await fs.readFile(fileURLToPath(studentInteractive), 'utf8');
     const url = await saveFile('construction-student', html.replace('data-height-mm="25"', 'data-height-mm="85"'));
@@ -1344,8 +1469,8 @@ assert 'q.2' in problems[1]['msg']
       const target = `#sheet-flow ${item('wide')} tbody tr:nth-child(3) td:nth-child(4) input`;
       const cells = () => tab.js(`[...document.querySelectorAll('#sheet-flow ${item('wide')} table :is(th,td)')].map(el=>{
         const r=el.getBoundingClientRect(); return [r.left,r.top,r.width,r.height];})`);
-      const placement = () => tab.js(`(() => {
-        const input=document.querySelector(${quote(target)}), bar=input.parentElement.querySelector('.ws-symbols');
+      const placement = (selector = target) => tab.js(`(() => {
+        const input=document.querySelector(${quote(selector)}), bar=input.parentElement.querySelector('.ws-symbols');
         const box=el=>{const r=el.getBoundingClientRect();return [r.left,r.top,r.right,r.bottom];};
         const button=bar.querySelector('button'), r=button.getBoundingClientRect();
         return {input:box(input),bar:box(bar),visible:bar.checkVisibility(),
@@ -1368,6 +1493,25 @@ assert 'q.2' in problems[1]['msg']
         await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
       const shifted = await placement();
       assert(shifted.input[0] < placed.input[0]-1 && shifted.bar[0] < placed.bar[0]-1, `표 스크롤에 맞춰 이동: ${quote({placed,shifted})}`);
+      const scrollTable = left => tab.js(`(async()=>{const t=document.querySelector('#sheet-flow ${item('wide')} table');
+        t.scrollLeft=${left}; await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));})()`,true);
+      const nearEnd = target.replace('td:nth-child(4)', 'td:nth-child(6)');
+      const table = `document.querySelector('#sheet-flow ${item('wide')} table')`;
+      await tab.js(`${table}.style.width='240px'`);
+      await scrollTable('1e6');
+      await tab.js(`document.querySelector(${quote(nearEnd)}).focus({preventScroll:true})`);
+      assert.equal((await placement(nearEnd)).visible, true);
+      await scrollTable(0);
+      const hidden = await placement(nearEnd);
+      const tableRight = await tab.js(`${table}.getBoundingClientRect().right`);
+      assert(hidden.input[0] >= tableRight && hidden.input[0] < 390 && hidden.input[2] > 0,
+        `입력은 화면 안에 있지만 표 스크롤 창에서 가림: ${quote({hidden,tableRight})}`);
+      assert.equal(hidden.visible, false, `가로로 완전히 가린 입력의 막대는 숨김: ${quote(hidden)}`);
+      await scrollTable('1e6');
+      assert.equal((await placement(nearEnd)).visible, true, '표를 되돌리면 막대도 다시 표시');
+      await tab.js(`${table}.style.width=''`);
+      await scrollTable(40);
+      await tab.js(`document.querySelector(${quote(target)}).focus({preventScroll:true})`);
       await tab.send('Emulation.setDeviceMetricsOverride', metrics(320,360,true));
       await tab.js(`(async()=>{const input=document.querySelector(${quote(target)});
         document.querySelector('#sheet-flow').style.paddingBottom='900px';
@@ -1960,7 +2104,7 @@ assert 'q.2' in problems[1]['msg']
   await test('기호 막대는 수 칸에 초점을 두었을 때만 나타남', async () => {
     const files = mathWritingFiles = await mathWriting();
     await usingTab(files.open(files.student), async tab => {
-      const visible = () => tab.js(`[...document.querySelectorAll('#sheet-flow .ws-symbols button')]
+      const visible = () => tab.js(`[...document.querySelectorAll('#sheet-flow .ws-symbols [data-symbol]')]
         .filter(el => el.checkVisibility()).map(el => el.dataset.symbol)`);
       assert.deepEqual(await visible(), [], '포커스 전에는 기호 단추가 보이지 않음');
       const paragraphs = () => tab.js(`[...document.querySelectorAll('#sheet-flow .ws-q')].map(el=>{
@@ -1968,12 +2112,13 @@ assert 'q.2' in problems[1]['msg']
       const before = await paragraphs();
       for (const id of ['symbols.1','symbols.2','strict.1','fraction.1','general.1','general.2']) {
         const field = `#sheet-flow ${slot(id)} input`;
-        await tab.js(`document.querySelector(${quote(field)}).focus({preventScroll:true})`);
+        await tab.js(`{const input=document.querySelector(${quote(field)});
+          input.scrollIntoView({block:'center'}); input.focus({preventScroll:true});}`);
         const after = await paragraphs();
         assert(after.every((box,i)=>box.every((value,j)=>Math.abs(value-before[i][j])<=1)), `${id}: 문단 줄바꿈 유지`);
         assert.deepEqual(await visible(), ['π','√','/'], id);
         assert.deepEqual(await tab.js(`(() => {const el=document.querySelector(${quote(field)});
-          const buttons=[...el.parentElement.querySelectorAll('.ws-symbols button')];
+          const buttons=[...el.parentElement.querySelectorAll('.ws-symbols [data-symbol]')];
           return buttons.filter(button=>button.checkVisibility()).map(button=>button.getAttribute('aria-label'));})()`),
           ['파이','루트','분수 기호'], `${id}: 칸 옆의 같은 막대`);
       }
@@ -2005,7 +2150,7 @@ assert 'q.2' in problems[1]['msg']
       };
       await insert('symbols.1', 'π', '4 cm', 1, '4π cm');
       await insert('symbols.2', '√', '23', 1, '2√3');
-      const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el => el.checkVisibility()).length`);
+      const visible = () => tab.js(`[...document.querySelectorAll('.ws-symbols [data-symbol]')].filter(el => el.checkVisibility()).length`);
       assert.equal(await visible(), 3);
       await tab.send('Emulation.setEmulatedMedia', {media:'print'});
       assert.equal(await visible(), 0);
@@ -2067,9 +2212,9 @@ assert 'q.2' in problems[1]['msg']
       assert.equal(await tab.js(`document.querySelectorAll('.ws-symbols').length`), 0);
       await tab.click(action('preview-student'));
       await tab.mouseClick(`${slot('symbols.1')} input`);
-      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el=>el.checkVisibility()).length`), 3);
+      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols [data-symbol]')].filter(el=>el.checkVisibility()).length`), 3);
       await tab.click(action('return-teacher'));
-      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols button')].filter(el=>el.checkVisibility()).length`), 0);
+      assert.equal(await tab.js(`[...document.querySelectorAll('.ws-symbols [data-symbol]')].filter(el=>el.checkVisibility()).length`), 0);
     }, metrics(390,844,true));
   });
   await test('Enter는 한 줄에서만 문항을 확인하고 한글 조합 중에는 무시', async () => {

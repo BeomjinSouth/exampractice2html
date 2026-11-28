@@ -472,6 +472,10 @@ svg[data-chart="histogram"] .ws-user-bar { stroke: #161616; stroke-width: .27; }
   background: #fafafa; color: inherit; font: inherit; cursor: pointer;
 }
 #sheet-flow .ws-symbols > button:focus-visible { outline: 2px solid #555; outline-offset: 1px; }
+#sheet-flow .ws-symbol-hint { margin: 0 0 8px; color: #3f4752; }
+#sheet-flow .ws-recheck { margin-inline: .35em; color: #854700; font-size: 13px; white-space: normal; }
+#sheet-flow :is(.ws-ans, .ws-fill) > .ws-recheck { display: block; }
+#sheet-flow .ws-recheck:empty { position: absolute; width: 0; height: 0; overflow: hidden; }
 #sheet-flow .ws-choices > li { padding: 4px; border: 1px solid #d4d4d4; border-radius: 3px; }
 #sheet-flow .ws-choices > .ws-picked { background: #eee; border-color: #777; }
 @media screen {

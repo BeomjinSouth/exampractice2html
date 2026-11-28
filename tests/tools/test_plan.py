@@ -771,6 +771,42 @@ class FigurePlanTest(unittest.TestCase):
             issues = self.check(question, {**chart, 'pen': pen}, interactive=True)
             self.assertEqual(any(i.code == 'interactive-drawing-missing' for i in issues), not pen)
 
+    def test_box_chart_checks_raw_data_and_five_values_across_items(self):
+        raw = {'type': 'table', 'header': ['구분', '퀴즈 점수 (점)'],
+               'rows': [['1반', '$90$, $60$, $45$, $60$']]}
+        five = {'type': 'table', 'header': ['구분', '최솟값', '제1사분위수', '중앙값', '제3사분위수', '최댓값'],
+                'rows': [['1반', '$45$', '{{|$52.5$}}', '$60$', '$75$', '$90$']]}
+        chart = {'type': 'chart', 'kind': 'box', 'x': [0, 100], 'x_step': 10, 'x_label': '(점)',
+                 'groups': [{'label': '1반', 'data': [45, 60, 60, 90]}]}
+        data = document(raw, five)
+        data['items'].append({'id': 'q2', 'blocks': [chart]})
+
+        def mismatches():
+            return {i.code: i.path for i in validate(data, ROOT) if i.code.startswith('box-table-')}
+
+        self.assertEqual(mismatches(), {})
+        raw['rows'][0][1] = '$90$, $55$, $45$, $60$'
+        five['rows'][0][2] = '{{|$55$}}'
+        self.assertEqual(mismatches(), {
+            'box-table-data-mismatch': 'items[0].blocks[0].rows[0][1]',
+            'box-table-five-mismatch': 'items[0].blocks[1].rows[0][2]',
+        })
+        raw['rows'][0][0] = '1반 평균'
+        five['header'][2] = '평균'
+        self.assertEqual(mismatches(), {})
+        raw['rows'][0][0] = '1반'
+        raw['header'][1] = '평균 점수 (점)'
+        self.assertEqual(mismatches(), {})
+        raw['header'][1] = '퀴즈 점수 (점)'
+        raw['rows'][0][1] = '$90$, $90$, $45$, $60$'  # Same distinct values, different counts.
+        self.assertEqual(set(mismatches()), {'box-table-data-mismatch'})
+        data['items'].append({'id': 'q3', 'blocks': [deepcopy(chart)]})
+        self.assertEqual(mismatches(), {})  # Ambiguous across items.
+        data['items'][0]['blocks'].append(chart)
+        self.assertEqual(set(mismatches()), {'box-table-data-mismatch'})  # Prefer the same item.
+        raw['rows'][0][1] = '$45$, $60$, $90$'  # A repeated value was left out.
+        self.assertEqual(set(mismatches()), {'box-table-data-mismatch'})
+
     def test_figure_answer_requires_svg_with_matching_viewbox(self):
         figure = deepcopy(load_registry()['figure']['example'])
         for answer in ('<svg viewBox="0,0,40.0,20"/>', {'svg': '<svg viewBox="0 0 40 20"/>'}):
@@ -825,8 +861,46 @@ class FigurePlanTest(unittest.TestCase):
         data['items'].append({'id': 'q2', 'blocks': [teacher]})
         self.assertFalse(any(i.code == 'answer-scale-mismatch' for i in validate(data, ROOT)))
 
+    def test_distorted_svg_warns_for_pen_overlay_draw_and_scale_pairs(self):
+        svg = '<svg viewBox="0 0 174 108" width="174" height="54" preserveAspectRatio="none"/>'
+        base = {'type': 'figure', 'svg': svg, 'width_mm': 174, 'alt': '두 선분'}
+        draw = {'type': 'answer', 'rows': [{'kind': 'draw', 'label': '작도', 'height_mm': 40,
+                                            'answer': {'svg': svg, 'width_mm': 174, 'alt': '작도 결과'}}]}
+        teacher = {**base, 'teacher_only': True}
+        plain = {**base, 'svg': '<svg viewBox="0 0 174 108"/>'}
+
+        def distorted(*blocks):
+            return [i.path for i in self.check(*blocks) if i.code == 'figure-aspect-distorted']
+
+        self.assertEqual(distorted({**base, 'pen': True, 'answer': svg}),
+                         ['items[0].blocks[0].svg', 'items[0].blocks[0].answer'])
+        self.assertEqual(distorted({**plain, 'pen': True, 'answer': svg}), ['items[0].blocks[0].answer'])
+        self.assertEqual(distorted(draw), ['items[0].blocks[0].rows[0].answer.svg'])
+        self.assertEqual(distorted(base, teacher), ['items[0].blocks[0].svg', 'items[0].blocks[1].svg'])
+        self.assertFalse(any(i.code == 'answer-scale-mismatch' for i in self.check(base, teacher)))
+        differences = [i.message for i in self.check(plain, teacher) if i.code == 'answer-scale-mismatch']
+        self.assertEqual(len(differences), 1)
+        self.assertIn('세로', differences[0])
+        for keep in ('xMidYMid meet', 'xMidYMid slice'):
+            self.assertEqual(distorted({**base, 'svg': svg.replace('none', keep), 'pen': True}), [])
+
+    def test_svg_label_size_composes_transforms(self):
+        for outer, inner, expected in [('scale(.2)', '', '2.27'),
+                                       ('translate(20,-10) scale(2)', 'matrix(1 0 0 .1 0 0)', '2.27'),
+                                       ('matrix(0 1 -1 0 0 0)', 'scale(.2,1)', None),
+                                       ('scale(2) translate(4)', 'scale(.5)', None)]:
+            with self.subTest(outer=outer, inner=inner):
+                svg = (f'<svg viewBox="0 0 100 20" font-size="4"><g transform="{outer}">'
+                       f'<g transform="{inner}"><text>A</text></g></g></svg>')
+                figure = {'type': 'figure', 'width_mm': 100, 'svg': svg, 'alt': '점 A'}
+                messages = [i.message for i in self.check(figure) if i.code == 'figure-label-small']
+                self.assertEqual(len(messages), int(expected is not None))
+                if expected:
+                    self.assertIn(expected + 'pt', messages[0])
+
     def test_figures_fields_and_chart_examples_match_plan(self):
         entry = load_registry()['figures']
+        self.assertFalse(self.check(entry['example']))
         for field in ('src', 'svg', 'width_mm', 'alt', 'caption', 'teacher_only', 'split'):
             self.assertIn(field, entry['fields']['items'])
         for key in ('pen', 'answer', 'type'):

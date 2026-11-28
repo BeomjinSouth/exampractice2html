@@ -19,7 +19,7 @@ from sheet_common import (BUILD_FILE, CHECK_DIR, LABEL_MM, PICTURE_CELL_PADDING_
                           TEACHER_SUFFIX, TOOL, VERSION, atomic_write, box_five, box_tick_values, content_width_mm,
                           figure_width_mm, html_paths, image_path, json_bytes, sha256, situation_cell_mm, split_widths_mm)
 from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
-from sheet_plan import (answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
+from sheet_plan import (SVG_URL, answer_svg_source, checked_svg, function_tree, function_value, line_grid_points,
                         load_plan, print_issues, svg_alt, svg_property, svg_tag)
 from sheet_common import youtube_id
 from sheet_answer import canonical, check_hash, inferred_unit, input_mode, make_salt, num, number_forms, plain, reveal, text_candidates
@@ -85,6 +85,38 @@ def _text_slot_attrs(slot, source, salt, grading, *, mode='auto', accept=(), uni
 
 def mm(value):
     return f'{value:.12g}'
+
+
+def spaced_tick_labels(ticks, size, *, vertical=False):
+    """Choose from (position, text) ticks without changing the axis geometry."""
+    if len(ticks) < 2:
+        return ticks
+    # In print, a digit is about .56 em. Leave room for font fallback and a small gap.
+    widths = [size * (1 if vertical else sum(.72 if c in '−+' else .35 if c == '.' else .62 for c in text))
+              for _, text in ticks]
+
+    def fits(a, b):
+        return abs(ticks[b][0] - ticks[a][0]) >= (widths[a] + widths[b]) / 2 + .4
+
+    end = len(ticks) - 1
+    keep_end = fits(0, end)
+    step = ticks[1][0] - ticks[0][0]
+    if keep_end and all(math.isclose(b[0] - a[0], step) for a, b in zip(ticks, ticks[1:])):
+        # A regular numbered interval makes it easier to infer the skipped tick values.
+        for stride in range(1, end + 1):
+            regular = list(range(0, end, stride))
+            if not fits(regular[-1], end):
+                regular.pop()
+            regular.append(end)
+            if all(fits(a, b) for a, b in zip(regular, regular[1:])):
+                return [ticks[i] for i in regular]
+    chosen = [0]
+    for i in range(1, end):
+        if fits(chosen[-1], i) and (not keep_end or fits(i, end)):
+            chosen.append(i)
+    if keep_end:
+        chosen.append(end)
+    return [ticks[i] for i in chosen]
 
 
 def editable(tag, value, cls='', attrs='', *, table_blank_mm=None):
@@ -213,8 +245,33 @@ def overlay_svg(source, viewport):
     paints = {'color', 'fill', 'stroke', 'stop-color'}
     unchanged = {'none', 'transparent', 'inherit', 'unset', 'revert', 'revert-layer'}
 
+    rgb = ','.join(str(int(KEY_COLOR[i:i+2], 16)) for i in (1, 3, 5))
+
     def paint(value):
-        return value if value.strip().lower() in unchanged else KEY_COLOR
+        color = value.strip()
+        if color.lower() in unchanged or SVG_URL.match(color):
+            return value
+        functional = re.fullmatch(r'(?:rgba?|hsla?)\((.*)\)', color, re.I | re.S)
+        if functional:
+            # Find the alpha separator outside nested CSS functions such as calc().
+            depth, commas = 0, []
+            for match in re.finditer(r'[(),/]', functional[1]):
+                token = match[0]
+                if token == '(':
+                    depth += 1
+                elif token == ')':
+                    depth -= 1
+                elif depth == 0:
+                    if token == '/':
+                        return f'rgba({rgb},{functional[1][match.end():].strip()})'
+                    commas.append(match.end())
+            if len(commas) == 3:
+                return f'rgba({rgb},{functional[1][commas[-1]:].strip()})'
+        if re.fullmatch(r'#[0-9a-f]{4}', color, re.I):
+            return KEY_COLOR + color[-1] * 2
+        if re.fullmatch(r'#[0-9a-f]{8}', color, re.I):
+            return KEY_COLOR + color[-2:]
+        return KEY_COLOR
 
     stack = [root]
     while stack:
@@ -778,12 +835,14 @@ class Renderer:
                     f'font-size="{print_size}">{escape(text)}</text>')
 
         lines = [f'M{mm(left)} {bottom}H{mm(right)}']
-        guides, labels = [], []
-        for value, text in ticks:
-            xx = mm(x(value))
+        guides = []
+        axis_ticks = [(x(value), text) for value, text in ticks]
+        for at, _ in axis_ticks:
+            xx = mm(at)
             lines.append(f'M{xx} {mm(bottom-.9)}v1.8')
             guides.append(f'M{xx} {top}V{bottom}')
-            labels.append(label(x(value), bottom + 6.3, text, 'middle'))
+        labels = [label(at, bottom + 6.3, text, 'middle')
+                  for at, text in spaced_tick_labels(axis_ticks, phone_size)]
         if unit:
             labels.append(label(width - 1, bottom + 13, unit, 'end'))
         marks, summary = [], []
@@ -858,26 +917,31 @@ class Renderer:
         blank_histogram = kind == 'histogram' and (plot or block.get('teacher'))
         if blank_histogram:
             guides.extend(f'M{mm(sx(v))} {top}V{mm(bottom)}' for v in bins[1:])
-        for i in range(n+1):
-            v = y0 + i * step
-            yy = sy(v)
-            if blank_histogram and i:
-                guides.append(f'M{left} {mm(yy)}H{mm(right)}')
-            axis += f'<text x="{left-1}" y="{mm(yy+1)}" text-anchor="end" font-size="2.5">{escape(mm(v).replace("-", "−"))}</text>'
+        font_size = 2.5
+        y_values = [y0 + i * step for i in range(n+1)]
+        y_ticks = [(sy(v), mm(v).replace('-', '−')) for v in y_values]
+        if blank_histogram:
+            guides.extend(f'M{left} {mm(y)}H{mm(right)}' for y, _ in y_ticks[1:])
+        y_labels = spaced_tick_labels(y_ticks, font_size, vertical=True)
+        extra_ticks = []
+        if len(y_labels) < len(y_ticks) and not blank_histogram:
+            extra_ticks.extend(f'M{mm(left-.65)} {mm(y)}h.65' for y, _ in y_ticks)
+        for y, text in y_labels:
+            axis += f'<text x="{left-1}" y="{mm(y+1)}" text-anchor="end" font-size="{font_size}">{escape(text)}</text>'
         if kind in ('bar', 'line'):
-            for i, label in enumerate(labels):
-                axis += f'<text x="{mm(sx(i+.5))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(inspect_markup(label).plain)}</text>'
-        elif kind in ('histogram', 'polygon'):
-            for value in bins:
-                if kind == 'polygon':
-                    xx = mm(sx(value))
-                    axis += f'<path d="M{xx} {mm(bottom-.6)}V{mm(bottom+.6)}" stroke="currentColor" stroke-width="0.25"/>'
-                axis += f'<text x="{mm(sx(value))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(mm(value).replace("-", "−"))}</text>'
-        elif kind == 'scatter':
-            x_step = block.get('x_step', (x1-x0) / 5)
-            for i in range(min(200, math.floor((x1-x0) / x_step + 1e-9)) + 1):
-                value = x0 + i * x_step
-                axis += f'<text x="{mm(sx(value))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(mm(value).replace("-", "−"))}</text>'
+            x_labels = [(sx(i+.5), inspect_markup(label).plain) for i, label in enumerate(labels)]
+        else:
+            if kind == 'scatter':
+                x_step = block.get('x_step', (x1-x0) / 5)
+                bins = [x0 + i * x_step for i in range(min(200, math.floor((x1-x0) / x_step + 1e-9)) + 1)]
+            x_ticks = [(sx(v), mm(v).replace('-', '−')) for v in bins]
+            x_labels = spaced_tick_labels(x_ticks, font_size)
+            if kind == 'polygon' or (len(x_labels) < len(x_ticks) and not blank_histogram):
+                extra_ticks.extend(f'M{mm(x)} {mm(bottom-.6)}v1.2' for x, _ in x_ticks)
+        if extra_ticks:
+            axis += f'<path d="{"".join(extra_ticks)}" fill="none" stroke="currentColor" stroke-width="0.25"/>'
+        for x, text in x_labels:
+            axis += f'<text x="{mm(x)}" y="{mm(bottom+4)}" text-anchor="middle" font-size="{font_size}">{escape(text)}</text>'
         if block.get('x_label'):
             axis += f'<text x="{mm(right)}" y="{mm(height-1)}" text-anchor="end" font-size="2.7">{escape(inspect_markup(block["x_label"]).plain)}</text>'
         if block.get('y_label'):

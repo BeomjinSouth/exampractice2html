@@ -436,21 +436,73 @@ def svg_mm_per_unit(root, width_mm):
     return scale, scale
 
 
+SVG_TRANSFORM = re.compile(r'(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^()]*)\)')
+SVG_TRANSFORM_NUMBER = r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?'
+SVG_TRANSFORM_ARGS = re.compile(rf'{SVG_TRANSFORM_NUMBER}(?:(?:\s*,\s*|\s+){SVG_TRANSFORM_NUMBER})*')
+SVG_IDENTITY = (1, 0, 0, 1)
+FIGURE_SCALE_TOLERANCE = .02
+
+
+def svg_compose_linear(outer, inner):
+    a, b, c, d = outer
+    e, f, g, h = inner
+    return a*e + c*f, b*e + d*f, a*g + c*h, b*g + d*h
+
+
+def svg_linear_transform(value):
+    # Translation (including a transform's center) cannot change a glyph's size.
+    result, end = SVG_IDENTITY, 0
+    for match in SVG_TRANSFORM.finditer(value):
+        name, args = match[1], match[2].strip()
+        if value[end:match.start()].strip(' ,\t\r\n') or not SVG_TRANSFORM_ARGS.fullmatch(args):
+            return SVG_IDENTITY
+        end = match.end()
+        values = tuple(map(float, re.split(r'[\s,]+', args)))
+        if not all(map(math.isfinite, values)):
+            return SVG_IDENTITY
+        n = len(values)
+        if name == 'matrix' and n == 6:
+            transform = values[:4]
+        elif name == 'scale' and n in (1, 2):
+            transform = (values[0], 0, 0, values[-1])
+        elif name == 'translate' and n in (1, 2):
+            continue
+        elif name == 'rotate' and n in (1, 3):
+            angle = math.radians(values[0] % 360)
+            c, s = math.cos(angle), math.sin(angle)
+            transform = (c, s, -s, c)
+        elif name in ('skewX', 'skewY') and n == 1:
+            slope = math.tan(math.radians(values[0] % 180))
+            transform = (1, 0, slope, 1) if name == 'skewX' else (1, slope, 0, 1)
+        else:
+            return SVG_IDENTITY
+        result = svg_compose_linear(result, transform)
+    return result if not value[end:].strip() else SVG_IDENTITY
+
+
 def svg_smallest_label(root, width_mm, *, viewport=None):
-    scale_y = svg_mm_per_unit(root if viewport is None else viewport, width_mm)[1]
+    sx, sy = svg_mm_per_unit(root if viewport is None else viewport, width_mm)
     smallest = None
     root_size = svg_length(svg_property(root, 'font-size'), 16)
-    stack = [(root, 16, False)]
+    stack = [(root, 16, False, (sx, 0, 0, sy))]
     while stack:
-        node, inherited, in_text = stack.pop()
+        node, inherited, in_text, matrix = stack.pop()
         tag = svg_tag(node)
         size = svg_length(svg_property(node, 'font-size'), inherited, 16 if root_size is None else root_size)
         size = inherited if size is None else size
+        matrix = svg_compose_linear(matrix, svg_linear_transform(svg_property(node, 'transform')))
         in_text = in_text or tag == 'text'
         if in_text and ((node.text or '').strip() or any((child.tail or '').strip() for child in node)):
-            smallest = size if smallest is None else min(smallest, size)
-        stack.extend((child, size, in_text) for child in node)
-    return None if smallest is None else smallest * scale_y * 72 / 25.4
+            height = size * math.hypot(matrix[2], matrix[3])
+            if math.isfinite(height):
+                smallest = height if smallest is None else min(smallest, height)
+        stack.extend((child, size, in_text, matrix) for child in node)
+    return None if smallest is None else smallest * 72 / 25.4
+
+
+def figure_scale_differs(scale, base):
+    delta, limit = abs(scale - base), base * FIGURE_SCALE_TOLERANCE
+    return delta > limit and not math.isclose(delta, limit)
 
 
 def answer_svg_source(answer):
@@ -546,6 +598,40 @@ def item_blocks(blocks, path):
         if block.get('type') == 'split':
             for side in ('left', 'right'):
                 yield from item_blocks(block.get(side), f'{where}.{side}')
+
+
+BOX_ROW_HEADERS = ('구분', '모둠', '학급', '반', '항목', '이름', '종류')
+BOX_FIVE_HEADERS = ('최솟값', '제1사분위수', '중앙값', '제3사분위수', '최댓값')
+BOX_RAW_HEADER = re.compile(r'(?:원자료|자료(?: 값)?|(?:\S+ )*점수)(?:\s*\(([^()]+)\))?')
+BOX_CELL_NUMBER = re.compile(r'[+\-−]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)')
+
+
+def box_table_rows(blocks):
+    for block, path in blocks:
+        header, rows = block.get('header'), block.get('rows')
+        if (block.get('type') != 'table' or not isinstance(header, list) or not header or
+                header[0] not in BOX_ROW_HEADERS or not isinstance(rows, list)):
+            continue
+        raw = BOX_RAW_HEADER.fullmatch(header[1]) if len(header) == 2 and isinstance(header[1], str) else None
+        if raw and any(word in header[1] for word in ('평균', '중앙값', '합계', '총점', '대표')):
+            continue
+        if raw is None and tuple(header[1:]) != BOX_FIVE_HEADERS:
+            continue
+        names = [row[0] for row in rows if isinstance(row, list) and row and isinstance(row[0], str)]
+        for i, row in enumerate(rows):
+            if not isinstance(row, list) or len(row) != len(header) or names.count(row[0]) != 1:
+                continue
+            if not all(isinstance(cell, str) for cell in row):
+                continue
+            try:
+                cells = [inspect_markup(cell).plain.strip() for cell in row[1:]]
+            except MarkupError:
+                continue
+            values = re.split(r'\s*[,，]\s*', cells[0]) if raw else cells
+            if (raw and len(values) < 2) or not all(len(v) <= 90 and BOX_CELL_NUMBER.fullmatch(v) for v in values):
+                continue
+            yield row[0], raw is not None, raw[1] if raw else None, [
+                Fraction(v.replace('−', '-')) for v in values], f'{path}.rows[{i}]'
 
 
 def screen_drawing_tools(blocks):
@@ -846,13 +932,16 @@ class Validator:
         elif placement == 'decoration':
             available = min(30, available * .3)
         width = figure_width_mm(value, available)
-        self.figure_labels(root, width, path + ('.svg' if 'svg' in value else '.src'))
+        where = path + ('.svg' if 'svg' in value else '.src')
+        scale = svg_mm_per_unit(root, width)
+        self.figure_labels(root, width, where)
+        if value.get('pen') is True or overlay is not None or placement == 'draw':
+            self.figure_aspects[where] = scale
         if overlay is not None:
             self.figure_labels(overlay, width, path + '.answer', viewport=root)
-        if outer or placement == 'draw':
-            scale = svg_mm_per_unit(root, width)[0]
-            if math.isfinite(scale) and scale > 0:
-                self.figure_scales.append((private, path, scale))
+            self.figure_aspects[path + '.answer'] = svg_mm_per_unit(overlay, width)
+        if (outer or placement == 'draw') and all(math.isfinite(v) and v > 0 for v in scale):
+            self.figure_scales.append((private, path, where, scale))
 
     def figure_answer(self, value, base, path):
         answer = value['answer']
@@ -883,18 +972,23 @@ class Validator:
                       '그림을 넓히거나 SVG의 font-size를 조정해 인쇄 크기를 6pt 이상으로 맞추세요.', 'figure-label-small')
 
     def check_figure_scales(self):
-        public = [i for i, (private, _, _) in enumerate(self.figure_scales) if not private]
-        if not public:
-            return
-        for i, (private, path, scale) in enumerate(self.figure_scales):
-            if not private:
+        public = [i for i, (private, _, _, _) in enumerate(self.figure_scales) if not private]
+        for i, (private, path, where, scale) in enumerate(self.figure_scales):
+            if not private or not public:
                 continue
             # Use the nearest student figure in this item; prefer the preceding one on a tie.
             ref = min(public, key=lambda j: (abs(j - i), j))
-            _, base_path, base = self.figure_scales[ref]
-            if abs(scale - base) > base * .02 and not math.isclose(abs(scale - base), base * .02):
-                self.warn(path, f'학생 그림({base_path})은 {base:.4g}mm/단위, 정답 그림은 {scale:.4g}mm/단위입니다.',
+            _, base_path, base_where, base = self.figure_scales[ref]
+            self.figure_aspects.update({base_where: base, where: scale})
+            if any(figure_scale_differs(answer, student) for answer, student in zip(scale, base)):
+                self.warn(path, f'학생 그림({base_path})의 가로·세로 축척은 {base[0]:.4g}·{base[1]:.4g}mm/단위, '
+                          f'정답 그림은 {scale[0]:.4g}·{scale[1]:.4g}mm/단위입니다.',
                           '같은 축척으로 맞추거나 figure.answer에 정답층을 넣으세요.', 'answer-scale-mismatch')
+        for where, (sx, sy) in self.figure_aspects.items():
+            if all(math.isfinite(v) and v > 0 for v in (sx, sy)) and not math.isclose(sx, sy):
+                self.warn(where, f'SVG의 가로·세로 축척이 {sx:.4g}·{sy:.4g}mm/단위로 달라 그림이 찌그러질 수 있습니다.',
+                          'width와 height의 비율을 viewBox와 맞추거나 preserveAspectRatio="none"을 빼세요.',
+                          'figure-aspect-distorted')
 
     def lines(self, obj, path, required=False):
         if required or 'lines' in obj:
@@ -1160,6 +1254,44 @@ class Validator:
             low, _, _, _, high = box_five(group)
             if bounds and not bounds[0] <= low <= high <= bounds[1]:
                 self.error(where + '.' + key, '자료가 가로축 범위를 벗어났습니다.', 'x가 최솟값부터 최댓값까지 덮도록 넓히세요.')
+
+    def check_box_tables(self, blocks):
+        candidates = {}
+        for block, path in blocks:
+            if block.get('type') != 'chart' or block.get('kind') != 'box' or not isinstance(block.get('groups'), list):
+                continue
+            groups = [g for g in block['groups'] if isinstance(g, dict) and isinstance(g.get('label'), str)]
+            unit = block.get('x_label')
+            unit = re.fullmatch(r'\(([^()]+)\)', unit) if isinstance(unit, str) else None
+            for group in groups:
+                key = 'data' if 'data' in group else 'five'
+                values = group.get(key)
+                if ('data' in group and 'five' in group or not isinstance(values, list) or
+                        not all(map(is_number, values)) or (len(values) < 4 if key == 'data' else len(values) != 5)):
+                    continue
+                # Keep decimal midpoints exact when checking written values against the chart.
+                values = [Fraction(str(v)) for v in values]
+                if key == 'data':
+                    candidates.setdefault((group['label'], True), []).append((path, unit[1] if unit else None, sorted(values)))
+                candidates.setdefault((group['label'], False), []).append((path, None, box_five({key: values})))
+        if not candidates:
+            return
+        for name, raw, unit, values, path in box_table_rows(blocks):
+            matches = [c for c in candidates.get((name, raw), []) if not (unit and c[1] and unit != c[1])]
+            local = [c for c in matches if c[0].split('.', 1)[0] == path.split('.', 1)[0]]
+            matches = local or matches
+            if len(matches) != 1:
+                continue
+            chart, _, expected = matches[0]
+            if raw and sorted(values) != expected:
+                self.warn(path + '[1]', f'{name}의 자료 목록이 상자그림({chart})의 자료와 다릅니다.',
+                          '같은 값이 몇 번 나오는지도 표와 groups[].data에서 맞추세요.', 'box-table-data-mismatch')
+            elif not raw:
+                for i, (value, target) in enumerate(zip(values, expected), 1):
+                    if value != target:
+                        self.warn(f'{path}[{i}]', f'표와 상자그림({chart})에서 {name}의 {BOX_FIVE_HEADERS[i-1]} 값이 다릅니다.',
+                                  '표의 값(빈칸이면 정답)과 상자그림의 자료에서 구한 다섯 값을 맞추세요.',
+                                  'box-table-five-mismatch')
 
     def chart(self, block, path):
         kind = block.get('kind')
@@ -1696,6 +1828,7 @@ class Validator:
                                      if 'name_fields' in meta else []):
                 if isinstance(name, str) and '{{' in name:
                     self.error(f'meta.name_fields[{i}]', '이름 항목에는 빈칸 표기를 넣을 수 없습니다.', '라벨만 쓰세요. 쓰기 공간은 자동으로 붙습니다.')
+        sheet_blocks = []
         for i, item in enumerate(self.list(data.get('items'), 'items') or []):
             path = f'items[{i}]'
             if not self.object(item, path, ('id', 'break', 'blocks', 'hints')):
@@ -1715,7 +1848,9 @@ class Validator:
             self.local_marks = set()
             marks = []
             self.figure_scales = []
+            self.figure_aspects = {}
             blocks = self.list(item.get('blocks'), path + '.blocks') or []
+            sheet_blocks.extend(item_blocks(blocks, path + '.blocks'))
             for j, block in enumerate(blocks):
                 self.block(block, f'{path}.blocks[{j}]', item_id, marks)
             self.check_figure_scales()
@@ -1725,6 +1860,7 @@ class Validator:
                 if mark not in self.local_marks:
                     self.warn(where, '같은 item의 상황·발문에 이 빈칸 기호가 없습니다.',
                               'mark를 같은 item의 빈칸과 맞추거나 필요 없으면 지우세요.', 'blank-mark-unused')
+        self.check_box_tables(sheet_blocks)
         self.meta(meta)
         self.teacher(data.get('teacher', {}))
         self.assessment(data)

@@ -54,6 +54,35 @@ def number_parts(value):
     return [number, suffix]
 
 
+def inferred_unit(tail, column='', row=''):
+    # In a label, the final parentheses are unambiguous. Inline 도 may be a particle.
+    particles = r'(?:으로|로|이다|입니다|이고|이었다|이고요|이며|이므로|이므로서|인|은|는|이|가|을|를|과|와|의|에|에서|까지|부터|씩|만|도)?'
+    text = unicodedata.normalize('NFKC', tail).lower()
+    for unit in sorted(UNITS, key=len, reverse=True):
+        if unit != '도' and re.match(re.escape(unit) + particles + r'(?![\w])', text):
+            return unit
+    for heading in (column, row):
+        match = re.search(r'\(([^()]*)\)\s*$', unicodedata.normalize('NFKC', heading))
+        if match and (unit := norm(match[1])) in UNITS:
+            return '°' if unit == '도' else unit
+    return ''
+
+
+def number_forms(values, unit=''):
+    parts = [number_parts(value) for value in values]
+    if not all(parts):
+        return []
+    inferred = '' if any(u for _, u in parts) else unit
+    return list(dict.fromkeys([n for n, _ in parts] + [f'{n}@{u or inferred}' for n, u in parts if u or inferred]))
+
+
+def input_mode(values):
+    texts = [norm(value) for value in values]
+    if not all(re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', text) for text in texts):
+        return ''
+    return 'decimal' if any('.' in text for text in texts) else 'numeric'
+
+
 def num(value):
     parts = number_parts(value)
     return parts[0] if parts is not None else None

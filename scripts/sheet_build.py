@@ -11,13 +11,14 @@ import math
 import os
 from pathlib import Path
 import re
+from xml.etree import ElementTree as ET
 
 from sheet_common import (BUILD_FILE, CHECK_DIR, RASTER_MIMES, ROOT, TEACHER_SUFFIX, TOOL, VERSION,
                           atomic_write, html_paths, image_path, json_bytes, sha256)
 from sheet_markup import MARKS, SYMBOLS, blank_hook, inspect_markup, render_markup
 from sheet_plan import checked_svg, function_tree, function_value, line_grid_points, load_plan, print_issues
 from sheet_common import youtube_id
-from sheet_answer import canonical, check_hash, make_salt, num, number_parts, plain, reveal, text_candidates
+from sheet_answer import canonical, check_hash, inferred_unit, input_mode, make_salt, num, number_forms, plain, reveal, text_candidates
 
 LABEL_MM = {'평가': 25.1, '연습': 46.1, '수업': 30}
 TEACHER_ONLY = 'ws-teacher-only'
@@ -83,6 +84,46 @@ def answer_cell(answer, *, lines=3, grow=False, height=None, kind_explicit=False
     return f'<td class="ws-ans"{attrs}{slot}>{answer}</td>'
 
 
+_ITALIC_LATIN = {c: chr(0x1D434 + i)
+                 for i, c in enumerate('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')}
+_ITALIC_LATIN['h'] = 'ℎ'
+
+
+def figure_svg(source):
+    # Keep author SVG in an isolated image. MathML uses the corresponding Unicode
+    # math italic glyphs, not the synthetic slant of an arbitrary SVG text font.
+    source = checked_svg(source)
+    root = ET.fromstring(source)
+    changed = False
+    for text in root.iter():
+        if text.tag.rsplit('}', 1)[-1] != 'text':
+            continue
+        label = ''.join(text.itertext()).strip()
+        italic = re.fullmatch(r'[A-Za-z](?:[′₀-₉]*)', label)
+        upright = re.fullmatch(r'[-−+]?\d+(?:[.,]\d+)?(?:\s*[\w°%²³]+)?', label) or label in ('°', '%')
+        if not (italic or upright):
+            upright = label in ('cm', 'mm', 'km', 'kg', 'ml', 'cm²', 'cm³', 'm²', 'm³')
+        if not (italic or upright):
+            continue
+        for node in text.iter():
+            for attr in ('font-family', 'font-style', 'font'):
+                node.attrib.pop(attr, None)
+            style = node.get('style', '').rstrip(';')
+            node.set('style', style + ';font-family:Cambria Math, STIX Two Math, Latin Modern Math, serif!important;font-style:normal!important')
+        if italic:
+            for node in text.iter():
+                for target, attr in ((node, 'text'), *((child, 'tail') for child in node)):
+                    part = getattr(target, attr)
+                    if part and label[0] in part:
+                        setattr(target, attr, part.replace(label[0], _ITALIC_LATIN[label[0]], 1))
+                        break
+                else:
+                    continue
+                break
+        changed = True
+    return ET.tostring(root, encoding='unicode', default_namespace=None) if changed else source
+
+
 def data_image(mime, data):
     return f'data:{mime};base64,{base64.b64encode(data).decode("ascii")}'
 
@@ -110,7 +151,7 @@ class Renderer:
         self.item_id = None
         self.slot_index = 0
 
-    def slot(self, kind, right=None, *, accept=(), mode='auto', answer_html='', snap=None, count=None):
+    def slot(self, kind, right=None, *, accept=(), mode='auto', answer_html='', snap=None, count=None, unit=''):
         if not self.interactive:
             return ''
         self.slot_index += 1
@@ -127,13 +168,15 @@ class Renderer:
         normalized = [canonical(kind, plain(v) if kind in ('number', 'text') else v, snap) for v in values]
         if any(v is None for v in normalized):
             raise ValueError(f'{slot}: 정답을 {kind} 형식으로 정규화할 수 없습니다.')
+        if kind == 'number':
+            texts = [plain(v) for v in values]
+            keyboard = input_mode(texts)
+            if keyboard:
+                attrs += f' data-input-mode="{keyboard}"'
         if self.reveal_policy != '없음':
-            forms = list(normalized)
-            if kind == 'number':
-                with_units = [f'{n}@{unit}' for n, unit in (number_parts(plain(v)) for v in values) if unit]
-                if with_units:
-                    attrs += ' data-check-unit="1"'
-                    forms.extend(with_units)
+            forms = number_forms(texts, unit) if kind == 'number' else normalized
+            if kind == 'number' and any('@' in value for value in forms):
+                attrs += ' data-check-unit="1"'
             hashes = ','.join(dict.fromkeys(check_hash(self.salt, kind, v) for v in forms))
             attrs += f' data-check-hash="{hashes}"'
         if kind in ('number', 'text'):
@@ -187,12 +230,12 @@ class Renderer:
         attrs += ' data-check="' + escape(json.dumps(descriptor, ensure_ascii=False, separators=(',', ':'))) + '"'
         return attrs
 
-    def blank_slot(self, answers, rendered):
+    def blank_slot(self, answers, rendered, tail, column='', row=''):
         first = plain(answers[0])
         kind = 'number' if num(first) is not None else 'text' if len(first) <= 12 else 'open'
-        return self.slot(kind, answers[0], accept=answers[1:], answer_html=rendered)
+        return self.slot(kind, answers[0], accept=answers[1:], answer_html=rendered, unit=inferred_unit(tail, column, row))
 
-    def answer_slot(self, answer, *, mode='auto', accept=(), draw=False):
+    def answer_slot(self, answer, *, mode='auto', accept=(), draw=False, unit=''):
         if draw:
             return self.slot('draw')
         value = plain(answer)
@@ -203,7 +246,7 @@ class Renderer:
             markup = render_markup(answer)
         finally:
             blank_hook.reset(token)
-        return self.slot(kind, answer, mode=mode, accept=accept, answer_html=markup)
+        return self.slot(kind, answer, mode=mode, accept=accept, answer_html=markup, unit=unit)
 
     def name_line(self, with_slots=False):
         fields = self.meta.get('name_fields', ['반', '번', '이름'])
@@ -257,11 +300,12 @@ class Renderer:
             body = tr(title_cells) + tr(name)
         return section('head', table('ws-head ws-head--' + self.kind, widths, body), ' data-span="all"')
 
-    def image(self, picture, max_width):
+    def image(self, picture, max_width, *, math_labels=False):
         width = min(picture['width_mm'], max_width)
         if 'svg' in picture:
             mime = 'image/svg+xml'
-            data = checked_svg(picture['svg']).encode('utf-8')
+            svg = figure_svg if math_labels else checked_svg
+            data = svg(picture['svg']).encode('utf-8')
         else:
             file = image_path(self.folder, picture['src'])
             ext = file.suffix.lower()
@@ -303,7 +347,7 @@ class Renderer:
         slot = self.slot('draw') if pen else ''
         make_caption = private_editable if figure.get('teacher_only') else editable
         caption = make_caption('figcaption', figure['caption']) if 'caption' in figure else ''
-        return f'<figure class="{cls}"{pen}{slot}>{self.image(figure, self.content_mm)}{caption}</figure>'
+        return f'<figure class="{cls}"{pen}{slot}>{self.image(figure, self.content_mm, math_labels=True)}{caption}</figure>'
 
     def two_pictures(self, block):
         width = self.content_mm / 2
@@ -359,7 +403,8 @@ class Renderer:
                 else:
                     key = editable('div', answer, 'ws-key')
                 height = row['height_mm'] if kind == 'draw' else None
-                slot = self.answer_slot(answer, mode=row.get('check', 'auto'), accept=row.get('accept', ()), draw=kind == 'draw')
+                slot = self.answer_slot(answer, mode=row.get('check', 'auto'), accept=row.get('accept', ()),
+                                        draw=kind == 'draw', unit=inferred_unit('', row=inspect_markup(group[0]['label']).plain))
                 td = answer_cell(key, lines=row.get('lines', 3), grow=row.get('grow', False), height=height, kind_explicit=True, slot=slot)
                 rows.append(f'<tr class="ws-row">{label}{td}</tr>')
         return table('ws-ans-table', (self.label_mm, self.content_mm - self.label_mm), ''.join(rows))
@@ -609,8 +654,10 @@ class Renderer:
             y1 = block.get('y_max', max([1, *values, *plot_values]))
             if y0 >= y1:
                 y0 = y1 - 1
-            x0, x1 = ((block['bins'][0], block['bins'][-1]) if kind in ('histogram', 'polygon')
-                      else (0, max(len(values), 1)))
+            bins = block.get('bins', [])
+            if kind == 'polygon':
+                bins = [2*bins[0]-bins[1], *bins, 2*bins[-1]-bins[-2]]
+            x0, x1 = (bins[0], bins[-1]) if bins else (0, max(len(values), 1))
         def sx(v):
             return left + (v - x0) / (x1 - x0) * (right - left)
         def sy(v):
@@ -627,15 +674,24 @@ class Renderer:
             axis += f'<path d="M{mm(left)} {mm(sy(0))}H{mm(right)}" fill="none" stroke="currentColor" stroke-width="0.2"/>'
         step = block.get('y_step', (y1-y0) / 5)
         n = min(200, math.floor((y1-y0) / step + 1e-9))
+        guides = []
+        blank_histogram = kind == 'histogram' and (plot or block.get('teacher'))
+        if blank_histogram:
+            guides.extend(f'M{mm(sx(v))} {top}V{mm(bottom)}' for v in bins[1:])
         for i in range(n+1):
             v = y0 + i * step
             yy = sy(v)
+            if blank_histogram and i:
+                guides.append(f'M{left} {mm(yy)}H{mm(right)}')
             axis += f'<text x="{left-1}" y="{mm(yy+1)}" text-anchor="end" font-size="2.5">{escape(mm(v).replace("-", "−"))}</text>'
         if kind in ('bar', 'line'):
             for i, label in enumerate(labels):
                 axis += f'<text x="{mm(sx(i+.5))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(inspect_markup(label).plain)}</text>'
         elif kind in ('histogram', 'polygon'):
-            for value in block['bins']:
+            for value in bins:
+                if kind == 'polygon':
+                    xx = mm(sx(value))
+                    axis += f'<path d="M{xx} {mm(bottom-.6)}V{mm(bottom+.6)}" stroke="currentColor" stroke-width="0.25"/>'
                 axis += f'<text x="{mm(sx(value))}" y="{mm(bottom+4)}" text-anchor="middle" font-size="2.5">{escape(mm(value).replace("-", "−"))}</text>'
         elif kind == 'scatter':
             x_step = block.get('x_step', (x1-x0) / 5)
@@ -659,7 +715,7 @@ class Renderer:
         else:
             pts = block['points'] if kind == 'scatter' else [[i+.5, value] for i, value in enumerate(values)]
             if kind == 'polygon':
-                pts = [[(block['bins'][i] + block['bins'][i+1])/2, value] for i, value in enumerate(values)]
+                pts = [[(a+b)/2, value] for a, b, value in zip(bins, bins[1:], [0, *values, 0])]
             if kind != 'scatter':
                 marks += '<polyline points="' + ' '.join(f'{mm(sx(x))},{mm(sy(y))}' for x, y in pts) + '" fill="none" stroke="currentColor" stroke-width="0.4"/>'
             marks += ''.join(f'<circle cx="{mm(sx(x))}" cy="{mm(sy(y))}" r="0.65"/>' for x, y in pts)
@@ -669,12 +725,17 @@ class Renderer:
         if plot:
             edges = [(block['bins'][i], block['bins'][i+1]) if kind == 'histogram' else (i, i+1)
                      for i in range(len(values))]
-            hits = '<g class="ws-bars-hit">' + ''.join(
-                f'<rect class="ws-bar-hit" data-i="{i}" x="{mm(sx(start))}" y="{mm(top)}" width="{mm(sx(end)-sx(start))}" height="{mm(bottom-top)}" fill="transparent"/>'
-                for i, (start, end) in enumerate(edges)) + '</g><g class="ws-plot"></g>'
+            rectangles = []
+            for i, (start, end) in enumerate(edges):
+                label = (f'{mm(start)} 이상 {mm(end)} 미만' if kind == 'histogram' else inspect_markup(labels[i]).plain)
+                x, edge = mm(sx(start)), mm(sx(end))
+                rectangles.append(f'<rect class="ws-bar-hit" data-i="{i}" data-label="{escape(label)}" data-edge="{edge}" '
+                                  f'x="{x}" y="{mm(top)}" width="{mm(float(edge)-float(x))}" height="{mm(bottom-top)}" fill="transparent"/>')
+            hits = '<g class="ws-bars-hit">' + ''.join(rectangles) + '</g><g class="ws-plot"></g>'
+        grid = f'<path class="ws-chart-guides" d="{"".join(guides)}" fill="none"/>' if guides else ''
         return (f'<figure class="ws-fig ws-chart"{attrs}><svg width="{mm(width)}mm" height="{mm(height)}mm" '
-                f'viewBox="0 0 {mm(width)} {mm(height)}" data-ymap="{mm(y0)} {mm(y1)} {mm(bottom)} {mm(top)}" '
-                f'role="img" aria-label="통계 그래프">{axis}{marks}{hits}</svg></figure>')
+                f'viewBox="0 0 {mm(width)} {mm(height)}" data-chart="{kind}" data-ymap="{mm(y0)} {mm(y1)} {mm(bottom)} {mm(top)}" '
+                f'role="img" aria-label="통계 그래프">{grid}{axis}{marks}{hits}</svg></figure>')
 
     def explore_figure(self, block, tree, params, caption=None, fit=None):
         xmin, xmax = block['x']
@@ -801,7 +862,8 @@ class Renderer:
             head = '<thead>' + tr('<th></th>' + ''.join(editable('th', text) for text in block['columns'])) + '</thead>'
             body = ''.join(tr(f'<th class="ws-step-n">{chr(0x2460 + i)}</th>' + ''.join(
                 answer_cell(editable('div', ans, 'ws-key'), lines=block.get('lines', 2), kind_explicit=self.interactive,
-                            slot=self.answer_slot(ans)) for ans in row))
+                            slot=self.answer_slot(ans, unit=inferred_unit('', inspect_markup(column).plain)))
+                for ans, column in zip(row, block['columns'])))
                 for i, row in enumerate(block['answers']))
             return table('ws-steps', (10, *([width] * count)), body, head)
         if kind == 'choices':
@@ -825,10 +887,18 @@ class Renderer:
                           for blank in inspect_markup(text).blanks if blank.width_mm is not None), default=None)
             head = '<thead>' + tr(''.join(editable('th', text, table_blank_mm=widest) for text in header)) + '</thead>'
             # 칸 전체가 빈칸 하나뿐이면 칸 자체가 답 자리이므로 밑줄을 겹쳐 긋지 않는다(ws-fill).
-            def cell(text):
+            columns = [inspect_markup(text).plain for text in header]
+            def cell(text, column, row_label):
                 whole = re.fullmatch(r'\s*\{\{[^{}]*\}\}\s*', text) is not None
-                return editable('td', text, 'ws-fill' if whole else '', table_blank_mm=widest)
-            body = ''.join(tr(''.join(cell(text) for text in row)) for row in block['rows'])
+                hook = blank_hook.get()
+                token = blank_hook.set(lambda answers, markup, tail: hook(answers, markup, tail, column, row_label)) if hook else None
+                try:
+                    return editable('td', text, 'ws-fill' if whole else '', table_blank_mm=widest)
+                finally:
+                    if token is not None:
+                        blank_hook.reset(token)
+            body = ''.join(tr(''.join(cell(text, column, inspect_markup(row[0]).plain if i and not inspect_markup(row[0]).blanks else '')
+                                      for i, (text, column) in enumerate(zip(row, columns)))) for row in block['rows'])
             return table('ws-data', widths, body, head)
         if kind == 'figure':
             return self.picture(block)
@@ -965,12 +1035,16 @@ def font_chars(data):
     chars.update(chr(i) for i in range(0x2460, 0x2474))
     chars.update(MARKS + '□○△·…°′″−√⌒⏜̅‘’“”–—₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹')
     chars.update(SYMBOLS.values())
+    chars.update(_ITALIC_LATIN.values())
     chars.add('↔')
     # Includes generated interface and header labels, even on a tiny manuscript.
     chars.update('수행평가영역단원학년도학기점수학생확인교사용메모예시답안채점요소다른타당한답예상오개념이름학번짝활동좌표평면모눈'
                  '확인 정답 보기 풀이 보기 힌트 맞음 다시 생각해 봐요 답을 넣어 저장 내 답 지우기 학생 화면 미리보기 교사 화면으로 '
                  'A4로 보기 풀기 화면 화면에서는 값을 바꾸며 살펴볼 수 있습니다 예시 답안과 비교 맞힌 수 동영상 재생 지우개 모두 지우기'
-                 '확인 필요 예상한 답과 달라요 같은 뜻이면 선생님께 확인받아요 먼저 답을 써 보세요 안에 순서대로 쓰시오 써 봅시다')
+                 '확인 필요 예상한 답과 달라요 같은 뜻이면 선생님께 확인받아요 먼저 답을 써 보세요 안에 순서대로 쓰시오 써 봅시다'
+                 '이 기기에 이전에 쓴 답이 있어요 마지막 저장 이어서 풀기 새로 시작 이름과 입력한 답을 모두 지울까요 취소'
+                 '각 계급에서 직사각형의 윗변이 올 높이를 눌러요 높이 미입력 각 막대의 높이를 모두 정해 보세요 점을 모두 찍어 보세요'
+                 '서로 다른 두 점을 찍어 보세요 짝을 모두 이어 보세요 순서를 정해 보세요 서술 칸은 직접 확인')
 
     def add_text(entry):
         if isinstance(entry, str):

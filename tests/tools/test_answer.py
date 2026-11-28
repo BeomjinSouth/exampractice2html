@@ -21,6 +21,13 @@ class AnswerTest(unittest.TestCase):
             for source, expected in self.cases[name]:
                 with self.subTest(kind=name, source=source):
                     self.assertEqual(getattr(answer, name)(source), expected)
+        for name in ('inferred_unit', 'number_forms', 'input_mode'):
+            for args, expected in self.cases[name]:
+                with self.subTest(kind=name, args=args):
+                    self.assertEqual(getattr(answer, name)(*args), expected)
+        for value, expected in [('11', True), ('11일', True), ('11권', False)]:
+            number, unit = answer.number_parts(value)
+            self.assertEqual((f'{number}@{unit}' if unit else number) in answer.number_forms(['11'], '일'), expected)
         for salt, kind, value, expected in self.cases['hash']:
             with self.subTest(kind='hash', value=value):
                 self.assertEqual(answer.check_hash(salt, kind, value), expected)

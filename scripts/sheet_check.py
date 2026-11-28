@@ -388,6 +388,7 @@ def _reload_keeping_answers(protocol):
     ready = protocol.evaluate(_READY_JS, True)
     if ready != "ready":
         raise CheckError(f"답을 넣은 뒤 다시 연 활동지의 엔진을 준비하지 못했습니다 ({ready})")
+    protocol.evaluate('document.querySelector(\'[data-sheet-action="resume-answers"]\')?.click()')
 
 
 def _pdf_text(data):

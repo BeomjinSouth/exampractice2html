@@ -62,6 +62,28 @@
           return [`<mo>${symbol}</mo>`, symbol];
         }
         if (name === 'quad') return ['<mspace width="1em"></mspace>', ' '];
+        if (name === 'begin') {
+          this.spaces();
+          if (!this.at('{cases}')) this.fail('지원하는 환경은 cases입니다', start);
+          this.pos += '{cases}'.length;
+          const rows = [], texts = [];
+          while (true) {
+            const parts = this.sequence(undefined, true);
+            if (this.next === '&') {
+              this.pos++;
+              const right = this.sequence(undefined, true);
+              if (!right.length) this.fail('& 뒤에 식이 필요합니다');
+              parts.push(...right);
+            }
+            if (!parts.length) this.fail('cases의 각 줄에 식을 쓰세요');
+            const [markup, text] = joinParts(parts);
+            rows.push(`<mtr><mtd>${markup}</mtd></mtr>`); texts.push(text);
+            if (this.at('\\end{cases}')) { this.pos += '\\end{cases}'.length; break; }
+            if (!this.at('\\\\')) this.fail('cases의 줄 구분이나 닫는 명령을 확인하세요');
+            this.pos += 2;
+          }
+          return [`<mrow><mo stretchy="true">{</mo><mtable columnalign="left">${rows.join('')}</mtable></mrow>`, '{' + texts.join('; ')];
+        }
         if (name === 'frac') {
           const a = this.group(), b = this.group();
           return [`<mfrac>${a[0]}${b[0]}</mfrac>`, `(${a[1]})/(${b[1]})`];
@@ -117,10 +139,12 @@
       }
       this.fail(`지원하지 않는 글자 ${JSON.stringify(c)}입니다`, start);
     }
-    sequence(closing) {
+    at(token) { return Array.from(token).every((c, i) => this.source[this.pos + i] === c); }
+    sequence(closing, caseRow = false) {
       const result = [];
       while (true) {
         this.spaces();
+        if (caseRow && (this.next === '&' || this.at('\\\\') || this.at('\\end{cases}'))) return result;
         if (!this.next || this.next === closing) return result;
         if ('})]'.includes(this.next)) this.fail('짝이 맞지 않는 닫는 괄호입니다');
         if ('^_'.includes(this.next)) this.fail('첨자 앞에 값이 필요합니다');
@@ -175,15 +199,16 @@
     }
     function emit([markup, , , strong]) { setBold(strong); rendered.push(markup); }
     function flush() {
-      const grouped = word.length > 1 && word.some(part => part[2] === 'math');
-      if (grouped) { setBold(false); rendered.push('<span class="ws-math-word"><span>'); }
+      const hasBlank = word.some(part => part[2] === 'blank');
+      const grouped = word.length > 1 && (hasBlank || word.some(part => part[2] === 'math'));
+      if (grouped) { setBold(false); rendered.push(`<span class="${hasBlank ? 'ws-blank-word' : 'ws-math-word'}"><span>`); }
       for (const part of word) emit(part);
       if (grouped) { setBold(false); rendered.push('</span></span>'); }
       word.length = 0;
     }
     for (const part of parts) {
       if (part[2] === 'boundary') { flush(); emit(part); }
-      else word.push(part);
+      else { if (part[2] === 'blank') flush(); word.push(part); }
     }
     flush();
     setBold(false);
@@ -253,8 +278,9 @@
           const widthAttr = width == null ? '' : ` style="--ws-blank-min:${width}mm"`;
           const markNode = mark ? `<span class="ws-blank-mark">${escapeHTML(mark)}</span>` : '';
           const key = text.trim() ? `<span class="ws-key">${html}</span>` : '';
-          onBlank?.({ answer, accept, html });
-          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, text || mark, 'boundary', bold]);
+          const tail = source.slice(pos);
+          onBlank?.({ answer, accept, html, tail });
+          parts.push([`<span class="ws-blank"${markAttr}${widthAttr}>${markNode}${key}</span>`, text || mark, /^[가-힣]/.test(tail) ? 'blank' : 'boundary', bold]);
         } else {
           parts.push([escapeHTML(c), c, /[\p{White_Space}\x1c-\x1f]/u.test(c) ? 'boundary' : 'text', bold]);
         }

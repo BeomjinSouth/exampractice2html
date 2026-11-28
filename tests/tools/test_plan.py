@@ -229,6 +229,178 @@ class PlanTest(unittest.TestCase):
                 block.update(bins=[0, .1, .2], values=[1, 2], plot={'answer': [1, 2]})
                 self.assertFalse(any(i.code == 'unequal-bin-width' for i in validate(document(block), ROOT)))
 
+    def test_verify_substitutes_every_given_value(self):
+        data = document({'type': 'question', 'text': '상자의 수를 구하시오.'})
+        solution = {'item': 'q1', 'answer': '작은 상자와 큰 상자', 'steps': ['식에 대입한다.'],
+                    'verify': [{'given': {'x': 11.5, 'y': 13.5},
+                                'holds': ['x+y=25', '4*x+6*y=127']} ]}
+        data['teacher'] = {'solutions': [solution]}
+        self.assertEqual(self.errors(data), set())
+        solution['verify'][0]['given'] = {'x': 13.5, 'y': 11.5}
+        issues = [i for i in validate(data, ROOT) if i.code == 'verify-failed']
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].path, 'teacher.solutions[0].verify[0].holds[1]')
+        self.assertIn('123', issues[0].message)
+        self.assertIn('127', issues[0].message)
+
+    def test_verify_rejects_bad_syntax_and_undefined_values(self):
+        data = document({'type': 'question', 'text': '계산하시오.'})
+        solution = {'item': 'q1', 'answer': '답', 'steps': ['계산한다.']}
+        data['teacher'] = {'solutions': [solution]}
+        for equation, given in [('2x=4', {'x': 2}), ('x==2', {'x': 2}),
+                                ('x+y=3', {'x': 2}), ('x/0=2', {'x': 2}),
+                                ('__import__(x)=2', {'x': 2}), ('x^2=4', {'x': 2})]:
+            with self.subTest(equation=equation):
+                solution['verify'] = [{'given': given, 'holds': [equation]}]
+                self.assertTrue(any(i.code == 'verify-expression' and i.level == 'error'
+                                    for i in validate(data, ROOT)))
+        for given in (None, {'x': True}, {'xy': 2}, {'x': float('inf')}):
+            with self.subTest(given=given):
+                solution['verify'] = [{'given': given, 'holds': ['x=2']}]
+                self.assertTrue(any(i.code == 'verify-expression' for i in validate(data, ROOT)))
+        solution['verify'] = [{'given': {'a': 0.1, 'b': 0.2, 'z': -2},
+                               'holds': ['a+b=0.3', 'z**2=4', '1/2=0.5']}]
+        self.assertEqual(self.errors(data), set())
+        solution['verify'] = [{'given': {'x': 10**20}, 'holds': ['x+1=x']}]
+        self.assertTrue(any(i.code == 'verify-failed' for i in validate(data, ROOT)))
+        solution['verify'] = [{'given': {'x': 2}, 'holds': ['x**0.5=2']}]
+        self.assertTrue(any(i.code == 'verify-expression' for i in validate(data, ROOT)))
+        solution['verify'] = []
+        self.assertIn('teacher.solutions[0].verify', self.errors(data))
+
+    def test_build_keeps_verify_out_of_teacher_and_student_content(self):
+        from sheet_build import Renderer, document_html, strip_teacher
+        data = document({'type': 'question', 'text': '수를 구하시오.'})
+        data['teacher'] = {'solutions': [{'item': 'q1', 'answer': '$2$', 'steps': ['계산한다.'],
+                                          'verify': [{'given': {'x': 2}, 'holds': ['9*x=18']}]}]}
+        html = document_html(Renderer(data, ROOT, []), {}, '')
+        self.assertNotIn('9*x=18', html)
+        self.assertNotIn('9*x=18', strip_teacher(html))
+
+    def test_assessment_rubric_and_scored_text_rows(self):
+        data = document({'type': 'question', 'text': '풀이를 쓰시오.'},
+                        {'type': 'answer', 'rows': [{'label': '풀이와 답', 'points': 5, 'answer': '예시'}]})
+        solution = {'item': 'q1', 'answer': '답', 'steps': ['풀이']}
+        data['teacher'] = {'solutions': [solution]}
+        codes = lambda: {i.code for i in validate(data, ROOT)}
+        self.assertIn('rubric-missing', codes())
+        solution['rubric'] = ['미지수 1점', '식 2점', '풀이 1점', '확인 1점']
+        self.assertIn('rubric-coverage', codes())
+        rows = data['items'][0]['blocks'][1]['rows']
+        rows[0].update(label='미지수와 식', points=3)
+        rows.append({'label': '풀이와 확인', 'points': 2, 'answer': '예시'})
+        self.assertNotIn('rubric-coverage', codes())
+        self.assertNotIn('rubric-missing', codes())
+        data['teacher']['solutions'] = []
+        self.assertIn('rubric-missing', codes())
+        data['meta']['kind'] = '수업'
+        self.assertNotIn('rubric-missing', codes())
+
+    def test_assessment_grouped_rows_in_split_are_one_scored_label(self):
+        data = document({'type': 'split',
+                         'left': [{'type': 'answer', 'rows': [
+                             {'group': 'a', 'label': '풀이와 답', 'points': 5, 'answer': '풀이'},
+                             {'group': 'a', 'answer': '답'}]}],
+                         'right': [{'type': 'text', 'text': '자료'}]})
+        data['teacher'] = {'solutions': [{'item': 'q1', 'answer': '답', 'steps': ['풀이'],
+                                           'rubric': ['식 2점', '계산 3점']}]}
+        self.assertTrue(any(i.code == 'rubric-coverage' for i in validate(data, ROOT)))
+
+    def test_quadratic_textbook_expressions_respect_context_and_visibility(self):
+        data = document({'type': 'question', 'text': '그래프가 열리는 방향을 쓰시오.'},
+                        {'type': 'answer', 'rows': [{'label': '모양', 'answer': '위로 열린다.'}]})
+        data['meta'].update(title='이차함수 그래프', kind='수업')
+        data['teacher'] = {'solutions': [{'item': 'q1', 'answer': '아래로 열린다.',
+                                           'steps': ['아래로 열리는 모양이다.']}]}
+        issues = [i for i in validate(data, ROOT) if i.code == 'textbook-expression']
+        self.assertEqual({i.path for i in issues}, {'items[0].blocks[0].text', 'items[0].blocks[1].rows[0].answer',
+                                                     'teacher.solutions[0].answer', 'teacher.solutions[0].steps[0]'})
+        data['meta']['title'] = '문이 열리는 방향'
+        self.assertFalse([i for i in validate(data, ROOT) if i.code == 'textbook-expression'])
+        data['meta']['title'] = '포물선'
+        data['items'][0]['blocks'][0]['text'] = '빈칸 {{|위로 열린다}}을 쓰시오.'
+        self.assertFalse(any(i.path == 'items[0].blocks[0].text' and i.code == 'textbook-expression'
+                             for i in validate(data, ROOT)))
+
+    def test_grade_long_and_short_simultaneous_equations(self):
+        for term in ('연립방정식', '연립일차방정식', '피타고라스 정리', '피타고라스의 정리'):
+            data = document({'type': 'question', 'text': term + '을 푸시오.'})
+            for grade, expected in [('중1', True), ('중2', False), ('중3', False)]:
+                with self.subTest(term=term, grade=grade):
+                    data['meta']['grade'] = grade
+                    issues = [i for i in validate(data, ROOT) if i.code == 'term-beyond-grade']
+                    self.assertEqual(bool(issues), expected)
+                    if expected:
+                        self.assertEqual(len(issues), 1)
+
+    def test_explore_slider_steps_and_table_range(self):
+        block = {'type': 'explore', 'fn': 'a*x**2', 'x': [-4, 4], 'y': [-9, 9], 'unit_mm': 5,
+                 'params': [{'name': 'a', 'min': -3, 'max': 3, 'step': 0.5, 'value': 0.5, 'except': [0]}],
+                 'table': [-2, 0, 2], 'print': [{'a': -2}, {'a': 2}]}
+        data = document(block)
+        issues = [i for i in validate(data, ROOT) if i.code == 'explore-table-out-of-range']
+        self.assertEqual(len(issues), 1)
+        self.assertIn('y=-12', issues[0].message)
+        block['y'] = [-12, 12]
+        self.assertFalse([i for i in validate(data, ROOT) if i.code == 'explore-table-out-of-range'])
+        block['params'][0]['step'] = 1
+        block['print'] = [{'a': 0.5}]
+        issues = [i for i in validate(data, ROOT) if i.code == 'explore-step']
+        self.assertEqual({i.path for i in issues}, {'items[0].blocks[0].params[0].value',
+                                                    'items[0].blocks[0].print[0].a'})
+        block['params'][0].update(min=-0.3, max=0.3, step=0.1, value=0.3, **{'except': []})
+        block['print'] = [{'a': 0.1}]
+        self.assertFalse([i for i in validate(data, ROOT) if i.code == 'explore-step'])
+
+    def test_explore_endpoints_exclusions_print_and_multi_parameter(self):
+        block = {'type': 'explore', 'fn': '(1-a**2)*x', 'x': [-2, 2], 'y': [-6, 1], 'unit_mm': 5,
+                 'params': [{'name': 'a', 'min': -2, 'max': 2, 'step': 1, 'value': 1}],
+                 'table': [2], 'print': [{'a': 0}]}
+        data = document(block)
+        self.assertTrue(any(i.code == 'explore-table-out-of-range' for i in validate(data, ROOT)))
+        block.pop('print')
+        self.assertFalse(any(i.code == 'explore-table-out-of-range' for i in validate(data, ROOT)))
+        block.update(fn='a*x+b', x=[-1, 1], y=[-1, 1], table=[1], params=[
+            {'name': 'a', 'min': -1, 'max': 1, 'step': 1, 'value': 0, 'except': [-1]},
+            {'name': 'b', 'min': -1, 'max': 1, 'step': 1, 'value': 0, 'except': [-1]}])
+        self.assertTrue(any(i.code == 'explore-table-out-of-range' for i in validate(data, ROOT)))
+        block['params'][0]['except'] = [-1, 1]
+        self.assertFalse(any(i.code == 'explore-table-out-of-range' for i in validate(data, ROOT)))
+        block.update(fn='2*a*(1-b**2)', table=[0], params=[
+            {'name': 'a', 'min': -1, 'max': 1, 'step': 1, 'value': 0},
+            {'name': 'b', 'min': -1, 'max': 1, 'step': 1, 'value': 0}])
+        self.assertTrue(any(i.code == 'explore-table-out-of-range' for i in validate(data, ROOT)),
+                        '한 슬라이더만 끝으로 움직인 경우도 검사한다')
+
+    def test_frequency_graph_y_max_must_be_positive(self):
+        for kind in ('histogram', 'polygon'):
+            block = {'type': 'chart', 'kind': kind, 'bins': [0, 1, 2], 'values': [0, 0]}
+            for maximum in (0, -1):
+                with self.subTest(kind=kind, maximum=maximum):
+                    block['y_max'] = maximum
+                    self.assertTrue(any(i.code == 'frequency-y-max' and i.level == 'error'
+                                        for i in validate(document(block), ROOT)))
+            block['y_max'] = 1
+            self.assertFalse(any(i.code == 'frequency-y-max' for i in validate(document(block), ROOT)))
+
+    def test_production_guidance_covers_assessment_and_delivery(self):
+        design = (ROOT / 'references/내용-설계.md').read_text(encoding='utf-8')
+        skill = (ROOT / 'SKILL.md').read_text(encoding='utf-8')
+        authoring = (ROOT / 'references/구성-쓰기.md').read_text(encoding='utf-8')
+        for phrase in ('채점 요소마다 학생이 실제 답을 남길 칸', '원래 조건과 상황에 맞는지 확인하기',
+                       '교사 메모와 문항별 채점 요소에 같은 말', '$a=0.5$일 때의 모양',
+                       '끝 눈금과 인쇄값', '$x=\\pm1,\\pm2$', '학생의 관찰 표현'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, design)
+        for phrase in ('⭐ 안내 줄을 답의 마지막 줄에 글자 그대로', '사용자가 빼 달라고 하면 뺀다',
+                       'teacher.solutions[].verify', '대입 결과를 남긴다'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+        for phrase in ('4*x+6*y=127', '곱셈 기호는 생략하지 않고', '절대 차이 `1e-9`',
+                       '교사용 최종 답과 일치', '대입한 결과를 한 줄로'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, authoring)
+
     def test_all_warnings_nonblocking(self):
         data = document({'type': 'question', 'text': '1. 점 A □ ' + '가' * 161},
                         {'type': 'answer', 'rows': [{'label': '풀이', 'mark': '㉠', 'answer': '예시 답안'}]})

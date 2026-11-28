@@ -205,24 +205,24 @@ _HANDWRITING_LINE_MM = 8
 _HANDWRITING_TOLERANCE_MM = _HANDWRITING_LINE_MM / 2
 
 
-def _handwriting_width(text):
+def _handwriting_width(text, narrow=3):
     width = 0
     for char in unicodedata.normalize('NFC', text):
         if char.isspace():
             width += 2.25
         elif unicodedata.category(char)[0] not in 'MC':  # 결합 기호와 서식 문자는 폭을 더하지 않는다.
-            width += 4.5 if unicodedata.east_asian_width(char) in ('W', 'F') else 3
+            width += 4.5 if unicodedata.east_asian_width(char) in ('W', 'F') else narrow
     return width
 
 
-def _handwriting_height(key, width, *, separate_sentences=False):
+def _handwriting_height(key, width, *, separate_sentences=False, narrow=3):
     available = width - 3.6
     if available <= 0:
         return float('inf')
     parts = key.strip().splitlines()
     if separate_sentences:  # 늘이기 과다 검사에서는 문장마다 새 줄에 쓰는 경우도 허용한다.
         parts = [sentence for line in parts for sentence in re.split(r'(?<=[.!?。！？])\s+', line)]
-    lines = sum(max(1, math.ceil(_handwriting_width(part) / available)) for part in parts)
+    lines = sum(max(1, math.ceil(_handwriting_width(part, narrow) / available)) for part in parts)
     return lines * _HANDWRITING_LINE_MM + 2
 
 
@@ -237,7 +237,8 @@ def _audit_grow(teacher_report, student_report, problems):
         if not key.strip():
             continue
         height = box['height_mm']
-        required = _handwriting_height(key, box.get('width_mm', 0), separate_sentences=True)
+        # 칸이 크다는 경고는 넉넉한 쪽으로 어림한다: 모든 글자를 4.5mm로 보고 문장마다 새 줄에 써도 된다.
+        required = _handwriting_height(key, box.get('width_mm', 0), separate_sentences=True, narrow=4.5)
         # 한 줄의 여유를 더 허용해 식을 여러 줄에 나눠 쓰는 답까지 과하게 잡지 않는다.
         if height > 3 * required + _HANDWRITING_LINE_MM:
             _problem(problems, 'warning', 'grow-excess', _page_for(student_report, item), item,

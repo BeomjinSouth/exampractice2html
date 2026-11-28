@@ -500,6 +500,20 @@ class CheckIntegrationTest(unittest.TestCase):
         self.assertEqual([(p['level'], p['page'], p['item']) for p in warnings], [('warning', 1, 'q1')])
         self.assertIn('1번 답 칸', warnings[0]['msg'])
 
+    def test_grow_excess_estimates_generously_but_overflow_narrowly(self):
+        # 숫자 17자: 좁게(3mm) 보면 한 줄, 넉넉하게(4.5mm) 보면 두 줄이다.
+        key, width = 'x=2000+3000+40000', 60
+        self.assertEqual(sheet_check._handwriting_height(key, width), 10)
+        self.assertEqual(sheet_check._handwriting_height(key, width, narrow=4.5), 18)
+        teacher = {'boxes': [{'kind': 'text', 'item': 'q1', 'index': 0, 'key_text': key}]}
+        for height, warned in ((50, False), (70, True)):
+            with self.subTest(height=height):
+                student = {'boxes': [{'kind': 'text', 'item': 'q1', 'index': 0, 'grow': True,
+                                      'height_mm': height, 'width_mm': width}], 'pages': []}
+                problems = []
+                sheet_check._audit_grow(teacher, student, problems)
+                self.assertEqual([p['code'] for p in problems], ['grow-excess'] if warned else [])
+
     def test_answer_in_student_source(self):
         answer = '두 대각선은 서로 수직으로 만나기 때문입니다.'
         broken = self.student_text.replace('</body>', '<p>' + answer + '</p></body>')

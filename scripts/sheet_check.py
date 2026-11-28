@@ -1,6 +1,7 @@
 """활동지의 인쇄 결과와 전달 관문을 검사한다."""
 
 import base64
+from collections import Counter
 import contextlib
 from datetime import datetime, timezone
 import hashlib
@@ -131,7 +132,8 @@ def _find_files(folder):
 
 _URL = re.compile(r"url\(\s*[\"\x27]?\s*https?://", re.I)
 _REMOTE = re.compile(r"^\s*https?://", re.I)
-_MARKERS = {"ws-key", "ws-teacher-only", "ws-key-choice"}
+_MARKERS = {"ws-key", "ws-teacher-only", "ws-key-choice", "ws-fig-answer"}
+_BOX_GEOMETRY = {"path": ("d",), "text": ("x", "y")}
 
 
 class _SourceAudit(HTMLParser):
@@ -141,10 +143,25 @@ class _SourceAudit(HTMLParser):
         self.markers = set()
         self.remotes = []
         self.in_style = False
+        self.in_box = False
+        self.box_geometry = Counter()
+        self.images = Counter()
+        self.overlays = set()
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        self.markers.update(_MARKERS.intersection((attrs.get("class") or "").split()))
+        classes = (attrs.get("class") or "").split()
+        self.markers.update(_MARKERS.intersection(classes))
+        if tag == "img" and (src := attrs.get("src")):
+            self.images[src] += 1
+            if "ws-fig-answer" in classes:
+                self.overlays.add(src)
+        if tag == "svg":
+            self.in_box = attrs.get("data-chart") == "box"
+        if self.in_box:
+            for name in _BOX_GEOMETRY.get(tag, ()):
+                if attrs.get(name):
+                    self.box_geometry[tag, name, re.sub(r"\s+", "", attrs[name])] += 1
         for private in ("data-src", "data-check"):
             if private in attrs:
                 self.markers.add(private)
@@ -166,6 +183,8 @@ class _SourceAudit(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "style":
             self.in_style = False
+        elif tag == "svg":
+            self.in_box = False
 
     def handle_data(self, data):
         if self.in_style and _URL.search(data):
@@ -266,8 +285,8 @@ def _audit_fill(report, problems):
 
 
 def _audit_source(teacher_text, student_text, keys, problems, teacher_public=""):
-    for role, text in (("교사용", teacher_text), ("학생용", student_text)):
-        parser = _SourceAudit()
+    teacher, student = _SourceAudit(), _SourceAudit()
+    for role, text, parser in (("교사용", teacher_text, teacher), ("학생용", student_text, student)):
         parser.feed(text)
         if role == "학생용":
             for marker in sorted(parser.markers):
@@ -277,15 +296,28 @@ def _audit_source(teacher_text, student_text, keys, problems, teacher_public="")
             _problem(problems, "error", "external-url", None, None,
                      f"{role}에 외부 URL이 있습니다 ({', '.join(sorted(set(parser.remotes)))}).",
                      "외부 자원을 파일에 내장하거나 로컬 자원으로 바꾸세요.")
-    # 공백·HTML 엔티티 차이는 비교에서 무시하되 원문 전체를 검사한다.
-    # 엔진 코드(script·style)는 빼고 본다. 정답 낱말이 문제 본문에도 원래 있으면(예: 선택지 이름)
-    # 교사용의 '정답을 뺀 글'에 나오는 횟수보다 학생용에 더 많이 나올 때만 유출로 본다.
+    public_source = _SourceAudit()
+    if teacher.overlays or teacher.box_geometry:
+        from sheet_build import strip_teacher
+        try:
+            public_source.feed(strip_teacher(teacher_text))
+        except ValueError:
+            pass  # 교사용 공개 원문을 구할 수 없으면 어떤 좌표도 비교에서 빼지 않는다.
+    if any(student.images[src] > public_source.images[src] for src in teacher.overlays):
+        _problem(problems, "error", "answer-leak", None, None, "교사용 SVG 정답층이 학생용 원문에 있습니다.",
+                 "교사용에서 학생용을 다시 내보내세요.")
+    # 공개 눈금의 좌표가 우연히 '11.5' 같은 정답을 포함할 수 있다.
+    # 양쪽 공개 원문에 실제로 있는 동일 좌표만 뺀다. 새 좌표와 글자·대체 설명은 그대로 검사한다.
+    shared_geometry = student.box_geometry & public_source.box_geometry
     body = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", "", student_text, flags=re.S | re.I)
     compact = re.sub(r"\s+", "", html.unescape(body))
     public = re.sub(r"\s+", "", teacher_public or "")
     for key in sorted(set(keys)):
         clean = re.sub(r"\s+", "", key)
-        if len(clean) >= 4 and compact.count(clean) > public.count(clean):
+        if len(clean) < 4:
+            continue
+        geometry_hits = sum(value.count(clean) * count for (_, _, value), count in shared_geometry.items())
+        if compact.count(clean) > public.count(clean) + geometry_hits:
             _problem(problems, "error", "answer-leak", None, None,
                      f"교사용 정답 문자열({clean[:20]})이 학생용 원문에 있습니다.",
                      "학생용을 다시 만들고 정답 유출 위치를 확인하세요.")

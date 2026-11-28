@@ -13,7 +13,9 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
-from sheet_common import KINDS, PLACEHOLDER, RASTER_MIMES, ROOT, SOURCE, image_path, youtube_id
+from sheet_common import (KINDS, LABEL_MM, PICTURE_CELL_PADDING_MM, PLACEHOLDER, RASTER_MIMES, ROOT, SOURCE,
+                          SPLIT_RATIOS, box_five, box_tick_values, content_width_mm, figure_width_mm, image_path,
+                          situation_cell_mm, split_widths_mm, youtube_id)
 from sheet_answer import UNITS, norm, num, plain
 
 
@@ -360,6 +362,101 @@ def checked_svg(source):
     return source
 
 
+def svg_tag(element):
+    return element.tag.rsplit('}', 1)[-1]
+
+
+def svg_alt(root):
+    label = root.get('aria-label', '').strip()
+    if label:
+        return label
+    return next((' '.join(''.join(node.itertext()).split()) for node in root
+                 if svg_tag(node) == 'title' and ''.join(node.itertext()).strip()), '')
+
+
+def svg_viewbox(root):
+    raw = root.get('viewBox', '').strip()
+    if not raw:
+        return None
+    try:
+        box = tuple(map(float, re.split(r'[\s,]+', raw)))
+    except ValueError:
+        return None
+    return box if len(box) == 4 and all(map(math.isfinite, box)) and min(box[2:]) > 0 else None
+
+
+SVG_LENGTH = re.compile(r'([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(px|pt|pc|mm|cm|in|q|em|rem|%)?', re.I)
+SVG_PX = {'px': 1, 'pt': 96 / 72, 'pc': 16, 'mm': 96 / 25.4, 'cm': 96 / 2.54,
+          'in': 96, 'q': 96 / 101.6, 'rem': 16}
+
+
+def svg_property(node, name):
+    # Inline declarations override presentation attributes; the last declaration of equal priority wins.
+    value, important = node.get(name, ''), False
+    for declaration in node.get('style', '').split(';'):
+        key, _, style_value = declaration.partition(':')
+        if key.strip().lower() != name:
+            continue
+        style_value, n = re.subn(r'\s*!\s*important\s*$', '', style_value, flags=re.I)
+        if style_value.strip() and (n or not important):
+            value, important = style_value, bool(n)
+    return value.strip()
+
+
+def svg_length(value, parent=None, rem=16):
+    match = SVG_LENGTH.fullmatch(value)
+    if not match:
+        return None
+    amount, unit = float(match[1]), (match[2] or 'px').lower()
+    if unit in ('em', '%'):
+        if parent is None:
+            return None
+        amount *= parent if unit == 'em' else parent / 100
+    else:
+        amount *= rem if unit == 'rem' else SVG_PX[unit]
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
+def svg_mm_per_unit(root, width_mm):
+    """Estimate horizontal and vertical print scale of an auto-height SVG image."""
+    box = svg_viewbox(root)
+    width = svg_length(svg_property(root, 'width'))
+    height = svg_length(svg_property(root, 'height'))
+    if not box:
+        # Without a viewBox, changing the image viewport does not scale SVG user units.
+        return 25.4 / 96, 25.4 / 96
+    sx = width_mm / box[2]
+    if not width or not height:
+        return sx, sx
+    sy = (width_mm / width) * (height / box[3])
+    align = root.get('preserveAspectRatio', '').split()
+    if 'none' in align:
+        return sx, sy
+    scale = max(sx, sy) if 'slice' in align else min(sx, sy)
+    return scale, scale
+
+
+def svg_smallest_label(root, width_mm, *, viewport=None):
+    scale_y = svg_mm_per_unit(root if viewport is None else viewport, width_mm)[1]
+    smallest = None
+    root_size = svg_length(svg_property(root, 'font-size'), 16)
+    stack = [(root, 16, False)]
+    while stack:
+        node, inherited, in_text = stack.pop()
+        tag = svg_tag(node)
+        size = svg_length(svg_property(node, 'font-size'), inherited, 16 if root_size is None else root_size)
+        size = inherited if size is None else size
+        in_text = in_text or tag == 'text'
+        if in_text and ((node.text or '').strip() or any((child.tail or '').strip() for child in node)):
+            smallest = size if smallest is None else min(smallest, size)
+        stack.extend((child, size, in_text) for child in node)
+    return None if smallest is None else smallest * scale_y * 72 / 25.4
+
+
+def answer_svg_source(answer):
+    return answer.get('svg') if isinstance(answer, dict) else answer
+
+
 # Keep a decimal point inside a sentence even when math and prose touch.
 SENTENCE_BREAK = re.compile(r'[!?。！？\n]|\.(?!\d)')
 QUADRATIC_MATH = re.compile(r'<msup><mi>x</mi><mn>2</mn></msup>')
@@ -406,8 +503,8 @@ def item_blocks(blocks, path):
 def screen_drawing_tools(blocks):
     for block, _ in blocks:
         kind = block.get('type')
-        if (kind in ('figure', 'grid', 'numberline') and block.get('pen') is True and
-                not block.get('teacher_only')):
+        if (block.get('pen') is True and not block.get('teacher_only') and
+                (kind in ('figure', 'grid', 'numberline') or kind == 'chart' and block.get('kind') == 'box')):
             yield 'pen'
         if kind == 'answer' and isinstance(block.get('rows'), list) and any(
                 isinstance(row, dict) and row.get('kind') == 'draw' for row in block['rows']):
@@ -618,15 +715,16 @@ class Validator:
             for i, row in enumerate(values):
                 self.texts(row, f'{path}[{i}]', minimum=columns or 1, maximum=columns, **kwargs)
 
-    def figure(self, value, path, *, outer=False, caption_required=False, private=False, field=''):
-        keys = ('src', 'svg', 'width_mm', 'alt', 'caption', 'teacher_only') + (('type', 'pen') if outer else ())
+    def figure(self, value, path, *, outer=False, caption_required=False, private=False, field='', placement='body'):
+        keys = ('src', 'svg', 'width_mm', 'alt', 'caption', 'teacher_only') + (('type', 'pen', 'answer') if outer else ())
         if not self.object(value, path, keys):
             return
-        self.positive(value.get('width_mm'), path + '.width_mm')
+        width_ok = self.positive(value.get('width_mm'), path + '.width_mm')
         self.bools(value, path, 'teacher_only', 'pen')
         private = private or value.get('teacher_only') is True
         if ('src' in value) == ('svg' in value):
             self.error(path, '그림의 출처가 하나여야 합니다.', 'src 또는 svg 중 하나만 쓰세요.')
+        root, local_svg = None, False
         for key in ('src', 'svg'):
             if key not in value:
                 continue
@@ -637,25 +735,91 @@ class Validator:
                 continue
             try:
                 if key == 'svg':
-                    checked_svg(raw)
+                    root = ET.fromstring(checked_svg(raw))
                 else:
                     file = image_path(self.folder, raw)
                     ext = file.suffix.lower()
-                    if ext not in RASTER_MIMES and ext != '.svg':
+                    local_svg = ext == '.svg'
+                    if ext not in RASTER_MIMES and not local_svg:
                         raise ValueError('PNG, JPEG, WebP, GIF, BMP 또는 SVG 파일을 쓰세요.')
                     if not file.is_file():
                         raise ValueError('그림 파일이 없습니다. 그림/ 아래의 파일 이름을 확인하세요.')
-                    if ext == '.svg':
-                        checked_svg(file.read_text(encoding='utf-8-sig'))
+                    if local_svg:
+                        root = ET.fromstring(checked_svg(file.read_text(encoding='utf-8-sig')))
             except (ValueError, OSError, RuntimeError) as error:
                 message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else '그림 파일을 읽지 못했습니다.'
                 self.error(where, message, '활동지 폴더 안의 읽을 수 있는 그림을 지정하세요.')
-        if 'alt' in value or 'src' in value:
+        if 'alt' in value or ('src' in value and not local_svg):
             parsed = self.text(value.get('alt'), path + '.alt', private=True, term_visible=not private, field=field + 'alt')
             if parsed and parsed.blanks:
                 self.error(path + '.alt', '대체 설명에는 빈칸을 그릴 수 없습니다.', '정답이 없는 일반 설명으로 바꾸세요.')
+        elif root is not None and not private and placement != 'decoration' and not svg_alt(root):
+            self.warn(path + '.alt', '학생용 SVG에 대체 설명이 없습니다.',
+                      'alt, SVG의 aria-label 또는 <title>에 정답이 없는 설명을 쓰세요.', 'figure-alt-missing')
         if 'caption' in value or caption_required:
             self.text(value.get('caption'), path + '.caption', private=private, field=field + 'caption')
+        overlay = self.figure_answer(value, root, path) if outer and 'answer' in value else None
+        if root is None or not width_ok:
+            return
+        available = self.content_mm
+        if placement == 'pair':
+            available = available / 2 - PICTURE_CELL_PADDING_MM
+        elif placement == 'situation':
+            available = situation_cell_mm(available, value['width_mm']) - PICTURE_CELL_PADDING_MM
+        elif placement == 'draw':
+            available -= LABEL_MM.get(self.kind if self.kind in KINDS else '수업') + PICTURE_CELL_PADDING_MM
+        elif placement == 'decoration':
+            available = min(30, available * .3)
+        width = figure_width_mm(value, available)
+        self.figure_labels(root, width, path + ('.svg' if 'svg' in value else '.src'))
+        if overlay is not None:
+            self.figure_labels(overlay, width, path + '.answer', viewport=root)
+        if outer or placement == 'draw':
+            scale = svg_mm_per_unit(root, width)[0]
+            if math.isfinite(scale) and scale > 0:
+                self.figure_scales.append((private, path, scale))
+
+    def figure_answer(self, value, base, path):
+        answer = value['answer']
+        where = path + '.answer'
+        if 'src' in value:
+            self.error(where, '파일 그림에는 정답층을 얹을 수 없습니다.', '밑그림을 svg 문자열로 쓰세요.')
+            return None
+        if isinstance(answer, dict) and not self.object(answer, where, ('svg',)):
+            return None
+        source = answer_svg_source(answer)
+        try:
+            if not isinstance(source, str) or not source.strip() or PLACEHOLDER in source:
+                raise ValueError('정답층을 SVG 문자열 또는 {"svg": "…"}로 쓰세요.')
+            root = ET.fromstring(checked_svg(source))
+        except ValueError as error:
+            self.error(where, str(error), '밑그림과 같은 viewBox를 쓰는 SVG로 바꾸세요.')
+            return None
+        box = svg_viewbox(root)
+        if base is None or box is None or svg_viewbox(base) != box:
+            self.error(where, '밑그림과 정답층의 viewBox가 다르거나 없습니다.', '두 SVG에 같은 viewBox를 쓰세요.')
+            return None
+        return root
+
+    def figure_labels(self, root, width_mm, path, *, viewport=None):
+        size = svg_smallest_label(root, width_mm, viewport=viewport)
+        if size is not None and size < 6:
+            self.warn(path, f'이 폭에서 SVG 글자 크기가 최소 {size:.2f}pt입니다.',
+                      '그림을 넓히거나 SVG의 font-size를 조정해 인쇄 크기를 6pt 이상으로 맞추세요.', 'figure-label-small')
+
+    def check_figure_scales(self):
+        public = [i for i, (private, _, _) in enumerate(self.figure_scales) if not private]
+        if not public:
+            return
+        for i, (private, path, scale) in enumerate(self.figure_scales):
+            if not private:
+                continue
+            # Use the nearest student figure in this item; prefer the preceding one on a tie.
+            ref = min(public, key=lambda j: (abs(j - i), j))
+            _, base_path, base = self.figure_scales[ref]
+            if abs(scale - base) > base * .02 and not math.isclose(abs(scale - base), base * .02):
+                self.warn(path, f'학생 그림({base_path})은 {base:.4g}mm/단위, 정답 그림은 {scale:.4g}mm/단위입니다.',
+                          '같은 축척으로 맞추거나 figure.answer에 정답층을 넣으세요.', 'answer-scale-mismatch')
 
     def lines(self, obj, path, required=False):
         if required or 'lines' in obj:
@@ -719,7 +883,7 @@ class Validator:
             if kind == 'draw' or 'height_mm' in row:
                 self.positive(row.get('height_mm'), where + '.height_mm')
             if kind == 'draw' and isinstance(answer, dict):
-                self.figure(answer, where + '.answer', private=True)
+                self.figure(answer, where + '.answer', private=True, placement='draw')
             else:
                 self.text(answer, where + '.answer', private=True, expression_visible=True, field='rows[].answer')
 
@@ -876,11 +1040,63 @@ class Validator:
             if not relative and not float(value).is_integer():
                 self.warn(where, '도수가 정수가 아닙니다.', '자료의 개수인지 확인하고 필요하면 정수로 고치세요.', 'frequency-not-integer')
 
+    def box_chart(self, block, path):
+        allowed = {'type', 'kind', 'groups', 'x', 'x_step', 'x_label', 'width_mm', 'teacher', 'pen', 'guides'}
+        for key in set(block) - allowed:
+            if key in load_registry()['chart']['fields']:
+                self.error(f'{path}.{key}', '상자그림에는 이 필드를 쓸 수 없습니다.',
+                           '상자그림에는 groups와 공통 가로축을 쓰고, 학생이 그릴 때는 pen을 켜세요.')
+        self.bools(block, path, 'teacher', 'pen', 'guides')
+        if 'width_mm' in block and self.positive(block['width_mm'], path + '.width_mm') and block['width_mm'] < 35:
+            self.error(path + '.width_mm', '상자그림의 폭이 너무 좁습니다.', '35mm 이상으로 쓰세요.')
+        bounds = self.bounds(block.get('x'), path + '.x')
+        step = block.get('x_step')
+        if self.positive(step, path + '.x_step') and bounds:
+            try:
+                box_tick_values(bounds, step)
+            except ValueError as error:
+                self.error(path + '.x_step', str(error), '축 범위에 맞춰 눈금 간격을 바꾸세요.')
+        if 'x_label' in block:
+            label = self.text(block['x_label'], path + '.x_label', field='x_label')
+            if label and label.blanks:
+                self.error(path + '.x_label', '축 단위에는 빈칸을 넣을 수 없습니다.', '단위를 일반 글자로 쓰세요.')
+        for i, group in enumerate(self.list(block.get('groups'), path + '.groups', 1, 4) or []):
+            where = f'{path}.groups[{i}]'
+            if not self.object(group, where, ('label', 'data', 'five')):
+                continue
+            label = self.text(group.get('label'), where + '.label', field='groups[].label')
+            if label and label.blanks:
+                self.error(where + '.label', '모둠 이름에는 빈칸을 넣을 수 없습니다.', '짧은 이름을 쓰세요.')
+            if ('data' in group) == ('five' in group):
+                self.error(where, '자료와 다섯 값 중 하나만 필요합니다.', 'data 또는 five 중 하나를 쓰세요.')
+                continue
+            key = 'five' if 'five' in group else 'data'
+            values = self.list(group[key], where + '.' + key, 5 if key == 'five' else 4, 5 if key == 'five' else None)
+            if values is None:
+                continue
+            if not all(is_number(v) for v in values):
+                for j, value in enumerate(values):
+                    if not is_number(value):
+                        self.error(f'{where}.{key}[{j}]', '유한한 수가 필요합니다.', '자료 값을 숫자로 쓰세요.')
+                continue
+            if key == 'five' and any(a > b for a, b in zip(values, values[1:])):
+                self.error(where + '.five', '다섯 값의 순서가 맞지 않습니다.', '최솟값부터 최댓값까지 작은 값부터 쓰세요. 같은 값도 됩니다.')
+                continue
+            low, _, _, _, high = box_five(group)
+            if bounds and not bounds[0] <= low <= high <= bounds[1]:
+                self.error(where + '.' + key, '자료가 가로축 범위를 벗어났습니다.', 'x가 최솟값부터 최댓값까지 덮도록 넓히세요.')
+
     def chart(self, block, path):
         kind = block.get('kind')
-        if kind not in ('bar', 'line', 'histogram', 'polygon', 'scatter'):
-            self.error(path + '.kind', '그래프 종류를 알 수 없습니다.', 'bar, line, histogram, polygon, scatter 중 하나를 쓰세요.')
+        if kind == 'box':
+            self.box_chart(block, path)
             return
+        if kind not in ('bar', 'line', 'histogram', 'polygon', 'scatter'):
+            self.error(path + '.kind', '그래프 종류를 알 수 없습니다.', 'bar, line, histogram, polygon, scatter, box 중 하나를 쓰세요.')
+            return
+        for key in ('groups', 'pen', 'guides'):
+            if key in block:
+                self.error(f'{path}.{key}', '이 필드는 상자그림 전용입니다.', 'kind가 box인 블록에서만 쓰세요.')
         self.bools(block, path, 'teacher')
         for name in ('width_mm', 'height_mm', 'y_step', 'x_step'):
             if name in block:
@@ -963,7 +1179,7 @@ class Validator:
             self.texts(block.get('lines'), path + '.lines', field='lines[]', local=kind == 'situation')
             text('note', False, local=True)
             if 'figure' in block:
-                self.figure(block['figure'], path + '.figure')
+                self.figure(block['figure'], path + '.figure', placement='situation')
         elif kind == 'nameband':
             text('label')
         elif kind in ('question', 'ask', 'text'):
@@ -1019,7 +1235,7 @@ class Validator:
         elif kind == 'figures':
             figures = self.list(block.get('items'), path + '.items', 2, 2) or []
             for i, figure in enumerate(figures):
-                self.figure(figure, f'{path}.items[{i}]', caption_required=True, field='items[].')
+                self.figure(figure, f'{path}.items[{i}]', caption_required=True, field='items[].', placement='pair')
         elif kind == 'grid':
             self.grid(block, path)
             if 'plot' in block:
@@ -1033,7 +1249,7 @@ class Validator:
             if 'icon' in block and block['icon'] not in ('pencil', 'bulb', 'search', 'check', 'video', 'chart', 'puzzle', 'star', 'warn', 'book', 'calc', 'flag'):
                 self.error(path + '.icon', '지원하지 않는 아이콘입니다.', '계약의 아이콘 이름을 쓰세요.')
             if 'image' in block:
-                self.figure(block['image'], path + '.image')
+                self.figure(block['image'], path + '.image', placement='decoration')
                 if isinstance(block['image'], dict) and is_number(block['image'].get('width_mm')) and block['image']['width_mm'] > 30:
                     self.error(path + '.image.width_mm', '제목 그림이 너무 넓습니다.', '30mm 이하로 쓰세요.')
         elif kind == 'callout':
@@ -1042,15 +1258,21 @@ class Validator:
             text('title', False)
             self.texts(block.get('lines'), path + '.lines', field='lines[]')
             if 'image' in block:
-                self.figure(block['image'], path + '.image')
+                self.figure(block['image'], path + '.image', placement='decoration')
         elif kind == 'split':
             if inside_split or self.columns == 2:
                 self.error(path, '2단 안에 split을 겹칠 수 없습니다.', '한 겹의 단만 쓰세요.')
-            if block.get('ratio', '1:1') not in ('1:1', '2:1', '1:2', '3:2', '2:3'):
+            ratio = block.get('ratio', '1:1')
+            if ratio not in SPLIT_RATIOS:
                 self.error(path + '.ratio', '지원하지 않는 비율입니다.', '1:1, 2:1, 1:2, 3:2, 2:3 중 하나를 쓰세요.')
-            for side in ('left', 'right'):
+                ratio = '1:1'
+            original_width = self.content_mm
+            widths = split_widths_mm(original_width, ratio) if not inside_split else (original_width, original_width)
+            for side, width in zip(('left', 'right'), widths):
+                self.content_mm = width
                 for i, child in enumerate(self.list(block.get(side), path + '.' + side) or []):
                     self.block(child, f'{path}.{side}[{i}]', item_id, pending_marks, True)
+            self.content_mm = original_width
         elif kind == 'ox':
             for i, entry in enumerate(self.list(block.get('items'), path + '.items', 1, 10) or []):
                 where = f'{path}.items[{i}]'
@@ -1376,6 +1598,7 @@ class Validator:
         self.kind = meta.get('kind', '수업') if isinstance(meta, dict) else '수업'
         self.grade = grade_level(meta.get('grade')) if isinstance(meta, dict) else None
         self.columns = meta.get('columns', 1) if isinstance(meta, dict) else 1
+        self.content_mm = content_width_mm(self.columns)
         settings = meta if isinstance(meta, dict) else {}
         self.interactive = settings.get('interactive', self.kind in ('수업', '연습')) is True
         self.public_solution = self.interactive and settings.get('reveal', '시도 후') in ('시도 후', '바로')
@@ -1412,9 +1635,11 @@ class Validator:
                 self.texts(item['hints'], path + '.hints', minimum=1, maximum=3)
             self.local_marks = set()
             marks = []
+            self.figure_scales = []
             blocks = self.list(item.get('blocks'), path + '.blocks') or []
             for j, block in enumerate(blocks):
                 self.block(block, f'{path}.blocks[{j}]', item_id, marks)
+            self.check_figure_scales()
             if self.interactive:
                 self.check_screen_drawing(blocks, path + '.blocks')
             for where, mark in marks:

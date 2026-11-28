@@ -408,6 +408,122 @@ class BuildTest(unittest.TestCase):
         self.assertTrue(all('font-family:Cambria Math' in label.get('style') for label in labels))
         self.assertIn('𝑙', font_chars({}))
 
+    def test_figure_overlay_is_red_private_and_does_not_change_student_edition(self):
+        from xml.etree import ElementTree as ET
+        figure = {'type': 'figure', 'width_mm': 166, 'pen': True,
+                  'svg': '<svg viewBox="0 0 166 40" width="166" height="50" preserveAspectRatio="xMinYMid">'
+                         '<title>밑그림의 설명</title><circle cx="20" cy="28" r="2"/></svg>'}
+        overlay = ('<svg viewBox="0,0,166,40" width="40" style="height:20px">'
+                   '<g fill="none" stroke="black"><path style="stroke:blue!important;fill:none" d="M20 28H80"/></g>'
+                   '<circle cx="80" cy="28" r="2"/></svg>')
+        data = {'version': 1, 'meta': {'title': self.title, 'kind': '수업', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [figure]}]}
+        self.source.write_text(json.dumps(data), encoding='utf-8')
+        self.cli('build', self.folder)
+        baseline = self.edition(self.student)
+        figure['answer'] = {'svg': overlay}
+        self.source.write_text(json.dumps(data), encoding='utf-8')
+        self.cli('build', self.folder)
+        teacher, student = (path.read_text(encoding='utf-8') for path in (self.teacher, self.student))
+        tags = Tags(teacher).tags
+        pen = next(a for tag, a in tags if tag == 'figure')
+        self.assertEqual((pen['data-pen'], pen['data-check-kind'], pen['data-slot']), ('1', 'draw', 'q1.1'))
+        base, answer = [a for tag, a in tags if tag == 'img']
+        self.assertEqual((base['alt'], answer['alt'], answer['aria-hidden']), ('밑그림의 설명', '', 'true'))
+        self.assertEqual(answer['class'], 'ws-key ws-fig-answer')
+        self.assertEqual(base['style'], answer['style'])
+        root = ET.fromstring(base64.b64decode(answer['src'].split(',', 1)[1]))
+        self.assertEqual((root.get('width'), root.get('height'), root.get('preserveAspectRatio')), ('166', '50', 'xMinYMid'))
+        self.assertEqual(root.get('fill'), '#c00000')
+        self.assertEqual(root[0].attrib, {'fill': 'none', 'stroke': '#c00000'})
+        self.assertEqual(root[0][0].get('style'), 'stroke:#c00000!important;fill:none')
+        self.assertEqual([a for tag, a in Tags(student).tags if tag == 'img'], [base])
+        self.assertNotIn(answer['src'], student)
+        self.assertEqual(self.edition(self.student), baseline)
+        self.assertEqual(self.public_data()['slots'], {})
+        self.cli('derive', self.teacher)
+        self.assertNotIn(answer['src'], self.student.read_text(encoding='utf-8'))
+
+    def test_source_audit_distinguishes_public_box_coordinates_and_private_images(self):
+        from sheet_build import strip_teacher
+        from sheet_check import _audit_source
+        uri = 'data:image/svg+xml;base64,PHN2Zy8+'
+        teacher = ('<html data-sheet="1" data-role="teacher"><div id="sheet-src">'
+                   '<figure class="ws-chart"><svg data-chart="box"><path d="M111.597 1V15"/>'
+                   '<g class="ws-key"><path d="M11.5 8H16"/></g></svg></figure>'
+                   f'<img class="ws-key ws-fig-answer" src="{uri}"></div></html>')
+        student = strip_teacher(teacher)
+        problems = []
+        _audit_source(teacher, student, ['11.5'], problems)
+        self.assertEqual(problems, [])
+        for extra in ('<p>11.5</p>', '<p aria-label="11.5"></p>', f'<img src="{uri}">'):
+            with self.subTest(extra=extra):
+                problems = []
+                _audit_source(teacher, student.replace('</div>', extra + '</div>'), ['11.5'], problems)
+                self.assertEqual([issue['code'] for issue in problems], ['answer-leak'])
+        problems = []
+        _audit_source(teacher, student.replace('</svg>', '<path d="M11.5 8H16"/></svg>'), ['11.5'], problems)
+        self.assertEqual([issue['code'] for issue in problems], ['answer-leak'])
+
+    def test_svg_alt_priority_and_local_svg_fallback(self):
+        from sheet_build import Renderer
+        renderer = Renderer({'meta': {'title': self.title}}, self.folder, [])
+        aria = '<svg aria-label="읽어 줄 &amp; 설명"><title>제목</title></svg>'
+        title = '<svg xmlns="http://www.w3.org/2000/svg"><title>다른\n제목</title></svg>'
+        (self.folder / '그림/제목.svg').write_text(title, encoding='utf-8')
+        for picture, expected in [({'svg': aria}, '읽어 줄 & 설명'), ({'svg': title}, '다른 제목'),
+                                  ({'svg': aria, 'alt': '직접 쓴 설명'}, '직접 쓴 설명'),
+                                  ({'src': '그림/제목.svg'}, '다른 제목')]:
+            tags = Tags(renderer.image({**picture, 'width_mm': 20}, 40)).tags
+            self.assertEqual(tags[0][1]['alt'], expected)
+
+    def test_box_chart_has_common_axis_and_private_marks_only(self):
+        import re
+        from xml.etree import ElementTree as ET
+        from sheet_build import Renderer
+        chart = {'type': 'chart', 'kind': 'box', 'x': [0, 10], 'x_step': 2, 'x_label': '(분)',
+                 'width_mm': 130, 'groups': [{'label': '가', 'data': [8, 2, 4, 6, 10]},
+                                             {'label': '나', 'five': [5, 5, 5, 5, 5]}],
+                 'teacher': True, 'pen': True, 'guides': True}
+        data = {'version': 1, 'meta': {'title': self.title, 'reveal': '바로', 'sync': False},
+                'items': [{'id': 'q1', 'blocks': [chart]}]}
+        figure = ET.fromstring(Renderer(data, self.folder, []).chart(chart))
+        svg = figure.find('svg')
+        self.assertEqual((figure.get('class'), figure.get('data-pen'), figure.get('data-check-kind')),
+                         ('ws-fig ws-chart', '1', 'draw'))
+        ticks = [t for t in svg.findall('text') if t.text.isdecimal()]
+        self.assertEqual([t.text for t in ticks], ['0', '2', '4', '6', '8', '10'])
+        self.assertTrue(all(float(t.get('font-size')) * 72 / 25.4 >= 6 for t in ticks))
+        self.assertEqual(svg.find("path[@class='ws-chart-guides']").get('d').count('V'), len(ticks))
+        key = svg.find("g[@class='ws-key']")
+        self.assertEqual(len(key), 2)
+        self.assertEqual(key.get('stroke'), 'currentColor')
+        axis = {int(t.text): float(t.get('x')) for t in ticks}
+        expected = [axis[2], (axis[2] + axis[4]) / 2, (axis[8] + axis[10]) / 2, axis[10]]
+        segment = re.match(r'M([\d.]+) 8H([\d.]+)M([\d.]+) 8H([\d.]+)', key[0].get('d'))
+        for x, result in zip(map(float, segment.groups()), expected):
+            self.assertAlmostEqual(x, result)
+        self.assertTrue(key[0].get('d').endswith(f'M{axis[6]:.12g} 4.2V11.8'))
+        self.assertNotIn('Z', key[1].get('d'), '상자의 길이가 0이면 중앙값 선이 남는다')
+        single = ET.fromstring(Renderer(data, self.folder, []).chart({**chart, 'groups': chart['groups'][:1]})).find('svg')
+        self.assertEqual((svg.get('height'), single.get('height')), ('44.5mm', '30.5mm'))
+        self.source.write_text(json.dumps(data), encoding='utf-8')
+        self.cli('build', self.folder)
+        student = self.student.read_text(encoding='utf-8')
+        self.assertNotIn(key[0].get('d'), student)
+        self.assertNotIn(key[1].get('d'), student)
+        self.assertEqual(self.public_data()['slots'], {})
+        before = self.edition(self.student)
+        chart['groups'][1]['five'] = [4] * 5
+        self.source.write_text(json.dumps(data), encoding='utf-8')
+        self.cli('build', self.folder)
+        self.assertEqual(self.edition(self.student), before)
+        chart['teacher'] = False
+        self.source.write_text(json.dumps(data), encoding='utf-8')
+        self.cli('build', self.folder)
+        self.assertIn(key[0].get('d'), self.student.read_text(encoding='utf-8'))
+        self.assertNotEqual(self.edition(self.student), before)
+
     def test_chart_kinds_and_histogram_bin_widths(self):
         charts = [
             {'type': 'chart', 'kind': 'line', 'labels': ['가', '나'], 'values': [1, 2]},
